@@ -8,8 +8,8 @@
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.1/JJ%20Music-0.1.1-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.1/JJ%20Music-0.1.1-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.1/JJ-Music-0.1.1-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.1/JJ-Music-0.1.1-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
 - [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.1/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。更新前请先退出旧版；安装版和免安装版默认共用当前用户的配置。

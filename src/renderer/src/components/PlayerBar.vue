@@ -1,0 +1,28 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import { toMediaUrl } from '@shared/media-url'
+import { isLocalTrack } from '@shared/types'
+import { usePlayerStore } from '../stores/player'
+import { useLibraryStore } from '../stores/library'
+import { useUiStore } from '../stores/ui'
+import { playbackActions, trackActions } from '../utils/track-actions'
+import { formatTime } from '../utils/format'
+import AppIcon from './AppIcon.vue'
+import SliderBar from './SliderBar.vue'
+const emit = defineEmits<{ openNowPlaying: [] }>()
+const player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
+const cover = computed(() => { const t = player.currentTrack; return !t ? null : isLocalTrack(t) ? t.coverPath ? toMediaUrl(t.coverPath) : null : t.picUrl })
+const favorite = computed(() => library.favorites.some(track => track.id === player.currentTrack?.id))
+const lyric = computed(() => player.lyrics?.lines[player.activeLyricIndex]?.text)
+const spec = computed(() => { const t = player.currentTrack; return t && isLocalTrack(t) && t.sampleRate ? `${t.sampleRate / 1000} kHz` : t && !isLocalTrack(t) ? t.source.toUpperCase() : '—' })
+</script>
+<template><footer class="playbar">
+  <div class="mini-progress"><SliderBar :value="player.progress" aria-label="播放进度" @update:value="player.seekRatio"/></div>
+  <button class="mini-track" @click="emit('openNowPlaying')" @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"><div class="mini-art"><img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer"/><AppIcon v-else name="music" :size="24"/></div><span class="mini-meta"><strong>{{ player.currentTrack?.name || '未载入歌曲' }}</strong><small>{{ player.currentTrack?.singer || '选择一首歌曲，开始聆听' }}</small></span></button>
+  <button class="icon-btn mini-heart" :class="{ liked: favorite }" :disabled="!player.currentTrack" aria-label="喜爱" @click="player.currentTrack && library.toggleFavorite(player.currentTrack)"><AppIcon name="heart" :size="18"/></button>
+  <div class="mini-center"><div class="mini-buttons"><button class="icon-btn" aria-label="上一首" @click="player.previous()"><AppIcon name="previous" :size="21"/></button><button class="mini-play" :aria-label="player.playing ? '暂停' : '播放'" @click="player.toggle()"><span v-if="player.loading || player.waiting" class="spinner"/><AppIcon v-else :name="player.playing ? 'pause' : 'play'" :size="23"/></button><button class="icon-btn" aria-label="下一首" @click="player.next()"><AppIcon name="skip" :size="21"/></button></div><button class="mini-lyric" @click="emit('openNowPlaying')">{{ player.error || lyric || (player.currentTrack ? `${formatTime(player.currentTime)} / ${formatTime(player.duration)}` : 'JJ Music') }}</button></div>
+  <div class="mini-right"><button class="icon-btn" title="播放队列" aria-label="播放队列" @click="$router.push('/queue')"><AppIcon name="list" :size="19"/></button><button class="icon-btn" title="更多" aria-label="播放更多选项" @click="ui.openMenu($event, playbackActions())"><AppIcon name="more" :size="19"/></button><div class="output-spec"><AppIcon name="audio" :size="17"/><small>{{ spec }}</small></div><div class="mini-volume" @wheel.prevent="player.setVolume(player.volume + ($event.deltaY < 0 ? .03 : -.03))"><button class="icon-btn" aria-label="静音" @click="player.toggleMute()"><AppIcon :name="player.muted ? 'mute' : 'volume'" :size="18"/></button><div class="volume-slider"><SliderBar :value="player.muted ? 0 : player.volume" aria-label="音量" @update:value="player.setVolume"/></div><small>{{ player.muted ? 0 : Math.round(player.volume * 100) }}</small></div></div>
+</footer></template>
+<style scoped>
+.playbar{position:relative;display:flex;align-items:center;gap:15px;height:var(--playbar-height);flex:none;background:var(--bg-elevated);padding:10px 24px;border-top:1px solid var(--divider)}.mini-progress{position:absolute;top:-9px;left:0;right:0;opacity:0;transition:opacity .2s}.playbar:hover .mini-progress,.mini-progress:focus-within{opacity:1}.mini-track{display:flex;align-items:center;gap:14px;width:260px;min-width:0;text-align:left;background:none;border:0;color:var(--text-primary);padding:0;cursor:pointer;font:inherit}.mini-art{width:49px;height:49px;flex:none;border-radius:6px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden}.mini-art img{width:100%;height:100%;object-fit:cover}.mini-meta{display:flex;flex-direction:column;gap:7px;overflow:hidden}.mini-meta strong{font-weight:500;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mini-meta small{font-size:11px;color:var(--text-secondary)}.mini-center{flex:1;min-width:100px;display:flex;align-items:center;justify-content:center;gap:25px}.mini-buttons{display:flex;align-items:center;gap:15px}.mini-play{width:40px;height:40px;border:0;border-radius:50%;background:var(--text-primary);color:var(--bg-base);display:grid;place-items:center;cursor:pointer}.mini-lyric{max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:none;border:0;color:var(--text-secondary);font:inherit;font-size:12px;cursor:pointer}.mini-right{display:flex;align-items:center;gap:10px}.output-spec{display:flex;align-items:center;flex-direction:column;gap:4px;min-width:55px;color:var(--text-secondary)}.output-spec small{font-size:9px}.mini-volume{display:flex;align-items:center;gap:5px}.mini-volume small{width:20px;font-size:11px;color:var(--text-secondary)}.volume-slider{width:65px}.liked{color:#ee8c9a}@media(max-width:1150px){.mini-lyric{display:none}.mini-track{width:220px}.mini-center{gap:10px}.volume-slider{width:48px}}
+</style>

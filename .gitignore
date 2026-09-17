@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+release/
+
+# Local caches, kept inside the workspace so sandboxed installs work
+.cache/
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# The generated app icon IS committed: electron-builder reads build/icon.ico at
+# package time, and regenerating it on every clone would be wasted work. It is
+# reproducible with `npm run icon`.
+
+# The reference application. It is a proprietary, compiled binary that happens
+# to live in this workspace; it is not part of the project and must never be
+# committed or redistributed.
+Salt Player for Windows/
+
+# Research artifacts downloaded while reverse-engineering the 音源 protocol.
+# Third-party source scripts are not ours to redistribute.
+docs/research/samples/
+docs/research/_research/
+docs/research/salt-player-evidence/
+
+# Local probe output
+docs/research/screenshots/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

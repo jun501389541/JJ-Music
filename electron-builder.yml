@@ -1,0 +1,66 @@
+# electron-builder configuration for Windows.
+#
+# Two output shapes are produced:
+#   `npm run pack`  → release/win-unpacked/JJ Music.exe  (portable, no install)
+#   `npm run dist`  → release/JJ Music-<version>-x64.exe (NSIS installer)
+#
+# ## Why `asarUnpack` is required
+#
+# The 音源 engine starts each source in a forked child process. Electron can read
+# files from inside `app.asar` transparently for the *main* process, but
+# `child_process.fork()` cannot execute a script that lives in an archive — it
+# needs a real path on disk.
+#
+# Without the unpack rule below, the packaged app launches normally and then
+# silently shows "0 online platforms": every `fork()` fails, the sources never
+# start, and nothing surfaces an error. That failure was observed and is the
+# reason this rule exists. Do not remove it without re-testing the packaged
+# build's source list.
+
+appId: com.jjmusic.desktop
+productName: JJ Music
+copyright: Copyright © 2026 JJ Music contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/main/**/*
+  - out/preload/**/*
+  - out/renderer/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/*.ts'
+  # Test bundles live under out/test and are never part of the shipped app.
+  # Shipping them would add weight and expose test scaffolding.
+  - '!out/test/**/*'
+
+# `music-metadata` and `iconv-lite` are pure JavaScript, so no native rebuild
+# step is required and the packaged app stays portable across machines.
+asar: true
+
+# Keep the forked host script outside the archive so `fork()` can load it.
+asarUnpack:
+  - out/main/source-host.js
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: ${productName}-${version}-Portable-${arch}.${ext}
+
+nsis:
+  artifactName: ${productName}-${version}-Setup-${arch}.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: JJ Music
+  # The app writes its library index and settings to %APPDATA%\jj-music, so
+  # uninstalling should not silently discard a user's scanned library.
+  deleteAppDataOnUninstall: false

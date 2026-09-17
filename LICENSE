@@ -1,0 +1,43 @@
+MIT License
+
+Copyright (c) 2026 JJ Music contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Third-party notices
+
+**LX Music** (https://github.com/lyswhut/lx-music-desktop)
+The custom-source ("音源") plugin protocol implemented by this project is
+specified by LX Music. This project is an independent, clean-room
+implementation of that published interface: no LX Music source code is copied
+or included. LX Music's application code is licensed Apache-2.0 with an
+additional non-commercial agreement, and its documentation is MIT. Users
+importing third-party source scripts are responsible for those scripts.
+
+**Salt Player for Windows** (椒盐音乐)
+This project's user interface takes design inspiration from Salt Player. Salt
+Player is proprietary software; no part of it is included, decompiled, or
+redistributed here. Colour values and font choices were noted as publicly
+observable design characteristics for interoperability of look and feel.
+
+**music-metadata**, **iconv-lite**, **Electron**, **Vue**, **Pinia**,
+**vue-router**, **Vite**, **electron-vite** — see `package.json`. Each is
+distributed under its own license.

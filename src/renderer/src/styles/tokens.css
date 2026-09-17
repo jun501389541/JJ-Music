@@ -1,0 +1,114 @@
+/**
+ * Design tokens.
+ *
+ * Colours are taken from Salt Player for Windows (internal codename "voxzen"),
+ * recovered from the shipped binary's compiled resources rather than guessed:
+ *   dark surfaces  #1F1E1C  #24262E  #1E262D  #1B1D26  #30302F
+ *   light surfaces #FAFAFA  #F3F5F7  #F3F2F1
+ *   accent         #4CC2FF  (the Windows 11 default accent Salt Player adopts)
+ *   scrims         #90000000  #99FFFFFF  #B9FFFFFF
+ *
+ * `--accent` is overridden at runtime from the current cover art when the user
+ * leaves the accent setting on `auto`, which is what gives the player its
+ * album-art-driven look.
+ */
+
+:root {
+  color-scheme: dark;
+  /* ---- dark theme (default) ---- */
+  --bg-base: #1b1d26;
+  --bg-elevated: #1b1d26;
+  --bg-panel: #24262e;
+  --bg-panel-alt: #1e262d;
+  --bg-hover: #2c2f3a;
+  --bg-active: #333744;
+  --bg-input: #171922;
+  --bg-scrim: #90000000;
+  --bg-glass: rgba(36, 38, 46, 0.72);
+
+  --text-primary: #f2f4f8;
+  --text-secondary: #a8b0c0;
+  --text-tertiary: #6f7789;
+  --text-inverse: #10121a;
+
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --divider: rgba(255, 255, 255, 0.05);
+
+  /* Accent is replaced at runtime by cover-art extraction when set to auto. */
+  --accent: #4cc2ff;
+  --accent-hover: #6bceff;
+  --accent-pressed: #35b4f2;
+  --accent-soft: rgba(76, 194, 255, 0.14);
+  --accent-text: #04121c;
+
+  --danger: #ff6b6b;
+  --warning: #ffb454;
+  --success: #4ade80;
+
+  /* ---- geometry ---- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  --sidebar-width: 220px;
+  --titlebar-height: 48px;
+  --playbar-height: 82px;
+  --row-height: 72px;
+
+  /* ---- typography ---- */
+  --font-ui: 'Inter', 'MiSans', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 17px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+
+  /* ---- motion ---- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* ---- elevation ---- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.48);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-base: #fafafa;
+  --bg-elevated: #ffffff;
+  --bg-panel: #f3f5f7;
+  --bg-panel-alt: #f3f2f1;
+  --bg-hover: #e9ecf1;
+  --bg-active: #dfe4ec;
+  --bg-input: #ffffff;
+  --bg-scrim: #99ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.74);
+
+  --text-primary: #16181d;
+  --text-secondary: #5a6272;
+  --text-tertiary: #8c94a4;
+  --text-inverse: #ffffff;
+
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --divider: rgba(0, 0, 0, 0.06);
+
+  --accent-soft: rgba(76, 194, 255, 0.18);
+  --accent-text: #ffffff;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.16);
+}

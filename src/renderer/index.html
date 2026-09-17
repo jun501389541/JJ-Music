@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>JJ Music</title>
+    <!--
+      The renderer loads no remote resources. Images from music APIs are
+      permitted over https, and cover art is loaded through a custom scheme or
+      remote URL; everything else is bundled.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http: jjmedia:; media-src 'self' blob: https: http: jjmedia:; font-src 'self' data:; connect-src 'self' https: http: ws:"
+    />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,172 @@
+<script setup lang="ts">
+/** Album grid built from local tags. */
+import { toMediaUrl } from '@shared/media-url'
+import TrackList from '../components/TrackList.vue'
+import { useRoute } from 'vue-router'
+import { computed, ref } from 'vue'
+import { useLibraryStore } from '../stores/library'
+import { usePlayerStore } from '../stores/player'
+import { formatAudioSpec } from '../utils/format'
+
+const library = useLibraryStore()
+const player = usePlayerStore()
+
+const route = useRoute()
+const selected = ref<string | null>(null)
+const selectedAlbum = computed(() => albums.value.find(album => `${album.name}::${album.singer}` === selected.value))
+const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
+
+const albums = computed(() => {
+  const needle = filter.value.trim().toLowerCase()
+  if (!needle) return library.albums
+  return library.albums.filter((album) =>
+    `${album.name} ${album.singer}`.toLowerCase().includes(needle)
+  )
+})
+
+function coverUrl(coverPath: string | undefined): string | null {
+  if (!coverPath) return null
+  const encoded = toMediaUrl(coverPath)
+  return encoded
+}
+
+/** Highest-quality spec present in the album, shown as a badge. */
+function albumSpec(tracks: ReturnType<typeof Object.values>[number] | never): string {
+  const list = tracks as unknown as Array<{
+    codec?: string
+    bitsPerSample?: number
+    sampleRate?: number
+    lossless?: boolean
+  }>
+  const best = [...list].sort((a, b) => (b.bitsPerSample ?? 0) - (a.bitsPerSample ?? 0))[0]
+  return best ? formatAudioSpec(best) : ''
+}
+
+async function playAlbum(index: number): Promise<void> {
+  const album = albums.value[index]
+  if (!album) return
+  await player.playQueue(album.tracks, 0)
+}
+</script>
+
+<template>
+  <div class="view">
+    <header class="view__header">
+      <div>
+        <h1 class="view__title">{{ selectedAlbum?.name || '专辑' }}</h1>
+        <p class="view__subtitle">{{ selectedAlbum ? `${selectedAlbum.singer} · ${selectedAlbum.tracks.length} 首歌曲` : `${albums.length} 张专辑` }}</p>
+      </div>
+      <button v-if="selectedAlbum" class="btn" @click="selected = null">返回专辑</button>
+      <input v-else v-model="filter" class="input" type="search" placeholder="筛选专辑…" />
+    </header>
+
+    <TrackList v-if="selectedAlbum" :tracks="selectedAlbum.tracks" @play="(_, index) => player.playQueue(selectedAlbum!.tracks, index)" />
+    <div v-else-if="albums.length === 0" class="empty">
+      <span class="empty__title">还没有专辑</span>
+      <span class="empty__hint">专辑信息来自音频文件的标签，添加本地文件夹后会自动归类。</span>
+    </div>
+
+    <div v-else class="grid-cards">
+      <button
+        v-for="(album, index) in albums"
+        :key="`${album.name}-${album.singer}`"
+        class="album"
+        type="button"
+        @dblclick="playAlbum(index)"
+        @click="selected = `${album.name}::${album.singer}`"
+      >
+        <div class="album__art">
+          <img
+            v-if="coverUrl(album.coverPath)"
+            :src="coverUrl(album.coverPath)!"
+            alt=""
+            loading="lazy"
+          />
+          <svg v-else width="34" height="34" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" />
+            <circle cx="12" cy="12" r="2.6" stroke="currentColor" stroke-width="1.4" />
+          </svg>
+          <span class="album__count tnum">{{ album.tracks.length }}</span>
+        </div>
+        <span class="album__name">{{ album.name }}</span>
+        <span class="album__artist">{{ album.singer || '未知艺术家' }}</span>
+        <span class="album__spec">{{ albumSpec(album.tracks) }}</span>
+      </button>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.album {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.album__art {
+  position: relative;
+  aspect-ratio: 1;
+  width: 100%;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-panel);
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.album:hover .album__art {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+}
+
+.album__art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.album__count {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: var(--text-xs);
+  backdrop-filter: blur(6px);
+}
+
+.album__name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.album__artist,
+.album__spec {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.album__spec {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+</style>

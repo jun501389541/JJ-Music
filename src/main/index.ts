@@ -506,8 +506,9 @@ function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): v
  */
 function relaxCorsForMedia(): void {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders }
     const contentType = ([] as string[])
-      .concat(...Object.entries(details.responseHeaders ?? {}).map(([key, value]) => (key.toLowerCase() === 'content-type' ? (value ?? []) : [])))
+      .concat(...Object.entries(headers).map(([key, value]) => (key.toLowerCase() === 'content-type' ? (value ?? []) : [])))
       .join(';')
       .toLowerCase()
 
@@ -518,18 +519,28 @@ function relaxCorsForMedia(): void {
       /\.(mp3|flac|m4a|aac|ogg|opus|wav)(\?|$)/i.test(details.url)
 
     if (!isMedia) {
-      callback({ responseHeaders: details.responseHeaders })
+      callback({ responseHeaders: headers })
       return
     }
 
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Access-Control-Allow-Origin': ['*'],
-        'Access-Control-Allow-Headers': ['*'],
-        'Access-Control-Expose-Headers': ['*']
-      }
-    })
+    /*
+     * Fill in missing CORS headers; never append to existing ones.
+     *
+     * CDN responses for online music usually carry their own
+     * `Access-Control-Allow-Origin`. Adding a second value produced
+     * `*, *`, which Chromium rejects outright — the audio element then fails
+     * with MEDIA_ERR_SRC_NOT_SUPPORTED ("不支持的音频格式或地址不可用") even
+     * though the bytes were perfectly good. So per header: if the response
+     * already has it, leave it alone; only supply one when absent.
+     */
+    const has = (name: string): boolean =>
+      Object.keys(headers).some((key) => key.toLowerCase() === name)
+
+    if (!has('access-control-allow-origin')) headers['Access-Control-Allow-Origin'] = ['*']
+    if (!has('access-control-allow-headers')) headers['Access-Control-Allow-Headers'] = ['*']
+    if (!has('access-control-expose-headers')) headers['Access-Control-Expose-Headers'] = ['*']
+
+    callback({ responseHeaders: headers })
   })
 }
 

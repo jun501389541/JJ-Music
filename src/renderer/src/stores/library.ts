@@ -15,6 +15,7 @@ import type {
   PlatformProbeResult,
   UserApiMeta
 } from '@shared/types'
+import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 import { createSettingsWriter } from '../utils/settings-writer'
 import { createLocalSearchIndex } from '../utils/local-search'
 import { useToastStore } from './toast'
@@ -237,14 +238,34 @@ export const useLibraryStore = defineStore('library', () => {
     await refreshSources()
   }
 
-  async function toggleSource(id: string, enabled: boolean): Promise<void> {
-    await window.jj.sources.toggle(id, enabled)
+  /**
+   * Enable / disable a source.
+   *
+   * Returns the main process's verdict. Enabling can be *refused* by pre-flight
+   * validation, and a refusal must reach the caller — the previous `void`
+   * signature hid it, so the UI announced a successful start for a source that
+   * was never allowed to run.
+   */
+  async function toggleSource(id: string, enabled: boolean): Promise<SourceToggleResult> {
+    const result = await window.jj.sources.toggle(id, enabled)
     await refreshSources()
+    return result
   }
 
   async function reloadSource(id: string): Promise<void> {
     await window.jj.sources.reload(id)
     await refreshSources()
+  }
+
+  /** Lift a safety quarantine. The source stays disabled until re-enabled. */
+  async function clearSourceQuarantine(id: string): Promise<void> {
+    await window.jj.sources.clearQuarantine(id)
+    await refreshSources()
+  }
+
+  /** Run pre-flight validation without changing the source's enabled state. */
+  async function validateSource(id: string): Promise<ValidationReport> {
+    return window.jj.sources.validate(id)
   }
 
   async function createPlaylist(name: string): Promise<Playlist> {
@@ -317,6 +338,8 @@ export const useLibraryStore = defineStore('library', () => {
     removeSource,
     toggleSource,
     reloadSource,
+    clearSourceQuarantine,
+    validateSource,
     createPlaylist,
     removePlaylist,
     addToPlaylist

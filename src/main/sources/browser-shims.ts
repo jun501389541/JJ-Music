@@ -25,6 +25,66 @@
  * let a script bypass `lx.request` — a capability LX never grants.
  */
 import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+
+/**
+ * CommonJS globals a source script may reach for.
+ *
+ * Built lazily and defensively: `createRequire` needs a base path, and this
+ * module is also bundled into contexts where `import.meta.url` differs, so
+ * every step is guarded. A shim that throws would be worse than a missing one.
+ *
+ * `require` resolves relative to the *host script's* directory, mirroring LX
+ * where a source's `require` resolves against the preload bundle.
+ */
+function commonJsGlobals(): Record<string, unknown> {
+  let requireFn: NodeRequire | undefined
+  try {
+    const base = typeof __filename === 'string' ? __filename : join(process.cwd(), 'source-host.js')
+    requireFn = createRequire(base)
+  } catch {
+    requireFn = undefined
+  }
+
+  // A stable fake filename for the evaluated script. Scripts that hash their
+  // own path (some do, for fingerprint checks) get something consistent rather
+  // than `undefined`.
+  let scriptDir = process.cwd()
+  let scriptFile = join(scriptDir, 'source-script.js')
+  try {
+    // In a bundled CJS context __dirname exists; in ESM it does not.
+    if (typeof __dirname === 'string') scriptDir = __dirname
+  } catch {
+    /* ESM: keep cwd */
+  }
+  scriptFile = join(scriptDir, 'source-script.js')
+
+  const moduleShim = { exports: {} as Record<string, unknown> }
+
+  return {
+    require: requireFn,
+    __filename: scriptFile,
+    __dirname: scriptDir,
+    module: moduleShim,
+    exports: moduleShim.exports,
+    // Some scripts feature-detect the bundler this way.
+    global: globalThis
+  }
+}
+
+/**
+ * Exported for diagnostics/tests: the exact set of CommonJS global names the
+ * host installs. Kept in sync with `commonJsGlobals()` by construction.
+ */
+export const COMMONJS_GLOBAL_NAMES = [
+  'require',
+  '__filename',
+  '__dirname',
+  'module',
+  'exports',
+  'global'
+] as const
 
 /** A chainable no-op, so `document.head.appendChild(x)` style calls never throw. */
 function inertElement(): Record<string, unknown> {
@@ -166,7 +226,34 @@ export function installBrowserShims(target: Record<string, unknown>): void {
         randomBytes(bytes.length).copy(bytes)
         return array
       }
-    }
+    },
+
+    // ---------------------------------------------------------------
+    // CommonJS globals.
+    //
+    // LX Music runs sources inside a hidden BrowserWindow whose preload is
+    // CommonJS, so `require`, `__filename`, `__dirname`, `module` and `exports`
+    // are all reachable from a script. Our host is bundled as ESM
+    // ("type": "module"), so `new Function(src)` — evaluated in module scope —
+    // sees *none* of them.
+    //
+    // This is not cosmetic. Obfuscated self-defending sources (the
+    // `javascript-obfuscator` self-protection family, used by several popular
+    // aggregators) probe these globals as part of their environment check and
+    // take a *hard-terminate* branch when the probe fails: they kill their own
+    // process immediately, with no exception and no output at all. The parent
+    // only observes exit code 1 and reports "音源进程退出（退出码 1）" — which
+    // is exactly the symptom for sources that work fine in LX Music.
+    //
+    // `require` is a real `createRequire`, so scripts that legitimately pull in
+    // a bundled dependency keep working, and a genuinely missing module becomes
+    // an ordinary catchable error instead of a silent process death.
+    //
+    // Known tradeoff: this hands the script the Node module loader. It already
+    // has `process` and network access, and the process boundary — not this
+    // shim — is what isolates it. Same reasoning as NETWORK_GLOBALS_POLICY.
+    // ---------------------------------------------------------------
+    ...(commonJsGlobals() as Record<string, unknown>)
   }
 
   for (const [key, value] of Object.entries(definitions)) {

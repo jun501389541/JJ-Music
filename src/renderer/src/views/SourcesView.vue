@@ -10,6 +10,7 @@
 import { useUiStore } from '../stores/ui'
 import { computed, ref } from 'vue'
 import type { UserApiMeta } from '@shared/types'
+import type { ValidationReport } from '@shared/validation'
 import { QUALITY_LABELS } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
@@ -24,6 +25,10 @@ const pasteName = ref('')
 const importing = ref(false)
 const logsFor = ref<string | null>(null)
 const logs = ref<string[]>([])
+/** Reports that caused a refusal, kept visible until the user dismisses them. */
+const blockedReports = ref<Record<string, ValidationReport>>({})
+/** True while a batch enable is running, so the button cannot be double-fired. */
+const batching = ref(false)
 const verifying = computed(() => Object.values(library.platformHealth).some(item => item.status === 'checking'))
 const statusLabel = { checking: '验证中', available: '抽测通过', failed: '验证失败', unknown: '未能验证' }
 function healthDetails(id: string): string {
@@ -70,11 +75,55 @@ async function importFromPaste(): Promise<void> {
   }
 }
 
+/**
+ * Enable / disable a source.
+ *
+ * Validation is part of the start flow, not a separate action: the user pressed
+ * "start", so the check runs automatically and its outcome determines whether
+ * the source actually starts. There is deliberately no separate "validate"
+ * button — a check the user has to remember to run is a check that will not be
+ * run.
+ *
+ * Every exit path ends by re-reading the authoritative list, because the switch
+ * reflects what the *app* decided, not what the user clicked. Reporting
+ * "已启用" for a source the engine refused to start was the state-desync bug.
+ */
 async function toggle(api: UserApiMeta): Promise<void> {
   try {
-    await library.toggleSource(api.id, !api.enabled)
+    const result = await library.toggleSource(api.id, !api.enabled)
+
+    // A refused start. Show the findings and leave the switch off.
+    if (!api.enabled && result && result.started === false) {
+      if (result.report) {
+        blockedReports.value = { ...blockedReports.value, [api.id]: result.report }
+      }
+      const first = result.report?.findings.find(f => f.severity === 'block')
+      toast.error(first ? `已拒绝启动：${first.title}` : '启动前校验未通过，已拒绝启动')
+      return
+    }
+
+    // Started successfully, but the script carried warnings. Report them after
+    // the fact rather than gating on them: the user already asked to start it,
+    // and a confirmation dialog on every enable would train them to click
+    // through dialogs without reading.
+    if (result?.report && !result.report.clean) {
+      const warnings = result.report.findings.filter(f => f.severity === 'warn')
+      if (warnings.length > 0) {
+        toast.success(`已启用「${api.name}」（校验有 ${warnings.length} 项提示）`)
+        blockedReports.value = { ...blockedReports.value, [api.id]: result.report }
+        return
+      }
+    }
+
+    toast.success(api.enabled ? `已停用「${api.name}」` : `已启用「${api.name}」`)
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '操作失败')
+  } finally {
+    // Always reconcile with the main process. On a refusal the store's own
+    // refresh never runs (it is skipped when the call reports no start), and on
+    // an error the optimistic switch position is wrong — either way the list
+    // must be re-read so the UI cannot claim a state the engine is not in.
+    await library.refreshSources().catch(() => undefined)
   }
 }
 
@@ -110,8 +159,149 @@ async function showLogs(api: UserApiMeta): Promise<void> {
   }
 }
 
+/** Lift a safety quarantine after the user has reviewed the reason. */
+async function clearQuarantine(api: UserApiMeta): Promise<void> {
+  const confirmed = await ui.confirm(
+    '解除隔离',
+    `「${api.name}」因安全原因被自动隔离并停用。\n\n` +
+      `原因：${api.lastError || '未知'}\n\n` +
+      `解除隔离只会让它重新可被启用，不会自动启动它。请确认你信任该脚本的来源。`
+  )
+  if (!confirmed) return
+  try {
+    await library.clearSourceQuarantine(api.id)
+    toast.success(`已解除「${api.name}」的隔离，可手动启用`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '操作失败')
+  }
+}
+
 function qualityText(qualitys: string[]): string {
   return qualitys.map((quality) => QUALITY_LABELS[quality] ?? quality).join(' · ')
+}
+
+function dismissBlocked(id: string): void {
+  const next = { ...blockedReports.value }
+  delete next[id]
+  blockedReports.value = next
+}
+
+/**
+ * Enable every disabled source, validating each one separately.
+ *
+ * ## Why this is sequential and goes through the single-source call
+ *
+ * It would be simpler to add a "start everything" IPC that skips the per-source
+ * work, but that would create a path around the start gate — and the gate is
+ * the only thing standing between a user and the source that shuts the machine
+ * down. So the batch loops over the *same* `toggleSource` call the switch uses:
+ * every script is validated on its own merits, every refusal is reported, and
+ * there is no code path where "enable all" means "skip the checks".
+ *
+ * Sequential rather than parallel because each start forks a process, and
+ * because the resulting summary is far easier to read when the order is stable.
+ * `startAll` inside the engine is already concurrency-limited for the same
+ * first reason.
+ */
+async function enableAll(): Promise<void> {
+  const targets = library.userApis.filter((api) => !api.enabled && !api.quarantined)
+  const skipped = library.userApis.filter((api) => api.quarantined)
+
+  if (targets.length === 0) {
+    toast.success(
+      skipped.length > 0
+        ? `没有可启用的音源（${skipped.length} 个处于隔离状态）`
+        : '所有音源都已启用'
+    )
+    return
+  }
+
+  const confirmed = await ui.confirm(
+    '批量启用音源',
+    `将依次启用 ${targets.length} 个音源，每个都会单独执行启动前校验。\n\n` +
+      (skipped.length > 0 ? `${skipped.length} 个已隔离的音源会被跳过。\n\n` : '') +
+      '未通过校验的音源会被自动拦截并隔离，不会启动。是否继续？'
+  )
+  if (!confirmed) return
+
+  batching.value = true
+  let started = 0
+  const refused: string[] = []
+
+  try {
+    for (const api of targets) {
+      try {
+        const result = await library.toggleSource(api.id, true)
+        if (result?.started === false) {
+          refused.push(api.name)
+          if (result.report) {
+            blockedReports.value = { ...blockedReports.value, [api.id]: result.report }
+          }
+        } else {
+          started += 1
+        }
+      } catch (error) {
+        // A quarantined source throws rather than returning a report; treat it
+        // as a refusal rather than letting it abort the whole batch.
+        refused.push(api.name)
+        void error
+      }
+    }
+  } finally {
+    batching.value = false
+    await library.refreshSources().catch(() => undefined)
+  }
+
+  if (refused.length === 0) {
+    toast.success(`已启用 ${started} 个音源`)
+  } else {
+    toast.error(
+      `已启用 ${started} 个，${refused.length} 个被拦截：${refused.join('、')}`
+    )
+  }
+}
+
+/**
+ * Stop every enabled source.
+ *
+ * Runs through the same single-source toggle as the switch, for the same reason
+ * the batch start does: one code path, no shortcut around per-source handling.
+ * Stopping needs no validation, so this is quick, but it is still sequential
+ * because each stop tears down a child process and awaits its exit.
+ */
+async function disableAll(): Promise<void> {
+  const targets = library.userApis.filter((api) => api.enabled)
+
+  if (targets.length === 0) {
+    toast.success('所有音源都已停用')
+    return
+  }
+
+  const confirmed = await ui.confirm(
+    '全部关闭音源',
+    `将停用 ${targets.length} 个已启用的音源。正在播放的在线歌曲会停止。是否继续？`
+  )
+  if (!confirmed) return
+
+  batching.value = true
+  let stopped = 0
+
+  try {
+    for (const api of targets) {
+      try {
+        await library.toggleSource(api.id, false)
+        stopped += 1
+      } catch {
+        // A single failed stop must not abort the rest; the final refresh will
+        // reconcile whatever is still running.
+      }
+    }
+  } finally {
+    batching.value = false
+    await library.refreshSources().catch(() => undefined)
+  }
+
+  toast.success(`已停用 ${stopped} 个音源`)
 }
 </script>
 
@@ -125,6 +315,32 @@ function qualityText(qualitys: string[]): string {
         </p>
       </div>
       <div class="actions">
+        <!--
+          Batch enable. Offered because imported scripts now start disabled, so
+          restoring a library means flipping many switches. It deliberately
+          reuses the per-source start path instead of a bulk IPC: every script
+          is validated on its own, and a refusal is reported rather than
+          skipped.
+        -->
+        <button
+          class="btn"
+          type="button"
+          :disabled="batching || importing"
+          :title="`为 ${library.userApis.filter(a => !a.enabled && !a.quarantined).length} 个未启用的音源逐个校验并启用`"
+          @click="enableAll"
+        >
+          <span v-if="batching" class="spinner" />
+          <span v-else>全部启动</span>
+        </button>
+        <button
+          class="btn"
+          type="button"
+          :disabled="batching || importing"
+          :title="`停用 ${library.userApis.filter(a => a.enabled).length} 个已启用的音源`"
+          @click="disableAll"
+        >
+          全部关闭
+        </button>
         <button class="btn" type="button" @click="pasting = !pasting">粘贴导入</button>
         <button class="btn btn--primary" type="button" :disabled="importing" @click="importFromFile">
           <span v-if="importing" class="spinner" />
@@ -185,6 +401,52 @@ function qualityText(qualitys: string[]): string {
           </div>
         </div>
 
+        <!--
+          Validation panel.
+
+          Doubles as the refusal notice and the "started, but here is what we
+          found" notice. Rendered above the quarantine banner because it
+          explains the refusal that *caused* the quarantine. Kept on screen
+          rather than shown as a toast: the user has to read the findings to
+          decide what to do, and a message that disappears after three seconds
+          cannot be acted on.
+        -->
+        <div
+          v-if="blockedReports[api.id]"
+          class="blocked"
+          :class="{ 'blocked--warn': !blockedReports[api.id].blocked }"
+        >
+          <div class="blocked__head">
+            <span class="blocked__badge">
+              {{ blockedReports[api.id].blocked ? '已拒绝启动' : '已启动（有提示）' }}
+            </span>
+            <span>
+              <template v-if="blockedReports[api.id].blocked">
+                启动前校验发现 {{ blockedReports[api.id].findings.filter(f => f.severity === 'block').length }} 项阻断问题
+              </template>
+              <template v-else>
+                校验发现 {{ blockedReports[api.id].findings.filter(f => f.severity === 'warn').length }} 项需要注意的特征
+              </template>
+            </span>
+          </div>
+          <ul class="finding-list">
+            <li
+              v-for="finding in blockedReports[api.id].findings.filter(f => f.severity !== 'info')"
+              :key="finding.id"
+              class="finding"
+              :class="`finding--${finding.severity}`"
+            >
+              <strong>{{ finding.title }}</strong>
+              <p class="finding__detail">{{ finding.detail }}</p>
+              <p class="finding__remedy">{{ finding.remedy }}</p>
+            </li>
+          </ul>
+          <button class="btn" type="button" @click="dismissBlocked(api.id)">知道了</button>
+          <p class="validation__caveat">
+            校验为静态文本分析，不会运行脚本。混淆脚本的字符串在运行时才解密，因此「通过」不等于绝对安全。
+          </p>
+        </div>
+
         <p v-if="api.description" class="script__desc">{{ api.description }}</p>
 
         <a
@@ -207,9 +469,28 @@ function qualityText(qualitys: string[]): string {
           </ul>
         </div>
 
+        <!--
+          Quarantine banner.
+
+          Shown above everything else because it explains why the switch is off
+          and cannot be turned back on: the app disabled this source for safety,
+          not the user. The reason is spelled out and clearing it is an explicit
+          action, so re-enabling a dangerous script takes two deliberate steps.
+        -->
+        <div v-if="api.quarantined" class="quarantine">
+          <div class="quarantine__head">
+            <span class="quarantine__badge">已隔离</span>
+            <span class="quarantine__title">此音源已被自动停用</span>
+          </div>
+          <p class="quarantine__reason">{{ api.lastError || '脚本行为异常' }}</p>
+          <button class="btn quarantine__action" type="button" @click="clearQuarantine(api)">
+            我了解风险，解除隔离
+          </button>
+        </div>
+
         <!-- Failure detail. When a script kills its own process this is where the
              user learns why, since the app itself survived. -->
-        <p v-if="api.lastError" class="script__error">
+        <p v-if="api.lastError && !api.quarantined" class="script__error">
           初始化失败：{{ api.lastError }}
         </p>
 
@@ -390,6 +671,191 @@ code {
   color: var(--danger);
   font-size: var(--text-sm);
   line-height: 1.5;
+}
+
+/* ---------------- pre-flight validation ---------------- */
+
+.blocked {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger);
+  background: rgba(255, 107, 107, 0.16);
+}
+
+.blocked__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.blocked__badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* A source that started *with* warnings: worth reading, but not an error. */
+.blocked--warn {
+  border-color: var(--warning);
+  background: rgba(255, 193, 7, 0.1);
+}
+
+.blocked--warn .blocked__badge {
+  background: var(--warning);
+  color: #3a2c00;
+}
+
+.validation {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+}
+
+.validation__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.validation__status {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.validation__status.is-clean {
+  color: var(--success);
+}
+
+.validation__status.is-warn {
+  color: var(--warning);
+}
+
+.validation__status.is-blocked {
+  color: var(--danger);
+}
+
+.validation__meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.validation__empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.validation__caveat {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-strong);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+
+.finding-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.finding {
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
+  font-size: var(--text-sm);
+}
+
+.finding--block {
+  border-left-color: var(--danger);
+}
+
+.finding--warn {
+  border-left-color: var(--warning);
+}
+
+.finding--info {
+  border-left-color: var(--text-tertiary);
+}
+
+.finding strong {
+  font-weight: 500;
+}
+
+.finding__detail {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.finding__remedy {
+  margin: 2px 0 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* ---------------- quarantine ---------------- */
+
+/* Deliberately louder than the ordinary error box: this state means the app
+   made a safety decision about the script, and the user cannot undo it by
+   flipping the enable switch. */
+.quarantine {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.quarantine__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.quarantine__badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.quarantine__title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.quarantine__reason {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.quarantine__action {
+  font-size: var(--text-sm);
 }
 
 /* ---------------- risk rating ---------------- */

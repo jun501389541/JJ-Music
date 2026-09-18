@@ -25,6 +25,7 @@ import type {
   UserApiMeta
 } from '@shared/types'
 import type { MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
+import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 
 /** Unwrap the `{ ok, data, error }` envelope, throwing on failure. */
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -66,8 +67,20 @@ const api = {
     /** Import by picking a file, or by reading LX's own user_api.json. */
     importFile: () => invoke<UserApiMeta[] | null>(IPC.sourcesImportFile),
     remove: (id: string) => invoke<void>(IPC.sourcesRemove, id),
-    toggle: (id: string, enabled: boolean) => invoke<void>(IPC.sourcesToggle, id, enabled),
+    /**
+     * Enable / disable a source.
+     *
+     * Returns the pre-flight result rather than `void`: enabling can be
+     * *refused*, and the caller needs to know that it was, otherwise the UI
+     * reports success for a source that never started.
+     */
+    toggle: (id: string, enabled: boolean) =>
+      invoke<SourceToggleResult>(IPC.sourcesToggle, id, enabled),
     reload: (id: string) => invoke<void>(IPC.sourcesReload, id),
+    /** Lift a safety quarantine; the source stays disabled until re-enabled. */
+    clearQuarantine: (id: string) => invoke<boolean>(IPC.sourcesClearQuarantine, id),
+    /** Pre-flight validation without enabling. */
+    validate: (id: string) => invoke<ValidationReport>(IPC.sourcesValidate, id),
     /** Sources currently live across all enabled scripts. */
     available: () => invoke<SourceInfo[]>(IPC.sourcesAvailable),
     verifyPlatform: (id: SourceId) => invoke<PlatformProbeResult>(IPC.sourcesVerifyPlatform, id),

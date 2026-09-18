@@ -32,6 +32,10 @@ export const IPC = {
   sourcesRemove: 'sources:remove',
   sourcesToggle: 'sources:toggle',
   sourcesReload: 'sources:reload',
+  /** Lift a safety quarantine so the source can be enabled again. */
+  sourcesClearQuarantine: 'sources:clear-quarantine',
+  /** Run pre-flight validation without enabling the source. */
+  sourcesValidate: 'sources:validate',
   sourcesAvailable: 'sources:available',
   sourcesVerifyPlatform: 'sources:verify-platform',
   sourcesLogs: 'sources:logs',

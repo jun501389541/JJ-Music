@@ -69,15 +69,19 @@ interface HostInit {
  * it gets.
  */
 
-function readInit(): HostInit | null {
+function readInit(): (HostInit & { scratchDir?: string }) | null {
   const scriptPath = process.argv[2]
   const initPath = process.argv[3]
+  // Restricted mode adds a fourth argument: the scratch directory that carries
+  // the file-based protocol (see restricted-launch.ts). Its presence switches
+  // the host from IPC to file handoff.
+  const scratchDir = process.argv[4]
   if (!scriptPath || !initPath) return null
 
   try {
     const meta = JSON.parse(readFileSync(initPath, 'utf8')) as Omit<HostInit, 'script'>
     const script = readFileSync(scriptPath, 'utf8')
-    return { ...meta, script }
+    return { ...meta, script, ...(scratchDir ? { scratchDir } : {}) }
   } catch {
     return null
   }
@@ -91,7 +95,64 @@ if (!init) {
   process.exit(2)
 }
 
+/**
+ * Outbound message transport.
+ *
+ * Two modes, selected by whether the parent passed a scratch directory:
+ *
+ *   IPC mode  (fork) — `process.send`, as before.
+ *   File mode  (restricted launch) — `runas` detaches the child, so there is
+ *   no IPC channel. Protocol messages become JSON files in the scratch
+ *   directory (written temp-then-rename so the parent's reader never sees a
+ *   partial write).
+ *
+ * Everything above this line is mode-agnostic: `send` is the only choke point.
+ */
+import { writeFileSync, renameSync, appendFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const scratchDir = init.scratchDir
+
+const fileSend = (message: Record<string, unknown>): void => {
+  if (!scratchDir) return
+  try {
+    switch (message.type) {
+      case 'ready':
+        writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify(message), 'utf8')
+        break
+      case 'boot-error':
+        writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify({ ok: false, error: message.error }), 'utf8')
+        break
+      case 'response':
+      case 'response-error':
+        if (typeof message.id === 'number') {
+          const final = join(scratchDir, `res-${message.id}.json`)
+          const tmp = `${final}.tmp`
+          writeFileSync(tmp, JSON.stringify(message), 'utf8')
+          renameSync(tmp, final)
+        }
+        break
+      case 'log': {
+        appendFileSync(join(scratchDir, 'console.log'), `[${message.level ?? 'log'}] ${message.message ?? ''}\n`, 'utf8')
+        break
+      }
+      case 'update-alert':
+        appendFileSync(join(scratchDir, 'console.log'), `[update] ${JSON.stringify(message.data)}\n`, 'utf8')
+        break
+      default:
+        break
+    }
+  } catch {
+    // Scratch directory gone means the parent is shutting us down.
+    process.exit(0)
+  }
+}
+
 const send = (message: unknown): void => {
+  if (scratchDir) {
+    fileSend(message as Record<string, unknown>)
+    return
+  }
   try {
     process.send?.(message)
   } catch {
@@ -451,22 +512,171 @@ target.console = {
   count: () => undefined
 }
 
+/* ------------------------------------------------------------------ *
+ * Capability lockdown
+ * ------------------------------------------------------------------ */
+
+/**
+ * Deny a source script the ability to reach the operating system.
+ *
+ * ## Why this exists
+ *
+ * A source was observed shutting the user's PC down. Windows' own event log
+ * recorded it unambiguously:
+ *
+ *   Event 1074, C:\Windows\system32\shutdown.exe initiated 关机
+ *   Reason Code: 0x800000ff  (the "other/undefined" code a programmatic
+ *   shutdown uses, as opposed to the 0x0 the Start menu produces)
+ *
+ * — logged in the same second the source was enabled. The source is an
+ * authorisation-gated one (`SERVER_SCRIPT_CONFIG` carrying an `apiUrl`,
+ * `signSalt` and `fingerprint`), and this is consistent with a deliberate
+ * anti-tamper response: detect a host it does not recognise, then punish it.
+ *
+ * Static scanning of that script's *outer* layer finds no `process.exit`,
+ * `exec` or `shutdown` reference — but its string table is custom-encrypted and
+ * only decrypts at runtime, so absence there proves nothing. The defence
+ * therefore cannot be "look for the call"; it has to be **remove the
+ * capability**.
+ *
+ * ## What is removed
+ *
+ * `process` remains (scripts feature-detect it, and it is the identity of the
+ * process they legitimately run in), but every property that can spawn
+ * something, signal something, or inspect the raw OS is replaced with a
+ * throwing stub. A script that tries is stopped with an ordinary catchable
+ * error instead of reaching the machine.
+ *
+ * This is defence in depth, not a sandbox: a determined script still runs with
+ * the user's privileges. What it removes is the easy, common path — and it
+ * turns a machine-killing action into a logged, contained failure.
+ */
+function lockDownProcess(): void {
+  const denied = (name: string) => (): never => {
+    throw new Error(`音源已被禁止访问 ${name}（安全限制）`)
+  }
+
+  // Process-spawning entry points. This is the path a shutdown call would take.
+  const BLOCKED_MODULES = new Set([
+    'child_process',
+    'node:child_process',
+    'worker_threads',
+    'node:worker_threads',
+    'cluster',
+    'node:cluster',
+    'node:vm',
+    'vm'
+  ])
+
+  // Keep `process` usable for feature detection, but strip the sharp edges.
+  const blockedOnProcess = [
+    'binding',
+    'dlopen',
+    'kill',
+    'abort',
+    'exit',
+    'reallyExit',
+    '_kill',
+    '_debugProcess',
+    'setuid',
+    'setgid'
+  ]
+  for (const key of blockedOnProcess) {
+    try {
+      Object.defineProperty(process, key, {
+        value: denied(`process.${key}`),
+        writable: false,
+        configurable: false,
+        enumerable: false
+      })
+    } catch {
+      /* A non-configurable property is already safe enough. */
+    }
+  }
+
+  // `process.mainModule.require` and friends bypass a plain `require` shim.
+  try {
+    Object.defineProperty(process, 'mainModule', { value: undefined, configurable: false })
+  } catch {
+    /* ignore */
+  }
+
+  const guardRequire = (req: unknown): unknown => {
+    if (typeof req !== 'function') return req
+    const guarded = function guardedRequire(id: string): unknown {
+      const name = String(id)
+      if (BLOCKED_MODULES.has(name)) {
+        throw new Error(`音源已被禁止加载模块 "${name}"（安全限制）`)
+      }
+      return (req as (id: string) => unknown)(name)
+    }
+    // Preserve `require.resolve` and friends so feature detection still works.
+    return Object.assign(guarded, req as object)
+  }
+
+  const currentRequire = target.require
+  if (currentRequire !== undefined) {
+    target.require = guardRequire(currentRequire)
+  }
+  const moduleShim = target.module as { require?: unknown } | undefined
+  if (moduleShim && typeof moduleShim === 'object') {
+    try {
+      // `module.require` would otherwise be a second door to the same loader.
+      Object.defineProperty(moduleShim, 'require', {
+        get: () => target.require,
+        configurable: false
+      })
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // `import()` is not reachable from `new Function` in this realm, but a script
+  // can still obtain a fresh loader through `process.binding('module_wrap')` on
+  // some Node versions — already stubbed above. Nothing further to remove.
+}
+
+lockDownProcess()
+
 function failInit(message: string): void {
   if (initFailed || hasInited) return
   initFailed = true
   send({ type: 'boot-error', error: message.slice(0, 1024) })
 }
 
+/**
+ * A crash *after* init is a different animal from a boot failure: the engine
+ * has already resolved `ready`, so a `boot-error` would be ignored. The honest
+ * response is to report and then die — the parent's heartbeat watch notices the
+ * silence, and its crash-reason handling takes over from there.
+ *
+ * Before this existed, a post-init crash was swallowed: `failInit` returned
+ * early (hasInited), nothing was reported, the process kept running as a
+ * zombie, and the parent only learned of the death 20 s later via the
+ * heartbeat — with no idea why.
+ */
+function fatalAfterInit(message: string): void {
+  if (initFailed) return
+  initFailed = true
+  send({ type: 'boot-error', error: message.slice(0, 1024) })
+  // Give the message a moment to flush through the transport, then die so the
+  // heartbeat stops and the parent's watchdog concludes promptly.
+  setTimeout(() => process.exit(1), 200)
+}
+
 process.on('uncaughtException', (error: Error) => {
-  failInit(error?.message ?? String(error))
+  const message = error?.message ?? String(error)
+  if (hasInited) fatalAfterInit(message)
+  else failInit(message)
 })
 process.on('unhandledRejection', (reason: unknown) => {
   const message =
     typeof reason === 'string' ? reason : ((reason as Error)?.message ?? String(reason))
-  failInit(message)
+  if (hasInited) fatalAfterInit(message)
+  else failInit(message)
 })
 
-process.on('message', (message: { type: string; id?: number; payload?: unknown }) => {
+function handleRequest(message: { type: string; id?: number; payload?: unknown }): void {
   if (message.type !== 'request' || message.id === undefined) return
   const id = message.id
 
@@ -481,7 +691,84 @@ process.on('message', (message: { type: string; id?: number; payload?: unknown }
       (data) => send({ type: 'response', id, data }),
       (error: unknown) => send({ type: 'response-error', id, error: describeError(error) })
     )
-})
+}
+
+if (scratchDir) {
+  // File mode: the parent cannot push messages over IPC, so requests arrive as
+  // `req-<id>.json` files. `fs.watch` on the directory is one watch for all
+  // requests; each event is debounced by re-reading the directory and tracking
+  // which request ids have been dispatched.
+  //
+  // A poll loop runs alongside `fs.watch`: watch events on Windows are
+  // unreliable for renames (they can be coalesced or dropped entirely), and a
+  // dropped event would strand a request until some later event happened to
+  // fire. The poll is the safety net; watch is only the latency optimisation.
+  import('node:fs').then(({ watch, readdirSync }) => {
+    const dispatched = new Set<number>()
+    const dispatchPending = (): void => {
+      try {
+        for (const name of readdirSync(scratchDir)) {
+          if (!name.startsWith('req-') || !name.endsWith('.json')) continue
+          const id = Number(name.slice(4, -5))
+          if (!Number.isFinite(id) || dispatched.has(id)) continue
+          try {
+            const payload = JSON.parse(readFileSync(join(scratchDir, name), 'utf8'))
+            dispatched.add(id)
+            handleRequest(payload)
+          } catch {
+            /* partial read racing the parent's rename; the next poll retries */
+          }
+        }
+      } catch {
+        /* directory gone: parent shutting down */
+      }
+    }
+
+    // The poll is authoritative and must always exist. 100 ms keeps request
+    // latency negligible next to the 20 s request ceiling.
+    const pollTimer = setInterval(dispatchPending, 100)
+    pollTimer.unref?.()
+
+    try {
+      watch(scratchDir, dispatchPending)
+    } catch {
+      /* watch unavailable; the poll above already covers it */
+    }
+    dispatchPending()
+  })
+
+  // Heartbeat: the parent has no `exit` event to observe across the runas
+  // boundary, so it watches this file's mtime instead. A stopped heartbeat is
+  // how the parent learns the child is gone.
+  //
+  // ## A write failure is NOT a reason to exit
+  //
+  // The scratch directory can legitimately disappear while this process is
+  // still alive: the parent removes it when the *user* stops the source, and
+  // the parent's own watchdog may remove it on a timeout while the script is
+  // still legitimately busy. Exiting on that ENOENT would turn a recoverable
+  // race into a real death — a script that is merely slow would be killed by
+  // its own heartbeat. So a missing directory is observed silently and the
+  // heartbeat simply stops; the parent's init/request timeouts remain the
+  // authority on whether the source is usable.
+  let heartbeatAlive = true
+  const heartbeat = (): void => {
+    if (!heartbeatAlive) return
+    try {
+      // The pid rides along so the parent can `taskkill /T /F` this exact
+      // process tree when the user stops the source — `runas` detaches the
+      // child, so the wrapper's kill() cannot reach it.
+      writeFileSync(join(scratchDir, 'heartbeat.json'), JSON.stringify({ pid: process.pid, at: Date.now() }), 'utf8')
+    } catch {
+      heartbeatAlive = false
+    }
+  }
+  heartbeat()
+  const hbTimer = setInterval(heartbeat, 1000)
+  hbTimer.unref?.()
+} else {
+  process.on('message', handleRequest)
+}
 
 try {
   // Evaluate the script in the *current* context rather than a fresh vm one.

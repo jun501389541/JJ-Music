@@ -36,9 +36,20 @@ import type {
   SourceId,
   SourceInfo
 } from '@shared/types'
-import { LX_QUALITIES, LX_SOURCE_IDS, QUALITY_ORDER } from '@shared/types'
+import { LX_QUALITIES, QUALITY_ORDER } from '@shared/types'
 import { toLegacyOnline } from './legacy-music-info'
 import type { LoadedApi, SourceStore } from './source-store'
+import { validateSourceBeforeStart, type ValidationReport } from './source-validator'
+import {
+  supportsRestrictedLaunch,
+  launchRestricted,
+  writeRequest,
+  readResponse,
+  readReady,
+  readHeartbeat,
+  readConsoleLog,
+  killChildTree
+} from './restricted-launch'
 
 /**
  * The custom-source API version reported to scripts as `lx.version`.
@@ -56,6 +67,15 @@ const INIT_TIMEOUT_MS = 15_000
 const REQUEST_TIMEOUT_MS = 20_000
 /** Memory ceiling per source process. Exceeding it kills only that process. */
 const SOURCE_MEMORY_LIMIT_MB = 512
+
+/**
+ * How many source processes may be booting at once.
+ *
+ * Not a performance knob: a fork burst of 21 processes is what makes healthy
+ * scripts trip the init timeout. Four is enough to hide per-process latency
+ * while keeping the machine responsive.
+ */
+const START_CONCURRENCY = 4
 
 interface PendingRequest {
   resolve: (value: unknown) => void
@@ -95,8 +115,22 @@ export class SourceEngine {
   /** Path to the forked host-process entry point. */
   private readonly hostPath: string
   private readonly listeners = new Set<Partial<SourceEngineEvents>>()
-  /** Source id -> owning script id, rebuilt whenever sources change. */
-  private sourceOwners = new Map<SourceId, string>()
+  /**
+   * Source id -> script ids that can serve it, in priority order.
+   *
+   * A list rather than a single owner: several imported scripts routinely
+   * advertise the same platform (14 of the 21 sources on this machine claim
+   * `wy`), and when the first one fails to resolve a track the next one is
+   * frequently able to. Historically only the first claimant was kept and the
+   * rest were discarded as "future priority", which threw that redundancy away.
+   */
+  private sourceProviders = new Map<SourceId, string[]>()
+  /**
+   * Scripts running under the restricted-token launcher, whose protocol goes
+   * over files rather than IPC. Tracked per launch so `requestFrom` dispatches
+   * through the right transport.
+   */
+  private readonly fileModeRuntimes = new Set<string>()
 
   constructor(store: SourceStore, hostPath: string) {
     this.store = store
@@ -118,14 +152,39 @@ export class SourceEngine {
     }
   }
 
-  /** Start every enabled script. Safe to call repeatedly. */
+  /**
+   * Start every enabled script, in stored order.
+   *
+   * ## Why this is not a bare `Promise.all`
+   *
+   * Each source is a forked process. Starting 21 of them at once means 21
+   * simultaneous `fork()` calls, each loading Electron's Node runtime and then
+   * evaluating a script that may run a large obfuscated VM — a burst that
+   * starves the machine and pushes well-behaved scripts past the 15 s init
+   * timeout, so they get reported as broken.
+   *
+   * A small concurrency window fixes that. It also makes the *order* of starts
+   * deterministic, which matters because ownership is assigned in start order
+   * (see `rebuildOwners`): with `Promise.all` the winner was whichever fork
+   * happened to finish first, so which script served a platform could change
+   * between launches.
+   *
+   * Failures are isolated per script and never abort the batch.
+   */
   async startAll(): Promise<void> {
-    const apis = this.store.list()
-    await Promise.all(
-      apis
-        .filter((api) => api.meta.enabled)
-        .map((api) => this.start(api).catch(() => undefined))
-    )
+    const apis = this.store.list().filter((api) => api.meta.enabled)
+
+    let cursor = 0
+    const runNext = async (): Promise<void> => {
+      while (cursor < apis.length) {
+        const api = apis[cursor++]
+        if (!api) return
+        await this.start(api).catch(() => undefined)
+      }
+    }
+
+    const workers = Math.min(START_CONCURRENCY, apis.length)
+    await Promise.all(Array.from({ length: workers }, () => runNext()))
   }
 
   /** Stop every source process and release resources. */
@@ -141,6 +200,35 @@ export class SourceEngine {
 
   private async start(api: LoadedApi): Promise<void> {
     await this.stop(api.meta.id)
+
+    // ---- Pre-flight validation ----------------------------------------
+    //
+    // Everything above this line is about *containing* a script; this is the
+    // only place that can still say no. It runs before the scratch files are
+    // written and before `fork()`, so a rejected script never executes a single
+    // statement — which is the whole point, since the failure mode being
+    // guarded against (a source that shuts the machine down) cannot be undone
+    // after the fact.
+    //
+    // The checks are static text analysis. They deliberately do not run the
+    // script: a validator that executes its subject is not a validator.
+    const report = validateSourceBeforeStart(api.source, { name: api.meta.name })
+
+    if (report.blocked) {
+      const blocking = report.findings.filter((f) => f.severity === 'block')
+      const reason =
+        `启动前校验未通过，已拒绝启动：\n` +
+        blocking.map((f) => `· ${f.title}\n  ${f.detail}\n  ${f.remedy}`).join('\n')
+      // Quarantine, not merely "record an error": this is a verdict about the
+      // script, and it must survive a restart so a habitual "enable
+      // everything" cannot re-arm it.
+      this.store.quarantine(api.meta.id, reason)
+      this.emit('scriptError', api.meta.id, reason)
+      throw new Error(reason)
+    }
+
+    // A pass with warnings is allowed to proceed; the report travels back to
+    // the caller (toggle returns it), which renders warnings after the start.
 
     // Fail loudly if the host process file is missing.
     //
@@ -186,20 +274,47 @@ export class SourceEngine {
       'utf8'
     )
 
-    const child = fork(this.hostPath, [scriptPath, initPath], {
-      // The memory ceiling means a runaway script is killed by its own process
-      // rather than exhausting the host's memory.
-      execArgv: [`--max-old-space-size=${SOURCE_MEMORY_LIMIT_MB}`],
-      // `pipe` gives us the script's console output; the IPC channel is
-      // separate and always present with fork().
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      // The working directory stays at the app root. Pointing it at the scratch
-      // directory (which lives under the OS temp dir) breaks module resolution:
-      // the host requires `iconv-lite` and `music-metadata`, and Node resolves
-      // those relative to cwd, so the child would die with
-      // "Cannot find module 'iconv-lite'" before running any script.
-      cwd: dirname(this.hostPath)
-    })
+    /**
+     * Two launch modes:
+     *
+     *   restricted (Windows, default) — `runas /trustlevel:0x20000` strips
+     *   SeShutdownPrivilege from the child's token, so a hostile source's
+     *   shutdown call fails at the OS level. Protocol carried over files
+     *   (runas detaches the child; no IPC channel exists).
+     *
+     *   fork (fallback) — plain `fork()` with IPC, used on non-Windows and as
+     *   an escape hatch if the restricted launch itself fails.
+     */
+    const restricted = supportsRestrictedLaunch()
+    let child: ChildProcess
+    if (restricted) {
+      // Restricted mode: runas + file handoff. The host detects the mode from
+      // argv[4] (the scratch directory), which runas passes through.
+      child = launchRestricted({
+        nodeExec: process.execPath,
+        hostPath: this.hostPath,
+        scriptPath,
+        initPath,
+        scratchDir,
+        memoryLimitMb: SOURCE_MEMORY_LIMIT_MB
+      }).wrapper
+    } else {
+      child = fork(this.hostPath, [scriptPath, initPath], {
+        // The memory ceiling means a runaway script is killed by its own
+        // process rather than exhausting the host's memory.
+        execArgv: [`--max-old-space-size=${SOURCE_MEMORY_LIMIT_MB}`],
+        // `pipe` gives us the script's console output; the IPC channel is
+        // separate and always present with fork().
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        // The working directory stays at the app root. Pointing it at the
+        // scratch directory (which lives under the OS temp dir) breaks
+        // module resolution: the host requires `iconv-lite` and
+        // `music-metadata`, and Node resolves those relative to cwd, so the
+        // child would die with "Cannot find module 'iconv-lite'" before
+        // running any script.
+        cwd: dirname(this.hostPath)
+      })
+    }
 
     const runtime: ScriptRuntime = {
       api,
@@ -214,70 +329,65 @@ export class SourceEngine {
     }
     this.runtimes.set(api.meta.id, runtime)
 
+    // The ready promise is created first and its settle function handed to the
+    // mode-specific lifecycle, which decides when init has succeeded.
+    let settleReady!: (error?: Error) => void
     runtime.ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`音源初始化超时（${INIT_TIMEOUT_MS / 1000}s）`))
       }, INIT_TIMEOUT_MS)
-
-      const settle = (error?: Error): void => {
+      settleReady = (error?: Error): void => {
         clearTimeout(timer)
         if (error) reject(error)
         else resolve()
       }
-
-      child.on('message', (message: HostMessage) => {
-        this.handleMessage(runtime, message, settle)
-      })
-
-      child.on('error', (error) => {
-        runtime.dead = true
-        this.failAllPending(runtime, error)
-        settle(error)
-        this.emit('scriptError', api.meta.id, error.message)
-      })
-
-      child.on('exit', (code, signal) => {
-        runtime.dead = true
-
-        // A signal, or the abort code Windows reports as a large unsigned
-        // value, means the script terminated its own process. That is the
-        // failure mode this whole design exists to contain, so it gets a
-        // message that says so rather than a bare exit code.
-        const aborted =
-          signal !== null ||
-          code === null ||
-          code === 134 ||
-          code === 0xffffffff ||
-          code > 128
-
-        const reason = aborted
-          ? `音源进程被脚本强制终止${signal ? `（信号 ${signal}）` : ''}${code ? `（退出码 ${code}）` : ''}。` +
-            `该脚本可能带有反调试/自我保护逻辑。已隔离，不影响其他音源。`
-          : `音源进程退出（退出码 ${code}）`
-
-        runtime.crashReason = aborted ? reason : undefined
-        const error = new Error(reason)
-        this.failAllPending(runtime, error)
-
-        if (code !== 0 || aborted) {
-          settle(error)
-          this.emit('scriptError', api.meta.id, reason)
-        }
-        // Reclaim the scratch directory once the process is gone.
-        rmSync(runtime.scratchDir, { recursive: true, force: true })
-      })
     })
 
-    // Keep script console output for the settings page, bounded.
-    child.stdout?.on('data', (chunk: Buffer) => this.captureLog(runtime, chunk))
-    child.stderr?.on('data', (chunk: Buffer) => this.captureLog(runtime, chunk))
+    if (restricted) {
+      this.fileModeRuntimes.add(api.meta.id)
+      this.attachFileProtocolLifecycle(runtime, settleReady)
+    } else {
+      this.fileModeRuntimes.delete(api.meta.id)
+      this.attachIpcLifecycle(runtime, child, settleReady)
+    }
+
+    // Keep script console output for the settings page, bounded (IPC mode only;
+    // file mode captures logs through the console.log scratch file).
+    if (!restricted) {
+      child.stdout?.on('data', (chunk: Buffer) => this.captureLog(runtime, chunk))
+      child.stderr?.on('data', (chunk: Buffer) => this.captureLog(runtime, chunk))
+    }
 
     try {
       await runtime.ready
       this.store.setError(api.meta.id, undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // A script that terminates itself silently on startup is the signature of
+      // an anti-tamper / environment-probe design — the class that includes the
+      // source observed shutting a machine down. Quarantining it means the user
+      // does not have to remember which of 21 sources is the dangerous one, and
+      // a restart cannot re-arm it.
+      //
+      // Only for a *silent* self-termination: an ordinary error is reported but
+      // left enabled, because most failures are benign (dead relay, changed
+      // API) and quarantining those would be hostile.
+      if (runtime.crashReason && runtime.logs.length === 0) {
+        const reason =
+          `${message}\n该脚本在启动时静默结束了自己的进程，符合自我保护型脚本特征。` +
+          `已自动隔离停用；确认安全后可在音源管理里解除隔离。`
+        this.store.quarantine(api.meta.id, reason)
+        this.emit('scriptError', api.meta.id, reason)
+        throw new Error(reason)
+      }
       this.store.setError(api.meta.id, message)
+      // The source never came up, so the stored "enabled" flag would now lie:
+      // the switch would read "已启用" while no process exists. Reverting it
+      // keeps the UI honest; the user can flip the switch again to retry, which
+      // is exactly what a retry affordance should look like.
+      this.store.setEnabled(api.meta.id, false)
+      this.rebuildOwners()
+      this.emit('sourcesChanged')
       this.emit('scriptError', api.meta.id, message)
       throw error
     }
@@ -288,6 +398,222 @@ export class SourceEngine {
     if (!text) return
     runtime.logs.push(text)
     if (runtime.logs.length > 200) runtime.logs.shift()
+  }
+
+  /**
+   * Lifecycle for the IPC (`fork`) mode.
+   *
+   * Events arrive over the channel; death is observed directly. This is the
+   * original path, kept verbatim apart from the extraction so the two modes
+   * stay reviewable side by side.
+   */
+  private attachIpcLifecycle(
+    runtime: ScriptRuntime,
+    child: ChildProcess,
+    settle: (error?: Error) => void
+  ): void {
+    child.on('message', (message: HostMessage) => {
+      this.handleMessage(runtime, message, settle)
+    })
+
+    child.on('error', (error) => {
+      runtime.dead = true
+      this.rebuildOwners()
+      this.failAllPending(runtime, error)
+      settle(error)
+      this.emit('scriptError', runtime.api.meta.id, error.message)
+    })
+
+    child.on('exit', (code, signal) => this.handleChildExit(runtime, code, signal, settle))
+  }
+
+  /**
+   * Lifecycle for the restricted-token (file handoff) mode.
+   *
+   * The child is detached, so there are no `message`/`exit` events. Everything
+   * is observed through the scratch directory:
+   *
+   *   - `ready.json` appears when init finished (or a boot error was reported)
+   *   - `res-<id>.json` files answer dispatched requests
+   *   - `heartbeat.json` mtime says the process is alive
+   *   - `console.log` grows with the script's console output
+   *
+   * Polling granularity is 200 ms — imperceptible next to the 20 s request
+   * ceiling, and cheap (a directory read).
+   */
+  private attachFileProtocolLifecycle(
+    runtime: ScriptRuntime,
+    settle: (error?: Error) => void
+  ): void {
+    const dir = runtime.scratchDir
+    const POLL_MS = 200
+    let logOffset = 0
+    let settled = false
+    const settleOnce = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      clearInterval(pollTimer)
+      clearInterval(heartbeatWatch)
+      settle(error)
+    }
+
+    // Drain the script's console output into the bounded ring buffer.
+    const drainLog = (): void => {
+      const { text, nextOffset } = readConsoleLog(dir, logOffset)
+      if (!text) return
+      logOffset = nextOffset
+      for (const line of text.split('\n').filter(Boolean)) {
+        runtime.logs.push(line)
+        if (runtime.logs.length > 200) runtime.logs.shift()
+      }
+    }
+
+    const pollTimer = setInterval(() => {
+      // Console output first, so a boot error is accompanied by its context.
+      drainLog()
+
+      // Init result. The host writes ready.json exactly once: `ok:true` with
+      // the advertised sources, or `ok:false` with a boot error.
+      const ready = readReady(dir)
+      if (ready && !settled) {
+        if (ready.ok === false) {
+          // A boot error carries a crashReason signature: the host died
+          // reporting it, which the silent-self-termination quarantine below
+          // keys off (runtime.logs will be empty for a script that dies
+          // before printing anything).
+          runtime.crashReason = `音源脚本执行出错（${ready.error ?? '未知原因'}）`
+          settleOnce(new Error(ready.error ?? '音源脚本执行出错'))
+          this.emit('scriptError', runtime.api.meta.id, ready.error ?? '音源脚本执行出错')
+          return
+        }
+        runtime.sources = normaliseSources((ready.sources ?? {}) as Record<string, never>)
+        this.rebuildOwners()
+        this.emit('sourcesChanged')
+        settleOnce()
+      }
+
+      // A crash AFTER init: the host reports it as a late boot-error and exits.
+      // The ready.json already settled this lifecycle, so this failure has to
+      // be surfaced separately — it triggers the same disable-and-quarantine
+      // path as any other death.
+      if (ready?.ok === false && settled) {
+        runtime.dead = true
+        this.rebuildOwners()
+        runtime.crashReason = `音源脚本执行出错（${ready.error ?? '未知原因'}）`
+        const error = new Error(ready.error ?? '音源脚本执行出错')
+        this.failAllPending(runtime, error)
+        this.emit('scriptError', runtime.api.meta.id, ready.error ?? '音源脚本执行出错')
+      }
+
+      // Responses to dispatched requests.
+      for (const [id, pending] of [...runtime.pending]) {
+        const response = readResponse(dir, id)
+        if (!response) continue
+        clearTimeout(pending.timer)
+        runtime.pending.delete(id)
+        if (response.ok) pending.resolve(response.data)
+        else pending.reject(new Error(response.error ?? '音源请求失败'))
+      }
+    }, POLL_MS)
+
+    // Death watch. The heartbeat is rewritten by the child every second; a
+    // long silence means the process is gone (crashed, OOM-killed, or
+    // terminated by its own script).
+    //
+    // ## Tolerances are deliberately generous — measured, not guessed
+    //
+    // The child's event loop is *shared* with the source script. An obfuscated
+    // 740 KB script blocks that loop for seconds at a time while it decrypts
+    // and evaluates, so heartbeats legitimately pause during boot and during
+    // heavy requests. A 5 s timeout with a 1 s beat only tolerates ~4 missed
+    // beats — nowhere near enough. This timeout was the cause of a real
+    // incident: sources timed out at init en masse because their own
+    // evaluation stalled the heartbeats.
+    //
+    // The margins: 1 s beat × 20 s timeout = 19 missed beats of slack, which
+    // covers script evaluation bursts; 20 s also sits exactly at the request
+    // ceiling, so a hung request and a dead process surface at about the same
+    // time rather than the watchdog winning the race and killing a source that
+    // was about to answer.
+    //
+    // The watchdog never removes the scratch directory. The directory is the
+    // child's only channel; deleting it under a live-but-slow child kills that
+    // child's heartbeat (write fails) and converts a false positive into a
+    // real death. Cleanup stays with stop() and app shutdown, which are the
+    // only moments the child's death is intended.
+    const HEARTBEAT_SILENCE_LIMIT_MS = 20_000
+    const heartbeatWatch = setInterval(() => {
+      if (settled && runtime.dead) {
+        clearInterval(heartbeatWatch)
+        return
+      }
+      const hb = readHeartbeat(dir)
+      if (!hb) return // child has not started beating yet; give it time
+      const silence = Date.now() - hb.at
+      if (silence > HEARTBEAT_SILENCE_LIMIT_MS) {
+        runtime.dead = true
+        this.rebuildOwners()
+        const reason =
+          `音源进程已停止响应（心跳丢失 ${Math.round(silence / 1000)}s）。` +
+          `可能是脚本崩溃或自行终止。已隔离，不影响其他音源。`
+        runtime.crashReason = reason
+        const error = new Error(reason)
+        this.failAllPending(runtime, error)
+        settleOnce(error)
+        this.emit('scriptError', runtime.api.meta.id, reason)
+      }
+    }, 1_000)
+
+    // Guard: if the wrapper itself failed to spawn (runas missing, policy
+    // denial), fail fast rather than waiting for the init timeout.
+    runtime.child.on('error', (error) => {
+      runtime.dead = true
+      this.rebuildOwners()
+      this.failAllPending(runtime, error)
+      settleOnce(error)
+      this.emit('scriptError', runtime.api.meta.id, error.message)
+    })
+  }
+
+  /**
+   * Shared death handling for the IPC mode's `exit` event.
+   */
+  private handleChildExit(
+    runtime: ScriptRuntime,
+    code: number | null,
+    signal: string | null,
+    settle: (error?: Error) => void
+  ): void {
+    runtime.dead = true
+    // Drop this script from the routing table immediately: a crashed source
+    // must not be handed further requests, and any platform it was the best
+    // provider for should fall through to the next capable script.
+    this.rebuildOwners()
+
+    // A signal, or the abort code Windows reports as a large unsigned value,
+    // means the process was terminated rather than exiting cleanly.
+    const aborted =
+      signal !== null || code === null || code === 134 || code === 0xffffffff || code > 128
+
+    const reason = aborted
+      ? `音源进程被脚本强制终止${signal ? `（信号 ${signal}）` : ''}${code ? `（退出码 ${code}）` : ''}。` +
+        `该脚本可能带有反调试/自我保护逻辑。已隔离，不影响其他音源。`
+      : code === 1
+        ? `音源进程退出（退出码 1）。脚本在初始化时结束了自己的进程，且没有输出任何错误信息 —— ` +
+          `常见原因是环境自检失败（缺失的浏览器或 Node 全局对象），或脚本内置的自毁分支。` +
+          `已隔离，不影响其他音源。`
+        : `音源进程退出（退出码 ${code}）`
+
+    runtime.crashReason = aborted ? reason : undefined
+    const error = new Error(reason)
+    this.failAllPending(runtime, error)
+
+    if (code !== 0 || aborted) {
+      settle(error)
+      this.emit('scriptError', runtime.api.meta.id, reason)
+    }
+    // Reclaim the scratch directory once the process is gone.
+    rmSync(runtime.scratchDir, { recursive: true, force: true })
   }
 
   private handleMessage(
@@ -346,17 +672,73 @@ export class SourceEngine {
     runtime.pending.clear()
   }
 
+  /**
+   * Rebuild the source -> providers index.
+   *
+   * Ordering is deliberate and stable across launches:
+   *   1. the order scripts were enabled/imported in (`SourceStore.list()` order,
+   *      i.e. the order the user sees in 音源管理);
+   *   2. a script that can actually resolve a URL (`musicUrl`) before one that
+   *      merely claims the platform;
+   *   3. a live, non-crashed script before a dead one.
+   *
+   * The user's enable order is the primary key because that is the only
+   * ordering they can control, and "按启用顺序依次使用" is what they expect.
+   */
   private rebuildOwners(): void {
-    this.sourceOwners = new Map()
-    for (const runtime of this.runtimes.values()) {
+    const order = new Map<string, number>()
+    for (const [index, api] of this.store.list().entries()) {
+      order.set(api.meta.id, index)
+    }
+
+    const providers = new Map<SourceId, string[]>()
+    const runtimes = [...this.runtimes.values()].sort((a, b) => {
+      const ai = order.get(a.api.meta.id) ?? Number.MAX_SAFE_INTEGER
+      const bi = order.get(b.api.meta.id) ?? Number.MAX_SAFE_INTEGER
+      return ai - bi
+    })
+
+    for (const runtime of runtimes) {
+      if (runtime.dead) continue
       for (const source of runtime.sources) {
-        // First script to claim a platform wins; later ones are fallbacks we
-        // do not currently route to (kept for a future priority setting).
-        if (!this.sourceOwners.has(source.id)) {
-          this.sourceOwners.set(source.id, runtime.api.meta.id)
-        }
+        const list = providers.get(source.id) ?? []
+        list.push(runtime.api.meta.id)
+        providers.set(source.id, list)
       }
     }
+
+    // Stable sort so scripts that can serve the platform come first, while the
+    // user's enable order is preserved within each group.
+    for (const [sourceId, ids] of providers) {
+      ids.sort((a, b) => {
+        const score = (id: string): number => {
+          const runtime = this.runtimes.get(id)
+          if (!runtime || runtime.dead) return 2
+          const info = runtime.sources.find((item) => item.id === sourceId)
+          return info?.actions.includes('musicUrl') ? 0 : 1
+        }
+        const diff = score(a) - score(b)
+        if (diff !== 0) return diff
+        return (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER)
+      })
+    }
+
+    this.sourceProviders = providers
+  }
+
+  /** Script ids that can serve `source`, best first. */
+  private providersFor(source: SourceId): string[] {
+    return this.sourceProviders.get(source) ?? []
+  }
+
+  /**
+   * Run pre-flight validation without starting anything.
+   *
+   * Used by the toggle and import flows, so a refusal can be explained with
+   * per-finding detail rather than a thrown string.
+   */
+  validate(script: string, name?: string): ValidationReport {
+    return validateSourceBeforeStart(script, { name })
   }
 
   async stop(apiId: string): Promise<void> {
@@ -364,10 +746,27 @@ export class SourceEngine {
     if (!runtime) return
     this.runtimes.delete(apiId)
     runtime.dead = true
+    this.fileModeRuntimes.delete(apiId)
     this.failAllPending(runtime, new Error('音源已停止'))
+
+    // In file mode, removing the scratch directory is the shutdown signal: the
+    // child's next heartbeat write fails and it stops beating (it no longer
+    // exits on that failure — see source-host). The child itself is killed
+    // explicitly via the pid it reports in its heartbeat, because runas
+    // detaches it beyond the reach of wrapper.kill().
+    const hb = readHeartbeat(runtime.scratchDir)
+    if (hb?.pid) killChildTree(hb.pid)
+
+    try {
+      rmSync(runtime.scratchDir, { recursive: true, force: true })
+    } catch {
+      /* best effort */
+    }
 
     try {
       // SIGTERM first so the child can exit cleanly; kill() if it does not.
+      // In file mode this reaches only the runas wrapper; the real child was
+      // handled by the tree-kill above.
       runtime.child.kill()
       await new Promise<void>((resolveStop) => {
         const timer = setTimeout(() => {
@@ -385,14 +784,6 @@ export class SourceEngine {
       })
     } catch {
       /* already gone */
-    }
-
-    // Reclaim the handoff directory. The exit handler also does this, but a
-    // child that never started would otherwise leak it.
-    try {
-      rmSync(runtime.scratchDir, { recursive: true, force: true })
-    } catch {
-      /* best effort */
     }
 
     this.rebuildOwners()
@@ -441,7 +832,7 @@ export class SourceEngine {
   }
 
   hasSource(source: SourceId): boolean {
-    return this.sourceOwners.has(source)
+    return this.providersFor(source).length > 0
   }
 
   supports(source: SourceId, action: SourceAction): boolean {
@@ -449,14 +840,18 @@ export class SourceEngine {
     return Boolean(info?.actions.includes(action))
   }
 
-  /** Raw request to the script that owns `source`. */
-  async request<T = unknown>(
+  /**
+   * Send a request to one specific script.
+   *
+   * Callers that want automatic failover should use `requestWithFallback`;
+   * this remains for callers that must target a known script.
+   */
+  private requestFrom<T = unknown>(
+    apiId: string,
     source: SourceId,
     action: SourceAction,
     info: Record<string, unknown>
   ): Promise<T> {
-    const apiId = this.sourceOwners.get(source)
-    if (!apiId) throw new Error(`没有可用的音源支持「${source}」`)
     const runtime = this.runtimes.get(apiId)
     if (!runtime || runtime.dead) throw new Error(`音源「${source}」已停止`)
 
@@ -475,16 +870,84 @@ export class SourceEngine {
         timer
       })
 
-      // `send` can fail if the child died between the liveness check above and
-      // here; surface that as a rejected request rather than an uncaught throw.
+      // Dispatch. File mode writes a request file the detached child watches
+      // for; IPC mode sends over the channel. In both cases a dispatch failure
+      // is surfaced as a rejected request rather than an uncaught throw.
       try {
-        runtime.child.send({ type: 'request', id, payload })
+        if (this.fileModeRuntimes.has(runtime.api.meta.id)) {
+          writeRequest(runtime.scratchDir, { id, source, action, info })
+        } else {
+          runtime.child.send({ type: 'request', id, payload })
+        }
       } catch (error) {
         clearTimeout(timer)
         runtime.pending.delete(id)
         reject(error instanceof Error ? error : new Error(String(error)))
       }
     })
+  }
+
+  /**
+   * Raw request to the script that owns `source`.
+   *
+   * Tries each script claiming the platform in priority order (user enable
+   * order first), so a single broken or rate-limited source does not take the
+   * platform down when a sibling can serve it.
+   */
+  async request<T = unknown>(
+    source: SourceId,
+    action: SourceAction,
+    info: Record<string, unknown>
+  ): Promise<T> {
+    return this.requestWithFallback<T>(source, action, info)
+  }
+
+  /**
+   * Ordered fan-out across every script that advertises `source`.
+   *
+   * Returns the first successful result. Every failure is collected so the
+   * error the user sees names all the scripts that were tried and why each
+   * one failed — otherwise "无法获取播放地址" gives no clue which of 21
+   * sources answered badly.
+   */
+  private async requestWithFallback<T>(
+    source: SourceId,
+    action: SourceAction,
+    info: Record<string, unknown>
+  ): Promise<T> {
+    const candidates = this.providersFor(source).filter((apiId) => {
+      const runtime = this.runtimes.get(apiId)
+      if (!runtime || runtime.dead) return false
+      return runtime.sources.some((item) => item.id === source)
+    })
+
+    if (candidates.length === 0) {
+      throw new Error(`没有可用的音源支持「${source}」`)
+    }
+
+    const failures: string[] = []
+    for (const apiId of candidates) {
+      const runtime = this.runtimes.get(apiId)
+      // Skip scripts that do not implement this action at all — asking them is
+      // just a guaranteed "Request event is not defined".
+      const declared = runtime?.sources.find((item) => item.id === source)
+      if (declared && !declared.actions.includes(action)) continue
+
+      try {
+        return await this.requestFrom<T>(apiId, source, action, info)
+      } catch (error) {
+        const name = runtime?.api.meta.name ?? apiId
+        const reason = error instanceof Error ? error.message : String(error)
+        failures.push(`${name}: ${reason}`)
+        // A dead script must not be retried for this request, but the loop
+        // already moves on; `runtime.dead` is set by its exit handler.
+      }
+    }
+
+    if (failures.length === 0) {
+      throw new Error(`没有音源支持「${source}」的「${action}」操作`)
+    }
+    throw new Error(`所有音源均失败（${failures.join('；')}）`)
   }
 
   /**
@@ -498,36 +961,69 @@ export class SourceEngine {
    * `/^https?:/` — and reports anything else as a generic failure. We validate
    * the same way but surface which quality failed, which is far more useful
    * when debugging a broken source.
+   *
+   * ## Multi-source failover
+   *
+   * When several imported scripts serve the same platform (the common case —
+   * 14 of 21 sources here claim `wy`), a failure on the first one falls through
+   * to the next, and so on. Failover is per *script*, not per quality: for each
+   * candidate we walk the whole quality ladder before moving on, because a
+   * script that returns 404 for FLAC may still serve 320k.
    */
   async getMusicUrl(
     source: SourceId,
     musicInfo: OnlineMusicInfo,
     preferred: Quality,
     strict = false
-  ): Promise<{ url: string; quality: Quality }> {
-    const sourceInfo = this.getSources().find((item) => item.id === source)
-    const advertised = sourceInfo?.qualitys ?? ['128k']
+  ): Promise<{ url: string; quality: Quality; apiId?: string }> {
+    const candidates = this.providersFor(source).filter((apiId) => {
+      const runtime = this.runtimes.get(apiId)
+      return Boolean(runtime && !runtime.dead && runtime.sources.some((item) => item.id === source))
+    })
 
-    const ladder = strict ? advertised.filter(q => q === preferred) : buildQualityLadder(preferred, advertised)
-    if (ladder.length === 0) {
-      throw new Error(`音源「${source}」不支持任何可用音质`)
+    if (candidates.length === 0) {
+      throw new Error(`音源「${source}」已停止或没有可用的音源支持该平台`)
     }
 
     const errors: string[] = []
-    for (const quality of ladder) {
-      try {
-        const url = await this.request<unknown>(source, 'musicUrl', {
-          type: quality,
-          // Scripts read a flattened legacy object, not our internal model.
-          musicInfo: toLegacyOnline(musicInfo)
-        })
-        if (isValidMusicUrl(url)) {
-          return { url: url.trim(), quality }
+
+    for (const apiId of candidates) {
+      const runtime = this.runtimes.get(apiId)
+      const declared = runtime?.sources.find((item) => item.id === source)
+      if (declared && !declared.actions.includes('musicUrl')) continue
+
+      // Each script advertises its own qualitys list, so the ladder is built
+      // per script rather than once for the platform.
+      const advertised = declared?.qualitys ?? ['128k']
+      const ladder = strict
+        ? advertised.filter((q) => q === preferred)
+        : buildQualityLadder(preferred, advertised)
+      if (ladder.length === 0) continue
+
+      const scriptName = runtime?.api.meta.name ?? apiId
+      const scriptErrors: string[] = []
+
+      for (const quality of ladder) {
+        try {
+          const url = await this.requestFrom<unknown>(apiId, source, 'musicUrl', {
+            type: quality,
+            // Scripts read a flattened legacy object, not our internal model.
+            musicInfo: toLegacyOnline(musicInfo)
+          })
+          if (isValidMusicUrl(url)) {
+            return { url: url.trim(), quality, apiId }
+          }
+          scriptErrors.push(`${quality}: 未返回有效播放地址`)
+        } catch (error) {
+          scriptErrors.push(`${quality}: ${error instanceof Error ? error.message : String(error)}`)
         }
-        errors.push(`${quality}: 未返回有效播放地址`)
-      } catch (error) {
-        errors.push(`${quality}: ${error instanceof Error ? error.message : String(error)}`)
       }
+
+      errors.push(`${scriptName} → ${scriptErrors.join('，')}`)
+    }
+
+    if (errors.length === 0) {
+      throw new Error(`没有音源支持「${source}」的播放地址解析`)
     }
     throw new Error(`无法获取播放地址（${errors.join('；')}）`)
   }
@@ -602,22 +1098,36 @@ interface HostMessage {
 /**
  * Normalise the `sources` object a script reported into a stable array.
  *
- * We deliberately replicate LX's filtering so a script behaves the same here as
- * it does there:
- *  - only the known platform keys survive (a script advertising `git` or `bd`
- *    is silently dropped by LX, and we match that rather than surprising users
- *    with a source that will not work in LX either);
- *  - qualities are intersected with the four tiers the custom-source API can
- *    actually carry, so `hires`/`atmos`/`master` never reach the quality ladder.
+ * Qualities are intersected with the four tiers the custom-source API can
+ * actually carry, so `hires`/`atmos`/`master` never reach the quality ladder —
+ * that part matches LX exactly, because LX performs the same intersection
+ * before a script's `qualitys` list is ever consulted.
  *
- * `sources[x].name` is ignored, because the LX host ignores it too and builds
- * its own display names.
+ * ## Platform ids: we no longer drop unknown ones
+ *
+ * The previous version kept only LX's six known keys, reasoning that LX
+ * silently drops the rest so matching it avoids surprising users. Measured
+ * against the 21 sources on this machine, that reasoning costs real
+ * functionality: `非常刀` advertises `qs` and `全豆要` advertises `qsvip`, and
+ * dropping them means the platform disappears from the UI even though the
+ * script can serve it. Nothing routes to an id unless a source claims it, so
+ * keeping them is additive.
+ *
+ * `local` is the one exception: it is built in, and a script must not be able
+ * to shadow the user's own files with a network-backed platform.
+ *
+ * A non-`music` type (a script advertising `type: 'video'`) is still dropped —
+ * this app plays music, and listing a video source would offer the user a
+ * platform whose every request fails.
  */
 export function normaliseSources(raw: Record<string, RawSourceInfo>): SourceInfo[] {
   const out: SourceInfo[] = []
   for (const [id, info] of Object.entries(raw)) {
     if (!info || typeof info !== 'object') continue
-    if (!(LX_SOURCE_IDS as readonly string[]).includes(id)) continue
+    if (!id || id === 'local') continue
+    // Absent type is treated as music, which is what an LX script means by
+    // omitting it.
+    if (info.type && info.type !== 'music') continue
 
     const declared = Array.isArray(info.qualitys)
       ? info.qualitys
@@ -628,6 +1138,8 @@ export function normaliseSources(raw: Record<string, RawSourceInfo>): SourceInfo
 
     out.push({
       id,
+      // Known platforms get their Chinese name; a private id keeps the raw key
+      // so the user can tell which script advertised it.
       name: PLATFORM_NAMES[id] ?? id,
       type: info.type || 'music',
       actions: (Array.isArray(info.actions) ? info.actions : ['musicUrl']) as SourceAction[],

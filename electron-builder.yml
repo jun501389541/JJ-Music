@@ -51,10 +51,15 @@ win:
     - target: zip
       arch: [x64]
   icon: build/icon.ico
-  artifactName: ${productName}-${version}-Portable-${arch}.${ext}
+  # Hyphenated, not `${productName}`: the product name contains a space, and
+  # GitHub normalises spaces in release-asset filenames to dots on upload
+  # (`JJ Music-0.1.2-...` became `JJ.Music-0.1.2-...`), which silently broke
+  # every download link in the README. The 0.1.1 assets were named with
+  # hyphens, so this also restores the established convention.
+  artifactName: JJ-Music-${version}-Portable-${arch}.${ext}
 
 nsis:
-  artifactName: ${productName}-${version}-Setup-${arch}.${ext}
+  artifactName: JJ-Music-${version}-Setup-${arch}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

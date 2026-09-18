@@ -114,6 +114,14 @@ export class WebAudioEngine implements AudioEngine {
     const context = new Ctor()
     this.context = context
 
+    // Re-apply a device chosen before the graph existed. The graph is built on
+    // the first play, so a selection made on the settings page would otherwise
+    // be forgotten until the user picked it again mid-playback.
+    if (this.outputDeviceId) {
+      const switchable = context as AudioContext & { setSinkId?: (id: string) => Promise<void> }
+      void switchable.setSinkId?.(this.outputDeviceId).catch(() => undefined)
+    }
+
     const source = context.createMediaElementSource(this.element)
     this.source = source
 
@@ -346,10 +354,20 @@ export class WebAudioEngine implements AudioEngine {
   /* ------------------------------------------------------------ *
    * Output device selection
    *
-   * Implemented with `HTMLMediaElement.setSinkId`, which Chromium exposes but
-   * only after the `speaker-selection` permission is granted. Everything here
-   * degrades to "system default" when the API or the permission is missing, so
-   * the feature is additive rather than a hard requirement.
+   * ## Why the AudioContext is the one that matters
+   *
+   * The element is wired into a Web Audio graph
+   * (`element → MediaElementSource → filters → gain → analyser → destination`),
+   * so its samples leave through the **AudioContext's** destination, not
+   * through the element's own output. Setting only `element.setSinkId` is
+   * therefore a no-op that still *reports success* — the switch silently does
+   * nothing, which is exactly the "切换用不了" symptom.
+   *
+   * Both are set: the context sink is what actually routes the audio, and the
+   * element sink is kept in step so the graph and the element agree if the
+   * context is ever recreated.
+   *
+   * Degrades to "system default" when either API is missing.
    * ------------------------------------------------------------ */
 
   async listOutputDevices(): Promise<AudioOutputDevice[]> {
@@ -358,9 +376,10 @@ export class WebAudioEngine implements AudioEngine {
       const devices = await navigator.mediaDevices.enumerateDevices()
       for (const device of devices) {
         if (device.kind !== 'audiooutput') continue
-        // Before permission is granted, labels are empty and deviceIds are
-        // blanked; skip those rather than offering unselectable rows.
-        if (!device.deviceId || device.deviceId === 'default') continue
+        // Skip the two synthetic entries Chromium adds: `default` duplicates
+        // the real device list, and `communications` is a role alias rather
+        // than a distinct output.
+        if (!device.deviceId || device.deviceId === 'default' || device.deviceId === 'communications') continue
         list.push({
           deviceId: device.deviceId,
           label: device.label || `输出设备 ${list.length}`
@@ -375,16 +394,24 @@ export class WebAudioEngine implements AudioEngine {
   async setOutputDevice(deviceId: string): Promise<boolean> {
     const element = this.element as HTMLAudioElement & {
       setSinkId?: (id: string) => Promise<void>
-      sinkId?: string
     }
-    if (typeof element.setSinkId !== 'function') return false
+    const context = this.context as (AudioContext & { setSinkId?: (id: string) => Promise<void> }) | null
+    const contextCanSwitch = typeof context?.setSinkId === 'function'
+
+    if (!contextCanSwitch && typeof element.setSinkId !== 'function') return false
+
     try {
-      await element.setSinkId(deviceId)
+      // The context first: it is the real output for a Web Audio graph.
+      if (contextCanSwitch) await context!.setSinkId!(deviceId)
+      if (typeof element.setSinkId === 'function') {
+        // Best-effort: a failure here does not invalidate the context switch.
+        await element.setSinkId(deviceId).catch(() => undefined)
+      }
       this.outputDeviceId = deviceId
       return true
     } catch {
-      // Most commonly a denied `speaker-selection` permission, or a device that
-      // disappeared between listing and selection.
+      // Device disappeared between listing and selection, or the permission was
+      // denied. Report failure so the caller keeps the previous device.
       return false
     }
   }

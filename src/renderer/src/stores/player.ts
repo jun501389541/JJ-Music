@@ -597,10 +597,10 @@ export const usePlayerStore = defineStore('player', () => {
   /**
    * Output device handling.
    *
-   * `setSinkId` takes effect on the element immediately, but some platforms
-   * only actually re-route on the next load — so a track that is currently
-   * playing is reloaded from its current position to make the switch audible
-   * rather than silently deferred.
+   * Switching the AudioContext's sink re-routes the live graph immediately, so
+   * playback continues uninterrupted — no reload, no seek, no audible gap.
+   * (The engine sets both the context and the element sink; the context is the
+   * one that actually carries a Web Audio graph's output.)
    */
   const outputDeviceId = ref('')
   const outputDevices = ref<Array<{ deviceId: string; label: string }>>([])
@@ -612,20 +612,9 @@ export const usePlayerStore = defineStore('player', () => {
 
   async function setOutputDevice(deviceId: string): Promise<boolean> {
     const instance = ensureEngine()
-    const wasPlaying = playing.value
-    const position = currentTime.value
     const ok = await instance.setOutputDevice(deviceId)
     if (!ok) return false
     outputDeviceId.value = deviceId
-    // Re-load so the new sink is actually used, then restore position/state.
-    if (wasPlaying && currentTrack.value) {
-      try {
-        await playTrackAt(currentIndex.value, { retryUrl: false })
-        if (position > 0) seek(position)
-      } catch {
-        /* leave playback stopped rather than failing the device switch */
-      }
-    }
     return true
   }
 

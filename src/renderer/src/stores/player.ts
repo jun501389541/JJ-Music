@@ -129,12 +129,17 @@ export const usePlayerStore = defineStore('player', () => {
       playing.value = true
       loading.value = false
       waiting.value = false
+      // Audio is flowing again, so the stall watchdog has nothing to watch.
+      clearStallTimer()
     })
     instance.on('paused', () => {
       playing.value = false
+      clearStallTimer()
     })
     instance.on('waiting', (isWaiting) => {
       waiting.value = isWaiting
+      if (isWaiting) armStallTimer(playGeneration)
+      else clearStallTimer()
     })
     instance.on('ended', () => {
       void handleEnded()
@@ -280,13 +285,79 @@ export const usePlayerStore = defineStore('player', () => {
   let mayRetryUrl = true
   let loadedTrackId: string | null = null
 
+  /**
+   * A source that never answers must not hold the player hostage.
+   *
+   * The engine falls through to the next capable 音源 on an outright failure,
+   * but a *hung* request (dead relay, silently dropped connection) just sits in
+   * `pending` until the engine's own 20 s ceiling. Meanwhile the UI shows a
+   * spinner and the user has no way to know whether it is working. Racing the
+   * resolve against a shorter timer lets us report the failure and move on.
+   *
+   * Kept just under the engine's per-request ceiling so this fires first and
+   * the message the user sees comes from here, with the track named.
+   */
+  const URL_RESOLVE_TIMEOUT_MS = 15_000
+
+  /** How long audio may stall before we treat it as a failed source. */
+  const STALL_TIMEOUT_MS = 20_000
+
+  let stallTimer: ReturnType<typeof setTimeout> | undefined
+
+  function clearStallTimer(): void {
+    if (stallTimer) {
+      clearTimeout(stallTimer)
+      stallTimer = undefined
+    }
+  }
+
+  /**
+   * Arm the stall watchdog while a track is buffering.
+   *
+   * A source can hand back a URL that resolves but never streams — the request
+   * succeeds, the element fires `waiting`, and it stays that way. Without a
+   * watchdog that is an indefinite hang.
+   */
+  function armStallTimer(generation: number): void {
+    clearStallTimer()
+    stallTimer = setTimeout(() => {
+      stallTimer = undefined
+      if (generation !== playGeneration || !waiting.value) return
+      handlePlaybackError(new Error('音源响应超时，已自动尝试切换'))
+    }, STALL_TIMEOUT_MS)
+  }
+
+  /** Resolve a playable URL, giving up (and failing over) if the source hangs. */
+  async function resolveWithTimeout(
+    track: PlayableTrack,
+    quality_: Quality
+  ): Promise<ResolvedSource> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        resolve(track, quality_),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('音源响应超时，正在尝试其他音源')),
+            URL_RESOLVE_TIMEOUT_MS
+          )
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   function handlePlaybackError(err: Error): void {
     if (failureGeneration === playGeneration) return
     failureGeneration = playGeneration
+    clearStallTimer()
     const track = currentTrack.value
     if (track && !isLocalTrack(track)) {
       urlCache.delete(urlKey(track, quality.value))
       if (mayRetryUrl) {
+        // Clearing the cached URL makes the retry ask the engine again, which
+        // is what walks the source list to the next capable 音源.
         void playTrackAt(currentIndex.value, { retryUrl: false })
         return
       }
@@ -297,11 +368,31 @@ export const usePlayerStore = defineStore('player', () => {
     error.value = err.message
   }
 
+  /**
+   * Guard for a lyric request.
+   *
+   * Two things can invalidate an in-flight request:
+   *   - a different track started (the request is simply obsolete), or
+   *   - a *newer lyric request* was issued for the same track.
+   *
+   * What must NOT invalidate it is a bump of `playGeneration` alone.
+   *
+   * That distinction is the "歌词有概率不会恢复" bug. `playGeneration` is bumped
+   * by `playTrackAt` and by `stop()`, and it used to be part of this guard. Any
+   * bump that happened while lyrics were still loading — a repeat/retry of the
+   * same track, a seek-triggered re-resolve, or the auto-advance path — made
+   * `isCurrent()` return false at the `return` statements inside `loadLyrics`,
+   * which left `lyrics` as `null` *and* skipped the `finally` branch that clears
+   * `lyricLoading`. The result was a player stuck with no lyrics and no error,
+   * recoverable only by switching tracks.
+   *
+   * Scoping the guard to the track identity plus a lyric-request sequence keeps
+   * stale responses out while letting a still-valid request finish.
+   */
   function beginLyricRequest(track: PlayableTrack): () => boolean {
     const generation = ++lyricGeneration
-    const playback = playGeneration
-    return () => generation === lyricGeneration && playback === playGeneration &&
-      currentTrack.value?.id === track.id
+    return () =>
+      generation === lyricGeneration && currentTrack.value?.id === track.id
   }
 
   /**
@@ -343,7 +434,7 @@ export const usePlayerStore = defineStore('player', () => {
     const isStale = (): boolean => generation !== playGeneration
 
     try {
-      const source = await resolve(track, quality.value)
+      const source = await resolveWithTimeout(track, quality.value)
       // A newer selection superseded this one while we were resolving.
       if (isStale()) return
 
@@ -361,10 +452,19 @@ export const usePlayerStore = defineStore('player', () => {
       }
       if (isStale()) return
       loading.value = false
+      armStallTimer(generation)
       void loadLyrics(track)
     } catch (err) {
       if (isStale()) return
-      error.value = err instanceof Error ? err.message : String(err)
+      // A URL that never arrived is a failed *source*, not a failed track:
+      // hand it to the same failover path the engine uses so the next capable
+      // 音源 gets a chance instead of stopping playback outright.
+      const message = err instanceof Error ? err.message : String(err)
+      if (!isLocalTrack(track) && message.includes('超时')) {
+        handlePlaybackError(new Error(`${message}（${track.name}）`))
+        return
+      }
+      error.value = message
       loading.value = false
     }
   }
@@ -564,6 +664,7 @@ export const usePlayerStore = defineStore('player', () => {
   function stop(): void {
     playGeneration += 1
     lyricGeneration += 1
+    clearStallTimer()
     loadedTrackId = null
     engine.value?.stop()
     playing.value = false
@@ -612,7 +713,17 @@ export const usePlayerStore = defineStore('player', () => {
    * therefore showed nothing for essentially the entire library.
    */
   async function loadLyrics(track: PlayableTrack): Promise<void> {
-    if (currentTrack.value?.id !== track.id) return
+    // A request for a track that is no longer current is obsolete. Clear the
+    // stale lyrics explicitly: bailing out silently here used to leave the
+    // *previous* track's lyrics on screen, since nothing else resets them on
+    // this path.
+    if (currentTrack.value?.id !== track.id) {
+      lyrics.value = null
+      lyricSource.value = 'none'
+      lyricError.value = null
+      lyricLoading.value = false
+      return
+    }
     const isCurrent = beginLyricRequest(track)
     lyricLoading.value = true
     lyricError.value = null
@@ -682,6 +793,10 @@ export const usePlayerStore = defineStore('player', () => {
       lyrics.value = null
       lyricError.value = error instanceof Error ? error.message : String(error)
     } finally {
+      // Always release the spinner when this request is still the active one.
+      // When it has been superseded the newer request owns the flag and clears
+      // it itself; clearing it here would also be harmless, but leaving it set
+      // on a superseded request is what strands the UI mid-load.
       if (isCurrent()) lyricLoading.value = false
     }
   }

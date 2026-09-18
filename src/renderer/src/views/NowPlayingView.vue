@@ -11,7 +11,7 @@ import AppIcon from '../components/AppIcon.vue'
 import EqualizerPanel from '../components/EqualizerPanel.vue'
 import TrackList from '../components/TrackList.vue'
 import { toMediaUrl } from '@shared/media-url'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { isLocalTrack } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -128,20 +128,58 @@ const spec = computed(() => {
 
 const lines = computed(() => player.lyrics?.lines ?? [])
 
+/**
+ * Centre the active lyric line.
+ *
+ * `animate: false` is used when the pane has just been mounted. Re-entering the
+ * now-playing view rebuilds the DOM with the scroll container at `top: 0`;
+ * because `activeLyricIndex` has not *changed*, the watcher below never fired
+ * and the pane stayed at the first line until playback advanced to the next
+ * one — which then animated the whole way down from 0. That is the "歌词先
+ * 回到 0 秒再跳回当前位置" flash. Jumping straight to the right line on mount
+ * removes the round trip.
+ */
+function centerActiveLine(animate: boolean): void {
+  const index = player.activeLyricIndex
+  if (index < 0) return
+  const pane = lyricsPane.value
+  if (!pane) return
+  const element = pane.querySelector<HTMLElement>(`[data-line="${index}"]`)
+  if (!element) return
+  const target = element.offsetTop - pane.clientHeight / 2 + element.clientHeight / 2
+  pane.scrollTo({
+    top: Math.max(0, target),
+    behavior: animate && !library.settings.reduceMotion ? 'smooth' : 'auto'
+  })
+}
+
 /** Keep the active line centred as playback advances. */
 watch(
   () => player.activeLyricIndex,
-  async (index) => {
-    if (index < 0) return
+  async () => {
     await nextTick()
-    const pane = lyricsPane.value
-    if (!pane) return
-    const element = pane.querySelector<HTMLElement>(`[data-line="${index}"]`)
-    if (!element) return
-    const target = element.offsetTop - pane.clientHeight / 2 + element.clientHeight / 2
-    pane.scrollTo({ top: Math.max(0, target), behavior: library.settings.reduceMotion ? 'auto' : 'smooth' })
+    centerActiveLine(true)
   }
 )
+
+// A lyric list that arrives *after* mount also needs positioning, and it must
+// not animate: the user is joining a song already in progress.
+watch(
+  () => player.lyrics,
+  async (value) => {
+    if (!value) return
+    await nextTick()
+    centerActiveLine(false)
+  }
+)
+
+onMounted(async () => {
+  // Two frames: one for the pane to exist, one for layout to settle so
+  // `offsetTop` reflects the real position rather than an intermediate one.
+  await nextTick()
+  centerActiveLine(false)
+  requestAnimationFrame(() => centerActiveLine(false))
+})
 
 function onSeek(ratio: number): void {
   player.seekRatio(ratio)
@@ -150,6 +188,75 @@ function onSeek(ratio: number): void {
 function onVolume(value: number): void {
   player.setVolume(value)
   void library.updateSettings({ volume: value })
+}
+
+/**
+ * Volume panel: hover to open, click to pin, wheel to nudge.
+ *
+ * Mirrors the toolbar's volume group in PlayerBar so the two surfaces behave
+ * identically — the same gesture in either place does the same thing.
+ */
+const volumeOpen = ref(false)
+const volumeAnchor = ref<HTMLElement | null>(null)
+const volumePinned = ref(false)
+let volumeCloseTimer: ReturnType<typeof setTimeout> | undefined
+
+function cancelCloseVolume(): void {
+  if (volumeCloseTimer) {
+    clearTimeout(volumeCloseTimer)
+    volumeCloseTimer = undefined
+  }
+}
+
+function openVolume(): void {
+  cancelCloseVolume()
+  volumeOpen.value = true
+}
+
+function scheduleCloseVolume(): void {
+  if (volumePinned.value) return
+  cancelCloseVolume()
+  volumeCloseTimer = setTimeout(() => {
+    volumeCloseTimer = undefined
+    volumeOpen.value = false
+  }, 220)
+}
+
+function toggleVolumePanel(): void {
+  cancelCloseVolume()
+  const next = !volumeOpen.value
+  volumeOpen.value = next
+  volumePinned.value = next
+}
+
+function bumpVolume(event: WheelEvent): void {
+  const step = event.deltaY < 0 ? 0.03 : -0.03
+  const next = Math.min(1, Math.max(0, player.volume + step))
+  onVolume(next)
+}
+
+/** Lyrics can be long; the wheel over them should still scroll, not adjust. */
+function onDocumentPointerDown(event: PointerEvent): void {
+  if (!volumeOpen.value) return
+  if (volumeAnchor.value?.contains(event.target as Node)) return
+  volumeOpen.value = false
+  volumePinned.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocumentPointerDown)
+  document.addEventListener('keydown', onVolumeKeydown)
+})
+onBeforeUnmount(() => {
+  cancelCloseVolume()
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
+  document.removeEventListener('keydown', onVolumeKeydown)
+})
+
+function onVolumeKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || !volumeOpen.value) return
+  volumeOpen.value = false
+  volumePinned.value = false
 }
 
 /** Clicking a lyric line jumps to that point, as in Salt Player. */
@@ -172,7 +279,18 @@ function seekToLine(index: number): void {
     </button>
 
     <div class="np__caption">JJ Music <span>正在播放</span></div>
-    <div class="np__window-actions"><button class="icon-btn" title="全屏" @click="jj.window.fullscreen()"><AppIcon name="expand" :size="17" /></button><button class="icon-btn" title="更多播放选项" @click="ui.openMenu($event, playbackActions())"><AppIcon name="more" /></button></div>
+    <!--
+      The now-playing view takes over the whole window, so it must carry the
+      same window controls the title bar does — otherwise the only way to
+      minimise or close is to leave this view first. "收起" (the chevron at the
+      top left) returns to the library; these buttons act on the window itself.
+    -->
+    <div class="np__window-actions">
+      <button class="icon-btn np__more" title="更多播放选项" aria-label="更多播放选项" @click="ui.openMenu($event, playbackActions())"><AppIcon name="more" :size="17" /></button>
+      <button class="win-btn" title="最小化" aria-label="最小化" @click="jj.window.minimize()"><svg width="12" height="12"><path d="M1 6h10" stroke="currentColor"/></svg></button>
+      <button class="win-btn" title="最大化 / 还原" aria-label="最大化" @click="jj.window.maximize()"><svg width="12" height="12"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor"/></svg></button>
+      <button class="win-btn close" title="关闭" aria-label="关闭" @click="jj.window.close()"><AppIcon name="close" :size="15"/></button>
+    </div>
     <div class="np__body">
       <!-- left: artwork + meta -->
       <section class="np__left">
@@ -241,23 +359,42 @@ function seekToLine(index: number): void {
                 <path d="M10.4 3H12v10h-1.6zM3.5 3.4v9.2L10 8z" />
               </svg>
             </button>
-            <button
-              class="icon-btn"
-              type="button"
-              :title="player.muted ? '取消静音' : '静音'"
-              @click="player.toggleMute()"
+            <div
+              ref="volumeAnchor"
+              class="np__volume-group"
+              @mouseenter="openVolume"
+              @mouseleave="scheduleCloseVolume"
+              @wheel.prevent="bumpVolume"
             >
-              <TransportIcon :name="player.muted ? 'volume-mute' : 'volume'" :size="18" />
-            </button>
+              <button
+                class="icon-btn"
+                type="button"
+                :title="player.muted ? '取消静音' : '音量'"
+                :aria-expanded="volumeOpen"
+                @click="toggleVolumePanel"
+              >
+                <TransportIcon :name="player.muted ? 'volume-mute' : 'volume'" :size="18" />
+              </button>
+              <div
+                v-if="volumeOpen"
+                class="np__volume-pop"
+                role="dialog"
+                aria-label="音量调节"
+                @mouseenter="cancelCloseVolume"
+                @mouseleave="scheduleCloseVolume"
+              >
+                <SliderBar
+                  variant="vertical"
+                  :value="player.muted ? 0 : player.volume"
+                  aria-label="音量"
+                  @update:value="onVolume"
+                />
+                <small class="np__volume-value">{{ player.muted ? '静音' : `${Math.round(player.volume * 100)}%` }}</small>
+              </div>
+            </div>
           </div>
 
           <div class="np__tools"><button class="btn" :aria-expanded="ui.playbackPanel === 'eq'" @click="togglePanel('eq')"><AppIcon name="audio" :size="16"/>EQ 均衡器</button><button class="btn" :aria-expanded="ui.playbackPanel === 'queue'" @click="togglePanel('queue')"><AppIcon name="list" :size="16"/>播放列表 <span>{{ player.queue.length }}</span></button></div>
-          <SliderBar
-            class="np__volume"
-            :value="player.muted ? 0 : player.volume"
-            aria-label="音量"
-            @update:value="onVolume"
-          />
         </div>
       </section>
 
@@ -551,10 +688,37 @@ function seekToLine(index: number): void {
   transform: scale(1.05);
 }
 
-.np__volume {
-  max-width: 220px;
-  margin: 0 auto;
-  width: 100%;
+/* The speaker icon anchors the popover; the button itself is unchanged. */
+.np__volume-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Tall rounded panel holding a vertical fader and the percentage beneath it,
+   matching the reference design. */
+.np__volume-pop {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 14px 12px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(28px);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px #0004;
+  z-index: 1200;
+}
+
+.np__volume-value {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------------- lyrics ---------------- */
@@ -744,9 +908,9 @@ code {
   }
 }
 .np{--bg-base:#191b23;--bg-panel:#252832;--text-primary:#f5f5f7;--text-secondary:#b2b4c0;--text-tertiary:#777a89;color:var(--text-primary)}
-.np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 230px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:20px;top:10px;z-index:3;display:flex;gap:8px}
+.np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 230px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:0;top:0;z-index:3;display:flex;height:var(--titlebar-height);-webkit-app-region:no-drag}.np__window-actions .win-btn{width:46px;display:grid;place-items:center;color:var(--text-secondary);background:none;border:0;cursor:pointer}.np__window-actions .win-btn:hover{background:var(--bg-hover)}.np__window-actions .win-btn.close:hover{background:#c42b1c;color:white}.np__window-actions .np__more{width:38px;height:var(--titlebar-height);display:grid;place-items:center;border-radius:0;color:var(--text-secondary)}.np__window-actions .np__more:hover{background:var(--bg-hover)}
 .np__body{grid-template-columns:minmax(280px, .9fr) minmax(300px,1.1fr);padding:82px 7vw 35px;gap:8vw}
-.np__left{align-items:center;justify-content:center}.np__art{width:min(100%,340px,39vh);flex-shrink:0;border-radius:8px;margin-bottom:24px}.circle-cover .np__art{border-radius:50%}.np__meta,.np__transport{width:100%;max-width:380px}.np__title{font-size:24px;font-weight:550}.np__artist{font-size:15px}.np__album{font-size:12px}.np__spec{font-size:11px}.np__transport{margin-top:28px}.np__play{background:#e7e8ed;color:#20232a}.np__play:hover{background:white}.np__buttons{gap:25px}.np__right{padding:16px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;padding:18px 8px;line-height:1.5;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative;padding:40vh 0}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}.np__volume{opacity:.6}
+.np__left{align-items:center;justify-content:center}.np__art{width:min(100%,340px,39vh);flex-shrink:0;border-radius:8px;margin-bottom:24px}.circle-cover .np__art{border-radius:50%}.np__meta,.np__transport{width:100%;max-width:380px}.np__title{font-size:24px;font-weight:550}.np__artist{font-size:15px}.np__album{font-size:12px}.np__spec{font-size:11px}.np__transport{margin-top:28px}.np__play{background:#e7e8ed;color:#20232a}.np__play:hover{background:white}.np__buttons{gap:25px}.np__right{padding:16px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;padding:18px 8px;line-height:1.5;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative;padding:40vh 0}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}
 @media(max-height:700px){.np__body{padding-top:62px;padding-bottom:20px}.np__art{width:min(100%,29vh);margin-bottom:16px}.np__transport{margin-top:15px}.np__album{display:none}.np__title{font-size:20px}}
 .np{color-scheme:dark;--bg-hover:#303340;--bg-active:#353947;--border-subtle:#ffffff10;--border-strong:#ffffff20;--bg-input:#191b23}
 .np__tools{display:flex;justify-content:center;gap:12px;margin:4px 0}.np__tools .btn{font-size:11px;border-color:#ffffff20;color:#c9cbd4;gap:8px;height:30px;border-radius:6px}.np__tools span{font-size:10px;opacity:.6}.np__tools .btn[aria-expanded="true"]{background:#ffffff18;color:white}

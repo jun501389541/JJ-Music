@@ -15,6 +15,11 @@ release/
 *.pem
 *.key
 
+# Scratch scripts and probe output. Diagnostics are written as `tmp-*.cjs/mjs`
+# at the repository root (and one of them was accidentally committed); they
+# reference absolute paths on the author's machine, so they must never ship.
+tmp-*
+
 # The generated app icon IS committed: electron-builder reads build/icon.ico at
 # package time, and regenerating it on every clone would be wasted work. It is
 # reproducible with `npm run icon`.

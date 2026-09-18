@@ -160,12 +160,72 @@ export interface FlacRepairResult {
 }
 
 /**
+ * Bump when the repair output changes shape.
+ *
+ * ## Why a cache version is not optional
+ *
+ * The key used to be `sha1(path|size|mtime)` alone. When the repair algorithm
+ * was fixed, every previously-cached entry kept the *same* key — the source
+ * file had not changed — so the fixed code happily reused copies produced by
+ * the broken algorithm. On a real machine that is exactly what happened: the
+ * file still would not play after the fix because the corrupt cache entry was
+ * served again, and every test passed because tests always ran against a fresh
+ * temporary directory, where no stale entry existed.
+ *
+ * Versioning the key means a change in this file's output invalidates every
+ * older entry, which is the property the un-versioned key silently lacked.
+ */
+const CACHE_VERSION = 2
+
+/**
+ * Validate a cached copy before trusting it.
+ *
+ * `existsSync` is not sufficient: a partially written or algorithmically stale
+ * file is still a file. Walking the block chain and confirming the audio starts
+ * at a frame sync costs one small read and turns "cache poisoning is invisible"
+ * into "a bad entry repairs itself".
+ */
+function isUsableCache(filePath: string): boolean {
+  let fd: number
+  try {
+    fd = openSync(filePath, 'r')
+  } catch {
+    return false
+  }
+  try {
+    const size = statSync(filePath).size
+    if (size <= 0) return false
+    let offset = 4
+    const magic = Buffer.alloc(4)
+    if (readSync(fd, magic, 0, 4, 0) < 4 || magic.toString('ascii') !== 'fLaC') return false
+    for (let guard = 0; guard < 64; guard += 1) {
+      const header = Buffer.alloc(BLOCK_HEADER)
+      if (readSync(fd, header, 0, BLOCK_HEADER, offset) < BLOCK_HEADER) return false
+      const last = (header[0] & 0x80) !== 0
+      const type = header[0] & 0x7f
+      if (type > 6) return false // 7..126 are invalid block types
+      const length = header.readUIntBE(1, 3)
+      offset += BLOCK_HEADER + length
+      if (offset > size) return false
+      if (last) break
+    }
+    // The audio must begin on a frame sync word, or the chain ended wrongly.
+    const frame = Buffer.alloc(2)
+    if (readSync(fd, frame, 0, 2, offset) < 2) return false
+    return frame[0] === 0xff && (frame[1] & 0xfc) === 0xf8
+  } catch {
+    return false
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
  * Ensure a playable copy of a FLAC exists.
  *
  * Files whose picture MIME is already set are returned unchanged (the common
  * case, costing one small read). A file that needs repair gets a cache copy
- * under `cacheDir`, keyed by its path+mtime+size so a re-tagged file is not
- * served stale.
+ * under `cacheDir`.
  */
 export async function ensurePlayableFlac(
   filePath: string,
@@ -179,12 +239,17 @@ export async function ensurePlayableFlac(
 
   const stat = statSync(filePath)
   const key = createHash('sha1')
-    .update(`${filePath}|${stat.size}|${stat.mtimeMs}`)
+    .update(`v${CACHE_VERSION}|${filePath}|${stat.size}|${stat.mtimeMs}`)
     .digest('hex')
     .slice(0, 16)
   const cached = join(cacheDir, `${key}.flac`)
 
-  if (existsSync(cached)) return { path: cached, repaired: true }
+  // Trust the cache only after confirming the bytes are a coherent FLAC.
+  // A bad entry is deleted rather than served, so it regenerates below.
+  if (existsSync(cached)) {
+    if (isUsableCache(cached)) return { path: cached, repaired: true }
+    try { unlinkSync(cached) } catch { /* regenerate regardless */ }
+  }
 
   const mime = detectMime(region.head.subarray(layout.dataAt, layout.dataAt + 4))
   const mimeBytes = Buffer.from(mime, 'ascii')

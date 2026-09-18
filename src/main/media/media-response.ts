@@ -40,6 +40,20 @@ export function parseRange(value: string, size: number): { start: number; end: n
 export interface MediaAccess {
   roots: string[]
   files?: string[]
+  /**
+   * Serve this file's bytes instead of the one named in the request URL.
+   *
+   * Used by the FLAC repair path: the renderer asks for the original file (it
+   * has no idea a repair exists), and the main process answers with a repaired
+   * copy. The substitution is deliberately explicit rather than a rewrite of
+   * the request URL, so the access check below still validates the *requested*
+   * path against the library.
+   *
+   * The substitute must also appear in `files` or fall under `roots`, otherwise
+   * the access check rejects it — a substitution cannot be used to escape the
+   * allow-list.
+   */
+  substitute?: string
 }
 
 /** Resolve links/junctions before checking boundaries; sibling prefixes are not roots. */
@@ -67,9 +81,22 @@ export async function serveMedia(request: Request, access: MediaAccess): Promise
     return new Response(null, { status: 400 })
   }
   try {
-    const path = await realpath(requested)
+    // The requested path must always pass the access check, even when the bytes
+    // come from a substitute: that keeps the allow-list authoritative for what
+    // the renderer is allowed to ask for.
+    const requestedReal = await realpath(requested)
+    if (!MIME[extname(requestedReal).toLowerCase()] || !await allowed(requestedReal, access)) {
+      return new Response(null, { status: 403 })
+    }
+
+    // Serve the substitute's bytes when one is supplied (FLAC repair). It is
+    // checked against the same allow-list, so a substitute can never widen
+    // access — only redirect an already-permitted request to a permitted file.
+    const path = access.substitute ? await realpath(access.substitute) : requestedReal
+    if (access.substitute && !await allowed(path, access)) return new Response(null, { status: 403 })
+
     const contentType = MIME[extname(path).toLowerCase()]
-    if (!contentType || !await allowed(path, access)) return new Response(null, { status: 403 })
+    if (!contentType) return new Response(null, { status: 403 })
     const info = await stat(path)
     if (!info.isFile()) return new Response(null, { status: 404 })
     const headers: Record<string, string> = {

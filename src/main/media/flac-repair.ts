@@ -35,6 +35,7 @@
 
 import { createReadStream, existsSync, mkdirSync, openSync, readSync, closeSync, statSync, renameSync, unlinkSync } from 'node:fs'
 import { open } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 
@@ -53,8 +54,8 @@ interface PictureLayout {
   descLengthAt: number
   /** Offset of the image data. */
   dataAt: number
-  /** Offset just past the whole metadata region (where audio frames begin). */
-  audioAt: number
+  /** The block's declared 24-bit length, so the payload slice stays in bounds. */
+  blockLength: number
 }
 
 /**
@@ -95,7 +96,7 @@ function readMetadataRegion(filePath: string): { head: Buffer; audioAt: number }
 }
 
 /** Locate the PICTURE block's fields, only when its MIME is empty. */
-function locateEmptyMimePicture(head: Buffer, audioAt: number): PictureLayout | null {
+function locateEmptyMimePicture(head: Buffer): PictureLayout | null {
   let offset = 4
   while (offset + BLOCK_HEADER <= head.length) {
     const header = head[offset]
@@ -115,7 +116,7 @@ function locateEmptyMimePicture(head: Buffer, audioAt: number): PictureLayout | 
       const dataAt = descLengthAt + 4 + descLength + 16 + 4
       if (dataAt > head.length) return null
 
-      return { blockAt: offset, payloadAt, descLengthAt, dataAt, audioAt }
+      return { blockAt: offset, payloadAt, descLengthAt, dataAt, blockLength: length }
     }
 
     offset += BLOCK_HEADER + length
@@ -130,6 +131,23 @@ function detectMime(data: Buffer): string {
   if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) return 'image/gif'
   if (data[0] === 0x42 && data[1] === 0x4d) return 'image/bmp'
   return 'image/jpeg' // FLAC covers are overwhelmingly JPEG
+}
+
+/**
+ * Write a whole buffer, looping on short writes.
+ *
+ * `FileHandle.write` is allowed to write fewer bytes than asked (the write may
+ * be interrupted), and ignoring `bytesWritten` silently truncates the output —
+ * which for a 600 KB metadata buffer meant a corrupt cache file. Regular files
+ * usually write in full, but "usually" is not a contract.
+ */
+async function writeAll(handle: FileHandle, data: Buffer): Promise<void> {
+  let written = 0
+  while (written < data.length) {
+    const { bytesWritten } = await handle.write(data, written)
+    if (bytesWritten <= 0) throw new Error(`flac-repair: short write at offset ${written}`)
+    written += bytesWritten
+  }
 }
 
 export interface FlacRepairResult {
@@ -156,7 +174,7 @@ export async function ensurePlayableFlac(
   const region = readMetadataRegion(filePath)
   if (!region) return { path: filePath, repaired: false }
 
-  const layout = locateEmptyMimePicture(region.head, region.audioAt)
+  const layout = locateEmptyMimePicture(region.head)
   if (!layout) return { path: filePath, repaired: false }
 
   const stat = statSync(filePath)
@@ -173,20 +191,39 @@ export async function ensurePlayableFlac(
   const mimeLengthField = Buffer.alloc(4)
   mimeLengthField.writeUInt32BE(mimeBytes.length)
 
-  // New payload = picture type + [mimeLen][mime] + everything from descLen on.
+  // New payload = picture type + [mimeLen][mime] + the rest of THIS block.
+  //
+  // The slice must stop at the block's own end: `head` continues past the
+  // picture into any following blocks (this file had PADDING after it), and an
+  // unbounded slice would swallow them into the picture payload — corrupting
+  // the block chain so thoroughly that Chromium still refuses the file, just
+  // with a different error. Found by byte-comparing the copy against the
+  // original: the block length came out 25084 larger than it should be, the
+  // exact size of the trailing PADDING block.
+  const pictureEnd = layout.payloadAt + layout.blockLength
+  if (pictureEnd > region.head.length) {
+    // The declared block length runs past the metadata region: a malformed
+    // file we do not know how to repair. Serve the original untouched.
+    return { path: filePath, repaired: false }
+  }
   const payload = Buffer.concat([
     region.head.subarray(layout.payloadAt, layout.payloadAt + 4),
     mimeLengthField,
     mimeBytes,
-    region.head.subarray(layout.descLengthAt)
+    region.head.subarray(layout.descLengthAt, pictureEnd)
   ])
   const blockHeader = Buffer.from(region.head.subarray(layout.blockAt, layout.payloadAt))
   blockHeader.writeUIntBE(payload.length, 1, 3)
 
+  // The repaired metadata region: everything before the picture block, the
+  // grown picture block, then the remaining blocks (PADDING etc.) unchanged.
+  // Missing that tail would silently drop trailing blocks — the first version
+  // of this repair lost the file's PADDING block exactly that way.
   const newHead = Buffer.concat([
     region.head.subarray(0, layout.blockAt),
     blockHeader,
-    payload
+    payload,
+    region.head.subarray(pictureEnd)
   ])
 
   mkdirSync(cacheDir, { recursive: true })
@@ -194,15 +231,12 @@ export async function ensurePlayableFlac(
   // file that later looks like a valid cache hit.
   const tmp = `${cached}.${process.pid}.tmp`
   try {
-    // Straightforward write-then-append rather than `pipeline(..., {end:false})`:
-    // that option leaves the destination open for the caller, but `pipeline`
-    // still waits for the destination to finish, which deadlocks.
     const handle = await open(tmp, 'w')
     try {
-      await handle.write(newHead)
+      await writeAll(handle, newHead)
       // Append the audio frames verbatim; they are unchanged by the repair.
       for await (const chunk of createReadStream(filePath, { start: region.audioAt })) {
-        await handle.write(chunk as Buffer)
+        await writeAll(handle, chunk as Buffer)
       }
     } finally {
       await handle.close()

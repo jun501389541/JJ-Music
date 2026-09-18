@@ -450,14 +450,20 @@ function registerMediaProtocol(): void {
     const repairCache = join(dataDir, 'library', 'flac-repair')
 
     // Repair a FLAC that Chromium cannot decode because its embedded cover has
-    // an empty MIME type. The repaired copy is served instead of the original;
-    // the user's file is never modified. Only .flac files are probed, and the
-    // probe reads the metadata region alone.
+    // an empty MIME type. The repaired copy is served *in place of* the
+    // original via `substitute`: the renderer keeps requesting the original
+    // path and never needs to know a repair exists. The user's file is never
+    // modified. Only .flac files are probed, and the probe reads the metadata
+    // region alone.
     if (requested && requested.toLowerCase().endsWith('.flac')) {
       try {
         const result = await ensurePlayableFlac(requested, repairCache)
         if (result.repaired && result.path !== requested) {
-          return serveMedia(request, { roots: [...roots, repairCache], files: [result.path] })
+          return serveMedia(request, {
+            roots,
+            files: [...selectedAudioFiles, ...indexedFile, result.path],
+            substitute: result.path
+          })
         }
       } catch {
         // Repair is best-effort: fall through to the original file.

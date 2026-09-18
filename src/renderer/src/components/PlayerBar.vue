@@ -9,6 +9,7 @@ import { playbackActions, trackActions } from '../utils/track-actions'
 import { formatTime } from '../utils/format'
 import AppIcon from './AppIcon.vue'
 import SliderBar from './SliderBar.vue'
+import TransportControls from './TransportControls.vue'
 const emit = defineEmits<{ openNowPlaying: [] }>()
 const player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
 const cover = computed(() => { const t = player.currentTrack; return !t ? null : isLocalTrack(t) ? t.coverPath ? toMediaUrl(t.coverPath) : null : t.picUrl })
@@ -63,7 +64,12 @@ function onVolume(value: number): void {
     <button class="icon-btn mini-heart" :class="{ liked: favorite }" :disabled="!player.currentTrack" aria-label="喜爱" @click="player.currentTrack && library.toggleFavorite(player.currentTrack)"><AppIcon name="heart" :size="18"/></button>
   </div>
   <div class="mini-center">
-    <div class="mini-buttons"><button class="icon-btn" aria-label="上一首" @click="player.previous()"><AppIcon name="previous" :size="21"/></button><button class="mini-play" :aria-label="player.playing ? '暂停' : '播放'" @click="player.toggle()"><span v-if="player.loading || player.waiting" class="spinner"/><AppIcon v-else :name="player.playing ? 'pause' : 'play'" :size="23"/></button><button class="icon-btn" aria-label="下一首" @click="player.next()"><AppIcon name="skip" :size="21"/></button></div>
+    <!--
+      The transport cluster is the shared component, so the toolbar and the
+      now-playing view cannot drift apart again: the mode button in particular
+      used to exist only on the now-playing view.
+    -->
+    <TransportControls size="md" />
   </div>
   <div class="mini-side mini-side--right">
     <button class="mini-lyric" @click="emit('openNowPlaying')">{{ player.error || lyric || (player.currentTrack ? `${formatTime(player.currentTime)} / ${formatTime(player.duration)}` : 'JJ Music') }}</button>

@@ -26,6 +26,17 @@ body {
   user-select: none;
 }
 
+/*
+ * Root font size drives the `rem` type scale above.
+ *
+ * `--font-scale` is set by the renderer from the user's preference; the 13px
+ * fallback matches the pre-existing design so a first run looks unchanged.
+ * Declared on `:root` (not `body`) because `rem` resolves against the root.
+ */
+:root {
+  font-size: var(--font-scale, 13px);
+}
+
 :root[data-theme='light'] body {
   background: var(--bg-base);
 }

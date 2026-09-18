@@ -16,6 +16,15 @@ export const UI_DEFAULTS = {
   alwaysOnTop: false,
   windowMaterial: 'none' as 'none' | 'mica' | 'acrylic',
   fontFamily: 'system' as 'system' | 'sans',
+  /**
+   * UI type scale, as a percentage of the design's 13px base.
+   *
+   * `displayScale` scales the whole window through Chromium's zoom, which also
+   * resizes covers and changes how much list fits. This knob affects type only,
+   * so "the text is hard to read" no longer forces a layout change. 100 leaves
+   * every existing size exactly as designed.
+   */
+  fontSize: 100,
   playbackRate: 1,
   equalizerGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   equalizerName: '平坦'

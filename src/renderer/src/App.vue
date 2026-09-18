@@ -94,11 +94,22 @@ watch(() => [player.rate, player.playMode, player.quality, player.equalizer, pla
   const patch = { playbackRate: player.rate, playMode: player.playMode, playQuality: player.quality, equalizerGains: [...player.equalizer], equalizerName: player.equalizerPreset }
   if (Object.entries(patch).some(([key, value]) => JSON.stringify(library.settings[key as keyof typeof library.settings]) !== JSON.stringify(value))) void library.updateSettings(patch)
 }, { deep: true })
-watch(() => [library.settings.reduceMotion, library.settings.fontFamily, library.settings.rowDensity, library.settings.windowMaterial], () => {
+watch(() => [library.settings.reduceMotion, library.settings.fontFamily, library.settings.rowDensity, library.settings.windowMaterial, library.settings.fontSize], () => {
   document.documentElement.dataset.material = library.settings.windowMaterial
   document.documentElement.dataset.reducedMotion = String(library.settings.reduceMotion)
   document.documentElement.style.setProperty('--row-height', library.settings.rowDensity === 'compact' ? '54px' : '72px')
   document.documentElement.style.setProperty('--font-ui', library.settings.fontFamily === 'sans' ? 'Arial, "Microsoft YaHei", sans-serif' : '"Segoe UI Variable", "Microsoft YaHei UI", system-ui, sans-serif')
+  /*
+   * Root font size for the `rem` type scale.
+   *
+   * The design's base was 13px, so the preference is expressed as a percentage
+   * of that: 100% keeps the UI byte-for-byte as it was, and the setting only
+   * ever scales type linearly from there. Mapping the raw px value straight
+   * onto the root would have silently shifted every default size by a pixel.
+   */
+  const percent = Number(library.settings.fontSize)
+  const clamped = Number.isFinite(percent) ? Math.min(150, Math.max(85, percent)) : 100
+  document.documentElement.style.setProperty('--font-scale', `${(13 * clamped) / 100}px`)
 }, { immediate: true })
 const systemTheme = window.matchMedia('(prefers-color-scheme: light)')
 const onSystemTheme = () => { if (library.settings.theme === 'system') applyTheme('system') }

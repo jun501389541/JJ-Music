@@ -24,7 +24,7 @@ import type {
   PlatformProbeResult,
   UserApiMeta
 } from '@shared/types'
-import type { MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
+import type { LyricCandidate, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
 import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 
 /** Unwrap the `{ ok, data, error }` envelope, throwing on failure. */
@@ -215,6 +215,17 @@ const api = {
     /** Look lyrics up online by the track's tags, bypassing the cache. */
     searchOnline: (track: LocalMusicInfo) =>
       invoke<ResolvedLyric>(IPC.lyricSearchOnline, track),
+    /**
+     * Every credible online lyric match, best first.
+     *
+     * A metadata match is a guess, so the UI offers the alternatives rather
+     * than silently committing to the highest score.
+     */
+    candidates: (track: LocalMusicInfo) =>
+      invoke<LyricCandidate[]>(IPC.lyricCandidates, track),
+    /** Save a chosen candidate as the track's sidecar `.lrc`. */
+    applyCandidate: (audioPath: string, lyric: string) =>
+      invoke<string>(IPC.lyricApplyCandidate, audioPath, lyric),
     /** Pick a `.lrc` file and attach it to a local track. */
     importFile: (audioPath: string) =>
       invoke<{ text: string; savedTo: string } | null>(IPC.lyricImport, audioPath),

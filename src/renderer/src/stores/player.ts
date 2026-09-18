@@ -836,6 +836,19 @@ export const usePlayerStore = defineStore('player', () => {
     return true
   }
 
+  /**
+   * Re-read the current track's lyric.
+   *
+   * Used after the lyric was changed on disk (a picked candidate, an edited
+   * sidecar): the store's copy is stale, and re-resolving goes through the main
+   * process's cache, which the writer has already invalidated.
+   */
+  async function reloadLyric(): Promise<void> {
+    const track = currentTrack.value
+    if (!track) return
+    await loadLyrics(track)
+  }
+
   /** Search lyrics online for the current local track, bypassing the cache. */
   async function searchLyricOnline(): Promise<boolean> {
     const track = currentTrack.value
@@ -911,6 +924,7 @@ export const usePlayerStore = defineStore('player', () => {
     setRate,
     setQuality,
     setEqualizer,
+    reloadLyric,
     refreshOutputDevices,
     setOutputDevice,
     applyEqualizerPreset,

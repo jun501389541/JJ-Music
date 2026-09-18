@@ -13,13 +13,16 @@ import TrackList from '../components/TrackList.vue'
 import { toMediaUrl } from '@shared/media-url'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { isLocalTrack } from '@shared/types'
+import type { LyricCandidate } from '@shared/library-types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import { formatAudioSpec, formatTime } from '../utils/format'
+import { chorusFromStoreLines } from '../utils/chorus'
 import SliderBar from '../components/SliderBar.vue'
 import SpectrumVisualizer from '../components/SpectrumVisualizer.vue'
 import TransportIcon from '../components/TransportIcon.vue'
+import TransportControls from '../components/TransportControls.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
 import LyricEditor from '../components/LyricEditor.vue'
 
@@ -38,10 +41,64 @@ function lyricMenu(event: MouseEvent) { ui.openMenu(event, [
     { label: '显示翻译', checked: showTranslation.value, action: () => { showTranslation.value = !showTranslation.value } },
     { label: '导入歌词', disabled: !canEditLyric.value, action: onImportLyric },
     { label: '编辑歌词', disabled: !canEditLyric.value, action: () => { showLyricEditor.value = true } },
-    { label: '在线搜索歌词', disabled: !canEditLyric.value, action: onSearchLyric }
+    { label: '在线搜索歌词', disabled: !canEditLyric.value, action: onSearchLyric },
+    // A metadata match is a guess; when several platforms match, let the user
+    // pick rather than silently trusting the top score.
+    { label: '从多个来源选择…', disabled: !canEditLyric.value, action: onPickLyricSource }
   ] },
   { label: '歌词设置', icon: 'settings', action: () => { ui.nowPlaying = false; return router.push('/settings/appearance/lyrics') } }
 ]) }
+
+/* ---------------------------------------------------------------- *
+ * Multi-source lyric picker
+ * ---------------------------------------------------------------- */
+
+const lyricChoices = ref<LyricCandidate[]>([])
+const pickingLyric = ref(false)
+
+/**
+ * Look up every credible lyric match and open the picker.
+ *
+ * Runs on demand rather than eagerly: it costs several network round trips, and
+ * for the common case (the embedded tag is already correct) the user never
+ * needs it.
+ */
+async function onPickLyricSource(): Promise<void> {
+  const track = player.currentTrack
+  if (!track || !isLocalTrack(track)) {
+    toast.error('只有本地曲目可以匹配在线歌词')
+    return
+  }
+  pickingLyric.value = true
+  lyricChoices.value = []
+  try {
+    const found = await window.jj.lyric.candidates(track)
+    if (found.length === 0) {
+      toast.error('没有匹配到在线歌词')
+      return
+    }
+    lyricChoices.value = found
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '在线歌词查询失败')
+  } finally {
+    pickingLyric.value = false
+  }
+}
+
+/** Save the chosen lyric as the track's sidecar, which then wins on reload. */
+async function applyLyricChoice(choice: LyricCandidate): Promise<void> {
+  const track = player.currentTrack
+  if (!track || !isLocalTrack(track)) return
+  try {
+    await window.jj.lyric.applyCandidate(track.path, choice.lyric)
+    lyricChoices.value = []
+    // Re-resolve so the pane shows the lyric that was just written.
+    await player.reloadLyric()
+    toast.success(`已使用「${choice.title}」的歌词`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '保存歌词失败')
+  }
+}
 const showTagMatch = ref(false)
 const showLyricEditor = ref(false)
 const lyricsPane = ref<HTMLElement | null>(null)
@@ -127,6 +184,37 @@ const spec = computed(() => {
 })
 
 const lines = computed(() => player.lyrics?.lines ?? [])
+
+/**
+ * The song's chorus, inferred from repeated lyric blocks.
+ *
+ * Derived from lyrics rather than analysed from audio: the repeat *is* the
+ * definition of a chorus, and the timestamps already exist. Recomputed only
+ * when the lyric set changes, because the detector is quadratic in line count.
+ *
+ * `null` is the normal answer for a through-composed song — the UI hides the
+ * affordance rather than offering a jump to nowhere.
+ */
+const chorus = computed(() => chorusFromStoreLines(lines.value))
+
+/** The chorus's position and width as percentages of the track, for the marker. */
+const chorusBand = computed(() => {
+  const section = chorus.value
+  const total = player.duration
+  if (!section || !Number.isFinite(total) || total <= 0) return null
+  const left = Math.max(0, Math.min(100, (section.start / total) * 100))
+  const right = Math.max(0, Math.min(100, (section.end / total) * 100))
+  // A band narrower than a couple of percent is not a usable click target.
+  if (right - left < 1.5) return null
+  return { left, width: right - left }
+})
+
+/** Jump to the first chorus. */
+function jumpToChorus(): void {
+  const section = chorus.value
+  if (!section) return
+  player.seek(section.start)
+}
 
 /**
  * Centre the active lyric line.
@@ -325,40 +413,37 @@ function seekToLine(index: number): void {
             <span class="tnum">{{ formatTime(player.currentTime) }}</span>
             <span class="tnum">{{ formatTime(player.duration) }}</span>
           </div>
-          <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
+
+          <!--
+            The chorus band sits behind the scrubber and is clickable on its own.
+            It is a *hint*, not a control that changes what the slider does: the
+            slider still scrubs anywhere, and the band just makes the section
+            visible and gives it a larger hit area.
+          -->
+          <div class="np__scrub">
+            <div
+              v-if="chorusBand"
+              class="np__chorus-band"
+              role="button"
+              tabindex="0"
+              :title="`跳到副歌（第 ${chorus?.occurrences} 次出现的段落）`"
+              :aria-label="`跳到副歌：${chorus?.preview ?? ''}`"
+              :style="{ left: `${chorusBand.left}%`, width: `${chorusBand.width}%` }"
+              @click.stop="jumpToChorus"
+              @keydown.enter.prevent="jumpToChorus"
+            />
+            <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
+          </div>
 
           <div class="np__buttons">
-            <button
-              class="icon-btn"
-              type="button"
-              :title="{ list: '顺序播放', repeat: '列表循环', single: '单曲循环', random: '随机播放' }[player.playMode]"
-              @click="player.cyclePlayMode()"
-            >
-              <TransportIcon
-                :name="player.playMode === 'single' ? 'single-loop' : player.playMode === 'random' ? 'shuffle' : 'list-loop'"
-                :size="18"
-              />
-            </button>
-            <button class="icon-btn" type="button" title="上一首" @click="player.previous()">
-              <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M4 3h1.6v10H4zM12.5 3.4v9.2L6 8z" />
-              </svg>
-            </button>
-            <button class="np__play" type="button" @click="player.toggle()">
-              <span v-if="player.loading || player.waiting" class="spinner" />
-              <svg v-else-if="player.playing" width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
-                <rect x="3.5" y="2.5" width="3.4" height="11" rx="1" />
-                <rect x="9.1" y="2.5" width="3.4" height="11" rx="1" />
-              </svg>
-              <svg v-else width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M4.5 2.8v10.4L13 8z" />
-              </svg>
-            </button>
-            <button class="icon-btn" type="button" title="下一首" @click="player.next()">
-              <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M10.4 3H12v10h-1.6zM3.5 3.4v9.2L10 8z" />
-              </svg>
-            </button>
+            <!--
+              Shared transport cluster: identical buttons, ordering and icons to
+              the toolbar, just at the larger scale this surface has room for.
+              Previously this block was hand-rolled here, which is how the two
+              surfaces drifted (different icon sizes, and a mode button that
+              existed only on this one).
+            -->
+            <TransportControls size="lg" />
             <div
               ref="volumeAnchor"
               class="np__volume-group"
@@ -525,6 +610,42 @@ function seekToLine(index: number): void {
       @close="showLyricEditor = false"
       @saved="onLyricSaved"
     />
+
+    <!--
+      Multi-source lyric picker.
+
+      A metadata match is a guess: several platforms spell the same song
+      differently and the top score is not reliably the right recording. Rather
+      than silently showing one platform's guess, the alternatives are listed
+      with their confidence, and the choice is written as a sidecar so it then
+      outranks both the embedded tag and any future lookup.
+    -->
+    <div v-if="lyricChoices.length > 0" class="np__picker" role="dialog" aria-label="选择歌词来源">
+      <div class="np__picker-card">
+        <header class="np__picker-head">
+          <strong>选择歌词来源</strong>
+          <button class="icon-btn" type="button" aria-label="关闭" @click="lyricChoices = []">
+            <AppIcon name="close" :size="16" />
+          </button>
+        </header>
+        <p class="np__picker-note">匹配结果是按曲名与艺术家推算的，请选择歌词内容正确的一项。</p>
+        <ul class="np__picker-list">
+          <li v-for="choice in lyricChoices" :key="choice.id">
+            <button class="np__picker-item" type="button" @click="applyLyricChoice(choice)">
+              <span class="np__picker-title">
+                {{ choice.title }}
+                <em v-if="choice.synchronized" class="np__picker-badge">逐行</em>
+              </span>
+              <span class="np__picker-meta">
+                {{ choice.artist }}<template v-if="choice.album"> · {{ choice.album }}</template>
+                · {{ choice.source.toUpperCase() }} · 匹配度 {{ Math.round(choice.score * 100) }}%
+              </span>
+              <span class="np__picker-preview">{{ choice.lyric.split(/\r?\n/).filter(l => l.trim())[0] ?? '' }}</span>
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -657,6 +778,36 @@ function seekToLine(index: number): void {
   justify-content: space-between;
   font-size: var(--text-sm);
   color: var(--text-tertiary);
+}
+
+/*
+ * Scrubber wrapper. `position: relative` is what lets the chorus band be placed
+ * by percentage behind the slider; the band is drawn first so it never covers
+ * the thumb's hit area.
+ */
+.np__scrub {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.np__chorus-band {
+  position: absolute;
+  top: 50%;
+  height: 10px;
+  transform: translateY(-50%);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+  /* The slider owns the vertical band; the marker only widens its own area. */
+  z-index: 0;
+}
+
+.np__chorus-band:hover,
+.np__chorus-band:focus-visible {
+  background: color-mix(in srgb, var(--accent) 62%, transparent);
+  outline: none;
 }
 
 .np__buttons {
@@ -914,6 +1065,20 @@ code {
 @media(max-height:700px){.np__body{padding-top:62px;padding-bottom:20px}.np__art{width:min(100%,29vh);margin-bottom:16px}.np__transport{margin-top:15px}.np__album{display:none}.np__title{font-size:20px}}
 .np{color-scheme:dark;--bg-hover:#303340;--bg-active:#353947;--border-subtle:#ffffff10;--border-strong:#ffffff20;--bg-input:#191b23}
 .np__tools{display:flex;justify-content:center;gap:12px;margin:4px 0}.np__tools .btn{font-size:11px;border-color:#ffffff20;color:#c9cbd4;gap:8px;height:30px;border-radius:6px}.np__tools span{font-size:10px;opacity:.6}.np__tools .btn[aria-expanded="true"]{background:#ffffff18;color:white}
+/* Multi-source lyric picker. Sits above the panels so a choice is never
+   obscured by the EQ/queue layer that may already be open. */
+.np__picker{position:absolute;inset:0;z-index:6;display:grid;place-items:center;background:#000000a8;backdrop-filter:blur(6px);padding:40px}
+.np__picker-card{width:min(560px,90vw);max-height:70vh;display:flex;flex-direction:column;padding:22px 24px;border-radius:14px;background:#22252df7;border:1px solid #ffffff1f;box-shadow:0 24px 70px #0009}
+.np__picker-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none}
+.np__picker-head strong{font-size:17px;font-weight:550}
+.np__picker-note{margin:10px 0 16px;font-size:11px;line-height:1.7;color:var(--text-secondary);flex:none}
+.np__picker-list{list-style:none;margin:0;padding:0;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.np__picker-item{width:100%;display:flex;flex-direction:column;gap:5px;padding:13px 15px;border:1px solid #ffffff14;border-radius:8px;background:#ffffff0a;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+.np__picker-item:hover{background:#ffffff17;border-color:#ffffff2e}
+.np__picker-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500}
+.np__picker-badge{font-style:normal;font-size:10px;padding:1px 6px;border-radius:4px;background:var(--accent);color:#fff}
+.np__picker-meta{font-size:11px;color:var(--text-secondary)}
+.np__picker-preview{font-size:11px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .np-panel-layer{position:absolute;inset:55px 0 0;z-index:4;background:#0002}.np-panel{position:absolute;right:18px;top:8px;bottom:20px;width:min(540px,88vw);display:flex;flex-direction:column;padding:24px;background:#22252df5;border:1px solid #ffffff1a;box-shadow:0 20px 60px #0006;backdrop-filter:blur(30px);border-radius:12px;overflow:auto}.np-panel>header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:26px;flex:none}.np-panel h2{margin:0;font-size:20px;font-weight:550}.np-panel small{display:block;margin-top:9px;font-size:11px;color:var(--text-secondary)}.np-panel :deep(.tracklist){height:auto;min-height:0;flex:1}.np-panel :deep(.track-head),.np-panel :deep(.track-row){grid-template-columns:24px minmax(0,1fr) 0px 38px 25px;gap:7px;padding-left:5px;padding-right:5px}.np-panel :deep(.track-album),.np-panel :deep(.track-head>span:nth-child(3)){visibility:hidden}.np-panel :deep(.track-label strong){font-size:12px}.np-panel :deep(.track-identity){gap:10px}.np-panel :deep(.track-cover){width:36px;height:36px}.np-panel :deep(.selection-toolbar){gap:8px;font-size:10px}
 @media(max-height:700px){.np__transport{gap:7px}.np-panel{padding:20px}.np-panel>header{margin-bottom:18px}}
 </style>

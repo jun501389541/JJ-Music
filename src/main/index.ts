@@ -34,6 +34,7 @@ import { searchAll, searchOnline, searchProviders } from './online/search'
 import { fetchOnlineLyric } from './online/lyrics'
 import {
   clearLyricCache,
+  lyricCandidates,
   readLyricFile,
   resolveLocalLyric,
   saveSidecar,
@@ -1052,6 +1053,33 @@ function registerIpc(): void {
 
   // Force a fresh lookup, bypassing the cache.
   handle(IPC.lyricSearchOnline, (track: LocalMusicInfo) => searchLyricOnline(track))
+
+  /**
+   * Every credible online lyric match, so the user can pick.
+   *
+   * Returns candidates without applying any of them: the caller chooses, and
+   * `lyricApplyCandidate` writes the choice.
+   */
+  handle(IPC.lyricCandidates, (track: LocalMusicInfo) => lyricCandidates(track))
+
+  /**
+   * Save a chosen candidate as the track's sidecar.
+   *
+   * Writing a sidecar (rather than remembering a preference) is what makes the
+   * choice stick: resolution prefers a sidecar over both the embedded tag and
+   * any later online lookup, so the picked lyric wins from then on without a
+   * second "pinned lyric" concept to maintain.
+   */
+  handle(IPC.lyricApplyCandidate, async (audioPath: string, lyric: string) => {
+    if (typeof lyric !== 'string' || !lyric.trim()) throw new Error('歌词内容为空')
+    const savedTo = await saveSidecar(audioPath, lyric)
+    // The cache holds the old lyric for this track; drop it so the next read
+    // reflects the choice instead of the previous match.
+    const track = requireServices().library.getByPath(audioPath)
+    if (track) clearLyricCache(track.id)
+    else clearLyricCache()
+    return savedTo
+  })
 
   handle(IPC.lyricImport, async (audioPath: string) => {
     const result = await dialog.showOpenDialog({

@@ -19,7 +19,7 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
 import type { LyricResult, LocalMusicInfo, OnlineMusicInfo } from '@shared/types'
-import type { ResolvedLyric } from '@shared/library-types'
+import type { ResolvedLyric, LyricCandidate } from '@shared/library-types'
 import { readEmbeddedLyric } from '../library/embedded-lyrics'
 import { fetchOnlineLyric } from '../online/lyrics'
 import { matchMetadata } from '../library/metadata-match'
@@ -155,6 +155,45 @@ export async function resolveLocalLyric(
 export async function searchLyricOnline(
   track: Pick<LocalMusicInfo, 'id' | 'path' | 'name' | 'singer' | 'albumName' | 'duration'>
 ): Promise<ResolvedLyric> {
+  const candidates = await lyricCandidates(track)
+  const best = candidates.find((entry) => entry.lyric.trim())
+  if (!best) return { lyric: '', source: 'none', synchronized: false, note: '在线未匹配到歌词' }
+
+  return {
+    lyric: best.lyric,
+    ...(best.tlyric ? { tlyric: best.tlyric } : {}),
+    ...(best.rlyric ? { rlyric: best.rlyric } : {}),
+    source: 'online',
+    synchronized: looksSynchronized(best.lyric),
+    matchedMusic: best.music,
+    matchScore: best.score
+  }
+}
+
+/** One alternative offered to the user when picking a lyric by hand. */
+export type { LyricCandidate }
+
+/**
+ * Every credible lyric match for a track, best first.
+ *
+ * ## Why gather alternatives instead of taking the first hit
+ *
+ * A metadata match is a guess. When several platforms spell a title differently
+ * — a remaster suffix, a featured artist, a translated title — the highest
+ * score is not reliably the right recording, and the wrong lyric is worse than
+ * none: it looks like the app is broken. Rather than raise the acceptance
+ * threshold (which mostly produces no lyric at all), every plausible match is
+ * returned so the user can pick. Their choice is saved as a sidecar, which then
+ * wins on every later load.
+ *
+ * Candidates below the confidence floor are dropped, because offering obvious
+ * mismatches makes the picker useless.
+ */
+const MIN_CANDIDATE_SCORE = 0.5
+
+export async function lyricCandidates(
+  track: Pick<LocalMusicInfo, 'id' | 'path' | 'name' | 'singer' | 'albumName' | 'duration'>
+): Promise<LyricCandidate[]> {
   const tagged = { ...track, id: track.id } as LocalMusicInfo
 
   // Try the tags first, then the filename stem as a second query.
@@ -171,34 +210,55 @@ export async function searchLyricOnline(
     })
   }
 
+  const seen = new Set<string>()
+  const found: LyricCandidate[] = []
+
   for (const query of queries) {
-    let candidates
+    let matches
     try {
-      candidates = await matchMetadata(query, { limit: 5 })
+      matches = await matchMetadata(query, { limit: 5 })
     } catch {
       continue
     }
 
-    // A weak match is worse than no lyric: showing the wrong song's words looks
-    // like a bug. Require a reasonable score before accepting.
-    for (const candidate of candidates) {
-      if (candidate.score < 0.55) continue
-      const result = await fetchOnlineLyric(candidate.music)
-      if (result.lyric && result.lyric.trim()) {
+    // Fetch candidate lyrics in parallel: a picker that takes five round trips
+    // in series is too slow to feel like a picker.
+    const settled = await Promise.all(matches.map(async (candidate) => {
+      if (candidate.score < MIN_CANDIDATE_SCORE) return null
+      // Deduplicate across the two queries by platform id.
+      const key = `${candidate.music.source}:${String(candidate.music.meta?.songmid ?? candidate.music.name)}`
+      if (seen.has(key)) return null
+      seen.add(key)
+      try {
+        const result = await fetchOnlineLyric(candidate.music)
+        if (!result.lyric || !result.lyric.trim()) return null
         return {
+          id: key,
+          source: candidate.music.source,
+          title: candidate.music.name,
+          artist: candidate.music.singer,
+          ...(candidate.music.albumName ? { album: candidate.music.albumName } : {}),
+          score: candidate.score,
           lyric: result.lyric,
           ...(result.tlyric ? { tlyric: result.tlyric } : {}),
           ...(result.rlyric ? { rlyric: result.rlyric } : {}),
-          source: 'online',
           synchronized: looksSynchronized(result.lyric),
-          matchedMusic: candidate.music,
-          matchScore: candidate.score
-        }
+          music: candidate.music
+        } satisfies LyricCandidate
+      } catch {
+        return null
       }
+    }))
+
+    for (const entry of settled) {
+      if (entry) found.push(entry)
     }
   }
 
-  return { lyric: '', source: 'none', synchronized: false, note: '在线未匹配到歌词' }
+  // Best match first; synced lyrics break ties, since they are strictly more
+  // useful than plain text of equal confidence.
+  found.sort((a, b) => (b.score - a.score) || (Number(b.synchronized) - Number(a.synchronized)))
+  return found
 }
 
 /**

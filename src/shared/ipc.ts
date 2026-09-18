@@ -26,6 +26,10 @@ export const IPC = {
   taskbarState: 'taskbar:state',
   /** Renderer → main: files were dropped onto the window. */
   filesDropped: 'files:dropped',
+  /** List every credible online lyric match, so the user can pick one. */
+  lyricCandidates: 'lyric:candidates',
+  /** Save a chosen candidate as the track's sidecar lyric. */
+  lyricApplyCandidate: 'lyric:apply-candidate',
 
   // Settings
   settingsGet: 'settings:get',

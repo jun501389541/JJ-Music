@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /** Local music library: folder management, scanning, and the track table. */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { LocalMusicInfo, PlayableTrack } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
+import { useViewState } from '../composables/view-state'
 import TrackList from '../components/TrackList.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
 
@@ -12,11 +13,28 @@ const library = useLibraryStore()
 const player = usePlayerStore()
 const toast = useToastStore()
 
-const filter = ref('')
-const sortKey = ref<'name' | 'singer' | 'album' | 'added'>('added')
-const onlyLossless = ref(false)
+/**
+ * Filter, sort and the lossless toggle persist across navigation.
+ *
+ * Coming back to a library of thousands of rows and having to retype the filter
+ * is the specific annoyance this addresses: the view is re-created cheaply, but
+ * the *intent* the user expressed by filtering is remembered.
+ */
+const remembered = useViewState('library', {
+  filter: '',
+  sortKey: 'added' as 'name' | 'singer' | 'album' | 'added',
+  onlyLossless: false
+})
+
+const filter = ref(remembered.state.filter)
+const sortKey = ref(remembered.state.sortKey)
+const onlyLossless = ref(remembered.state.onlyLossless)
 /** Track currently open in the tag-match dialog, if any. */
 const matching = ref<LocalMusicInfo | null>(null)
+
+watch([filter, sortKey, onlyLossless], () => {
+  remembered.save({ filter: filter.value, sortKey: sortKey.value, onlyLossless: onlyLossless.value })
+})
 
 /** Open the tag-match dialog for a local track. */
 function openMatch(track: PlayableTrack): void {
@@ -154,6 +172,7 @@ async function playAll(): Promise<void> {
       :tracks="filtered"
       :show-album="false"
       :show-spec="false"
+      state-key="library"
       empty-text="没有匹配的曲目"
       @play="(_track, index) => playAt(index)"
       @match="openMatch"

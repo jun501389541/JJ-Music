@@ -33,6 +33,33 @@ export interface ResolvedLyric {
   note?: string
 }
 
+/**
+ * One alternative lyric offered when picking a match by hand.
+ *
+ * Lives in the shared file because all three layers touch it: the main process
+ * builds it, the preload bridge types it, and the renderer lists it.
+ */
+export interface LyricCandidate {
+  /** Stable handle, reused as the choice's identity in the picker. */
+  id: string
+  /** Platform the lyric came from (音源 id). */
+  source: SourceId
+  /** Matched track title, as that platform spells it. */
+  title: string
+  artist: string
+  album?: string
+  /** Match confidence, 0..1, from the metadata matcher. */
+  score: number
+  /** The lyric body. */
+  lyric: string
+  tlyric?: string
+  rlyric?: string
+  /** True when the lyric carries timestamps, which makes it more useful. */
+  synchronized: boolean
+  /** The online track this candidate belongs to. */
+  music: OnlineMusicInfo
+}
+
 /** Fields a metadata match can fill in. */
 export interface TagPatch {
   title?: string

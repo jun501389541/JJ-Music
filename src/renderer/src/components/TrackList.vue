@@ -5,21 +5,51 @@ import { toMediaUrl } from '@shared/media-url'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useUiStore, type MenuItem } from '../stores/ui'
+import { useViewState } from '../composables/view-state'
 import { trackActions } from '../utils/track-actions'
 import { formatTime, formatAudioSpec } from '../utils/format'
 import AppIcon from './AppIcon.vue'
-const props = withDefaults(defineProps<{ tracks: PlayableTrack[]; showAlbum?: boolean; showSpec?: boolean; offset?: number; emptyText?: string; showSource?: boolean; extraActions?: (track: PlayableTrack, index: number) => MenuItem[] }>(), { showAlbum: true, showSpec: false, offset: 0, emptyText: '没有搜索到相关项目', showSource: false })
+const props = withDefaults(defineProps<{ tracks: PlayableTrack[]; showAlbum?: boolean; showSpec?: boolean; offset?: number; emptyText?: string; showSource?: boolean; extraActions?: (track: PlayableTrack, index: number) => MenuItem[]; stateKey?: string }>(), { showAlbum: true, showSpec: false, offset: 0, emptyText: '没有搜索到相关项目', showSource: false, stateKey: '' })
 const emit = defineEmits<{ play: [track: PlayableTrack, index: number]; match: [track: PlayableTrack, index: number] }>()
 const player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
 const viewport = ref<HTMLElement | null>(null), height = ref(500), scrollTop = ref(0), selected = ref(new Set<string>())
 let anchor = 0, observer: ResizeObserver | undefined
+
+/**
+ * Remembered scroll offset, keyed per view.
+ *
+ * Assigned before the first render so the virtual window starts at the restored
+ * position: restoring after mount would paint row 0 first and then jump, and
+ * `scrollTop` on a not-yet-sized viewport clamps to 0 silently.
+ */
+const remembered = props.stateKey ? useViewState<{ top: number }>(`${props.stateKey}:tracklist`, { top: 0 }) : null
+if (remembered) scrollTop.value = remembered.state.top
 const rowHeight = computed(() => library.settings.rowDensity === 'compact' ? 54 : 72)
 const start = computed(() => Math.max(0, Math.min(props.tracks.length - 1, Math.floor(scrollTop.value / rowHeight.value) - 5)))
 const end = computed(() => Math.min(props.tracks.length, start.value + Math.ceil(height.value / rowHeight.value) + 10))
 const visible = computed(() => props.tracks.slice(start.value, end.value).map((track, i) => ({ track, index: start.value + i })))
 const chosen = computed(() => selected.value.size ? props.tracks.filter(track => selected.value.has(track.id)) : [])
-watch(() => props.tracks, () => { selected.value = new Set(); anchor = 0; if (viewport.value) viewport.value.scrollTop = 0; scrollTop.value = 0 })
-onMounted(() => { observer = new ResizeObserver(entries => { height.value = entries[0].contentRect.height }); if (viewport.value) observer.observe(viewport.value) })
+/**
+ * Selection is per-visit; scroll is not.
+ *
+ * The list identity (`tracks`) changes for many reasons — a filter keystroke, a
+ * rescan, a new search — and resetting the offset on each is right, because the
+ * rows underneath are different. Restoring is therefore driven by the remembered
+ * value at construction, while this watcher only clears the *selection*.
+ */
+watch(() => props.tracks, () => { selected.value = new Set(); anchor = 0 })
+
+/** Keep the remembered offset in step with real scrolling. */
+watch(scrollTop, (value) => { remembered?.save({ top: value }) })
+
+onMounted(() => {
+  observer = new ResizeObserver(entries => { height.value = entries[0].contentRect.height })
+  if (viewport.value) observer.observe(viewport.value)
+  // Sync the DOM to the restored offset once the viewport has a size.
+  if (remembered && viewport.value && remembered.state.top > 0) {
+    requestAnimationFrame(() => { if (viewport.value) viewport.value.scrollTop = remembered.state.top })
+  }
+})
 onBeforeUnmount(() => observer?.disconnect())
 function cover(track: PlayableTrack): string | undefined { return isLocalTrack(track) ? track.coverPath ? toMediaUrl(track.coverPath) : undefined : track.picUrl }
 function choose(event: MouseEvent, index: number): void {

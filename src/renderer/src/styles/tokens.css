@@ -63,13 +63,22 @@
   --font-ui: 'Inter', 'MiSans', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
 
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-base: 13px;
-  --text-md: 14px;
-  --text-lg: 17px;
-  --text-xl: 22px;
-  --text-2xl: 28px;
+  /*
+   * The type scale is expressed in `rem` against a root font size the settings
+   * page drives (`--font-scale`). That makes "text size" one independent knob:
+   * changing it rescales type without touching layout, unlike window zoom
+   * (`displayScale`), which also resizes covers and list rows.
+   *
+   * The ratios mirror the previous px scale (11/12/13/14/17/22/28 at a 13px
+   * base) so switching to `rem` does not change the default appearance.
+   */
+  --text-xs: 0.846rem;
+  --text-sm: 0.923rem;
+  --text-base: 1rem;
+  --text-md: 1.077rem;
+  --text-lg: 1.308rem;
+  --text-xl: 1.692rem;
+  --text-2xl: 2.154rem;
 
   /* ---- motion ---- */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);

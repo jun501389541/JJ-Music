@@ -59,8 +59,11 @@ function onVolume(value: number): void {
     controls sit at the true centre of the bar and stay there regardless of how
     long the track title or a lyric line happens to be.
   -->
-  <div class="mini-side mini-side--left">
-    <button class="mini-track" @click="emit('openNowPlaying')" @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"><div class="mini-art"><img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer"/><AppIcon v-else name="music" :size="24"/></div><span class="mini-meta"><strong>{{ player.currentTrack?.name || '未载入歌曲' }}</strong><small>{{ player.currentTrack?.singer || '选择一首歌曲，开始聆听' }}</small></span></button>
+  <div
+    class="mini-side mini-side--left"
+    @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"
+  >
+    <button class="mini-track" @click="emit('openNowPlaying')"><div class="mini-art"><img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer"/><AppIcon v-else name="music" :size="24"/></div><span class="mini-meta"><strong>{{ player.currentTrack?.name || '未载入歌曲' }}</strong><small>{{ player.currentTrack?.singer || '选择一首歌曲，开始聆听' }}</small></span></button>
     <button class="icon-btn mini-heart" :class="{ liked: favorite }" :disabled="!player.currentTrack" aria-label="喜爱" @click="player.currentTrack && library.toggleFavorite(player.currentTrack)"><AppIcon name="heart" :size="18"/></button>
   </div>
   <div class="mini-center">

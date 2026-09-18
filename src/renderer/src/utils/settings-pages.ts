@@ -42,7 +42,7 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
     link('查看下载任务', '/downloads', 'list')
   ] },
   'appearance/player': { title: '播放界面', icon: 'album', items: [toggle('圆形播放封面', 'circleCover', '以唱片形式显示专辑封面'), toggle('霞光特效', 'sunglow', '在播放界面显示来自封面的柔和背景'), toggle('频谱可视化', 'showSpectrum', '显示实时音频频谱'), link('播放页面歌词', 'appearance/lyrics', 'lyrics')] },
-  'appearance/lyrics': { title: '歌词', icon: 'lyrics', items: [range('字体大小', 'lyricFontSize', 20, 48, 2, 'px'), select('歌词对齐', 'lyricAlign', [['靠左', 'left'], ['居中', 'center'], ['靠右', 'right']]), toggle('模糊非当前歌词', 'lyricBlur'), toggle('歌词翻译', 'lyricTranslation'), toggle('音译歌词', 'lyricRomanization', '音源提供音译时显示在原文下方')] },
+  'appearance/lyrics': { title: '歌词', icon: 'lyrics', items: [range('字体大小', 'lyricFontSize', 20, 48, 2, 'px'), range('行距', 'lyricLineHeight', 1.2, 2.6, 0.1, ' ×'), select('歌词对齐', 'lyricAlign', [['靠左', 'left'], ['居中', 'center'], ['靠右', 'right']]), toggle('模糊非当前歌词', 'lyricBlur'), toggle('歌词翻译', 'lyricTranslation'), toggle('音译歌词', 'lyricRomanization', '音源提供音译时显示在原文下方')] },
   'appearance/tracks': { title: '音轨项目外观', icon: 'list', items: [select('列表密度', 'rowDensity', [['舒适', 'comfortable'], ['紧凑', 'compact']]), toggle('显示音质徽标', 'showQualityBadge'), toggle('使用复选框选择项目', 'showCheckboxes', '也可使用 Ctrl 多选、Shift 连续选择')] },
   'appearance/render': { title: '渲染', icon: 'genre', items: [range('界面文字大小', 'fontSize', 85, 150, 5, '%'), range('显示缩放', 'displayScale', 85, 125, 5, '%'), toggle('减少动态效果', 'reduceMotion'), { label: '渲染引擎', description: 'Chromium · 硬件加速由系统与显卡驱动协商', kind: 'info' }] },
   audio: { title: '音频引擎', icon: 'audio', description: '音频流与输出', items: [

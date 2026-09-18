@@ -334,6 +334,12 @@ function onDocumentPointerDown(event: PointerEvent): void {
 onMounted(() => {
   document.addEventListener('pointerdown', onDocumentPointerDown)
   document.addEventListener('keydown', onVolumeKeydown)
+  /*
+   * Wait for the overlay's own slide-up to settle before flying the cover:
+   * `getBoundingClientRect()` during the slide reports a position that is still
+   * moving, which would make the flight start from the wrong place.
+   */
+  window.setTimeout(playArtworkFlight, 60)
 })
 onBeforeUnmount(() => {
   cancelCloseVolume()
@@ -352,10 +358,77 @@ function seekToLine(index: number): void {
   const line = lines.value[index]
   if (line) player.seek(line.time / 1000)
 }
+
+/* ---------------------------------------------------------------- *
+ * Artwork flight
+ * ---------------------------------------------------------------- */
+
+const artwork = ref<HTMLElement | null>(null)
+const artworkFlying = ref(false)
+
+/**
+ * Fly the artwork up from the toolbar thumbnail into place.
+ *
+ * ## Why a FLIP rather than a plain slide
+ *
+ * The playing view opening is a full-screen overlay sliding up, so the artwork
+ * would arrive already in its final position and merely be carried along. What
+ * the request asks for is the cover *travelling* — starting as the small
+ * thumbnail in the bottom bar and growing into the large centred square, which
+ * is the visual thread between the two surfaces.
+ *
+ * That is a FLIP: measure the thumbnail's box, apply the inverse transform
+ * (translate + scale) to the artwork, then release it on the next frame so the
+ * transition animates to the identity transform. Doing it by animating
+ * width/height would relayout on every frame; a transform stays on the
+ * compositor.
+ *
+ * Restraint: the animation is skipped when `reduceMotion` is on, and when no
+ * origin element exists (the toolbar is not always rendered).
+ */
+function playArtworkFlight(): void {
+  const target = artwork.value
+  const origin = document.querySelector<HTMLElement>('.mini-art')
+  if (!target || !origin || library.settings.reduceMotion) return
+
+  const from = origin.getBoundingClientRect()
+  const to = target.getBoundingClientRect()
+  // A zero-size origin means the toolbar was hidden when this ran; animating
+  // from nowhere produces a visible jump, so do nothing instead.
+  if (from.width < 4 || to.width < 4) return
+
+  const scale = from.width / to.width
+  const dx = (from.left + from.width / 2) - (to.left + to.width / 2)
+  const dy = (from.top + from.height / 2) - (to.top + to.height / 2)
+
+  target.style.transition = 'none'
+  target.style.transform = `translate(${dx}px, ${dy}px) scale(${scale})`
+  target.style.opacity = '0.35'
+  artworkFlying.value = true
+
+  requestAnimationFrame(() => {
+    // Release on the next frame so the browser has committed the start state;
+    // collapsing both into one frame makes the transition a no-op.
+    requestAnimationFrame(() => {
+      target.style.transition = ''
+      target.style.transform = ''
+      target.style.opacity = ''
+    })
+  })
+
+  // Clear the flag once the travel finishes so the resting styles apply again.
+  window.setTimeout(() => {
+    artworkFlying.value = false
+  }, 420)
+}
 </script>
 
 <template>
-  <div class="np" :class="{ 'circle-cover': library.settings.circleCover, 'blur-lyrics': library.settings.lyricBlur }" :style="{ '--lyric-size': library.settings.lyricFontSize + 'px', '--lyric-align': library.settings.lyricAlign }">
+  <div class="np" :class="{ 'circle-cover': library.settings.circleCover, 'blur-lyrics': library.settings.lyricBlur }" :style="{
+    '--lyric-size': library.settings.lyricFontSize + 'px',
+    '--lyric-line-height': String(library.settings.lyricLineHeight),
+    '--lyric-align': library.settings.lyricAlign
+  }">
     <!-- blurred cover backdrop -->
     <div v-if="library.settings.sunglow" class="np__backdrop" :style="cover ? { backgroundImage: `url('${cover}')` } : undefined" />
     <div class="np__scrim" />
@@ -382,7 +455,12 @@ function seekToLine(index: number): void {
     <div class="np__body">
       <!-- left: artwork only -->
       <section class="np__left">
-        <div @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))" class="np__art" :class="{ 'is-spinning': player.playing }">
+        <div
+          ref="artwork"
+          @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"
+          class="np__art"
+          :class="{ 'is-spinning': player.playing, 'is-flying': artworkFlying }"
+        >
           <img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer" />
           <svg v-else width="72" height="72" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path
@@ -719,9 +797,12 @@ function seekToLine(index: number): void {
 /*
  * Body = the two working columns; the control bar is a sibling below it.
  *
- * The artwork column is the flexible one and the lyric column is fixed-ish, so
- * a long lyric line cannot squeeze the cover. `min-height: 0` on the body is
- * what lets the lyric pane scroll instead of stretching the whole layout.
+ * `align-items` stays at its default (`stretch`) on purpose. Centring the
+ * artwork with `align-items: center` was tried and it broke the lyric pane: a
+ * centred grid item shrinks to its content height, so the lyric column was no
+ * longer bounded by the row and its `flex: 1` scroll area grew to the full
+ * content height — making `scrollHeight === clientHeight` and the pane
+ * unscrollable. The cover is centred inside its own column instead.
  */
 .np__body {
   position: relative;
@@ -730,9 +811,17 @@ function seekToLine(index: number): void {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(280px, 4fr) minmax(320px, 5fr);
+  /*
+   * `minmax(0, 1fr)` on the row is load-bearing: a grid row defaults to
+   * `auto`, which sizes to the tallest content — a 60-line lyric pane would
+   * grow the row to 5000px and the pane could never scroll. Constraining the
+   * row to the body's height gives the columns a definite height to stretch
+   * against, which is what makes `flex: 1; overflow-y: auto` on the lyric
+   * pane actually scroll.
+   */
+  grid-template-rows: minmax(0, 1fr);
   gap: 48px;
   padding: 52px 56px 24px;
-  align-items: center;
 }
 
 /*
@@ -852,6 +941,21 @@ function seekToLine(index: number): void {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/*
+ * Artwork flight from the toolbar thumbnail.
+ *
+ * The transform is set inline by `playArtworkFlight()` (it is a FLIP, so the
+ * start values are only known at runtime); this rule supplies the easing and
+ * keeps the cover above the sliding overlay while it travels.
+ */
+.np__art.is-flying {
+  transition:
+    transform var(--dur-slow) var(--ease-out),
+    opacity var(--dur-slow) var(--ease-out);
+  will-change: transform;
+  z-index: 2;
 }
 
 .np__spectrum {
@@ -1037,8 +1141,6 @@ function seekToLine(index: number): void {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* Room for the first and last lines to reach the centre. */
-  padding: 40% 0;
   scrollbar-width: none;
   mask-image: linear-gradient(
     180deg,
@@ -1049,15 +1151,39 @@ function seekToLine(index: number): void {
   );
 }
 
+/*
+ * Spacers let the first and last lines reach the centre of the pane.
+ *
+ * A pseudo-element with `height: 50%` instead of padding, because percentage
+ * *padding* resolves against the container's **width** — so `padding: 40vh`
+ * (the previous value, and `40%` before that) produced a spacer unrelated to
+ * the pane's height. In a short window that made the scrollable range collapse
+ * and the lyric pane felt stuck. A child's percentage height resolves against
+ * the container's height, which is exactly what centring needs.
+ */
+.np__lyrics::before,
+.np__lyrics::after {
+  content: '';
+  display: block;
+  height: 50%;
+}
+
 .np__lyrics::-webkit-scrollbar {
   display: none;
 }
 
 .np__line {
   margin: 0;
-  padding: 9px 4px;
-  font-size: var(--text-lg);
-  line-height: 1.5;
+  /*
+   * Spacing is one number: the whole line box is `fontSize * lyricLineHeight`.
+   * Previously this was `line-height: 1.5` plus `padding: 18px` — two knobs
+   * that multiplied out to a 2.7x ratio and drifted apart whenever either was
+   * touched. Deriving the padding from the same multiplier keeps the rhythm
+   * proportional at any font size.
+   */
+  padding: calc(var(--lyric-size) * (var(--lyric-line-height) - 1) / 2) 4px;
+  font-size: var(--lyric-size);
+  line-height: var(--lyric-line-height);
   color: var(--text-tertiary);
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -1120,8 +1246,8 @@ code {
 }
 .np{--bg-base:#191b23;--bg-panel:#252832;--text-primary:#f5f5f7;--text-secondary:#b2b4c0;--text-tertiary:#777a89;color:var(--text-primary)}
 .np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 230px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:0;top:0;z-index:3;display:flex;height:var(--titlebar-height);-webkit-app-region:no-drag}.np__window-actions .win-btn{width:46px;display:grid;place-items:center;color:var(--text-secondary);background:none;border:0;cursor:pointer}.np__window-actions .win-btn:hover{background:var(--bg-hover)}.np__window-actions .win-btn.close:hover{background:#c42b1c;color:white}.np__window-actions .np__more{width:38px;height:var(--titlebar-height);display:grid;place-items:center;border-radius:0;color:var(--text-secondary)}.np__window-actions .np__more:hover{background:var(--bg-hover)}
-.np__body{grid-template-columns:minmax(280px, 4fr) minmax(320px, 5fr);padding:52px 56px 24px;gap:48px;align-items:center}
-.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:min(100%,420px,46vh);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;padding:18px 8px;line-height:1.5;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative;padding:40vh 0}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}
+.np__body{grid-template-columns:minmax(280px, 4fr) minmax(320px, 5fr);grid-template-rows:minmax(0, 1fr);padding:52px 56px 24px;gap:48px}
+.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:min(100%,420px,46vh);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;line-height:var(--lyric-line-height);padding:calc(var(--lyric-size) * (var(--lyric-line-height) - 1) / 2) 4px;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}
 .np__bar{display:flex;align-items:center;gap:20px;padding:14px 28px 20px;flex:none;background:var(--bg-elevated);border-top:1px solid var(--divider)}.np__bar-side{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0}.np__bar-side--left{flex-direction:column;align-items:flex-start;gap:3px}.np__bar-side--right{justify-content:flex-end}.np__bar-title{font-size:var(--text-md);font-weight:550;color:var(--text-primary);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np__bar-meta{font-size:var(--text-xs);color:var(--text-tertiary);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np__bar-center{display:flex;flex-direction:column;align-items:center;gap:4px;flex:0 1 auto;width:min(520px,46vw)}.np__bar-center .np__times{width:100%;justify-content:space-between;gap:12px}.np__bar-center .np__scrub{width:100%}
 @media(max-height:700px){.np__body{padding:44px 40px 16px;gap:34px}.np__art{width:min(100%,300px,38vh)}.np__bar{padding:10px 22px 14px;gap:14px}}
 .np{color-scheme:dark;--bg-hover:#303340;--bg-active:#353947;--border-subtle:#ffffff10;--border-strong:#ffffff20;--bg-input:#191b23}

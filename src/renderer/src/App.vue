@@ -118,6 +118,14 @@ systemTheme.addEventListener('change', onSystemTheme)
 /** Tray menu and taskbar buttons drive the same transport actions. */
 let offTransportCommand: (() => void) | undefined
 
+/**
+ * True once a previous session's track has been loaded.
+ *
+ * Surfaced so the UI can explain why a track is already selected on a fresh
+ * launch, instead of looking like it guessed.
+ */
+const lastSessionRestored = ref(false)
+
 /* ---------------------------------------------------------------- *
  * Drag and drop import
  *
@@ -229,8 +237,41 @@ onMounted(async () => {
   if (typeof openId === 'string') {
     const track = library.tracks.find((item) => item.id === openId)
     if (track) await player.playTrack(track)
+  } else {
+    /*
+     * Otherwise offer to continue where the last session stopped.
+     *
+     * Only when the OS did not ask for a specific track — an explicit "play
+     * this file" must win over restoring an older session. Restoration loads
+     * and seeks without playing, so launching the app stays silent.
+     */
+    const restored = await player.restoreSession(library.settings.lastSession)
+    if (restored) {
+      lastSessionRestored.value = true
+      /*
+       * Say so explicitly. Loading a track the user did not ask for is
+       * otherwise indistinguishable from a bug, and a toast also tells them the
+       * play button will resume rather than start from the beginning.
+       */
+      toast.info('已恢复到上次播放的位置，按播放继续')
+    }
   }
 })
+
+/**
+ * Save the resume point before the window goes away.
+ *
+ * The periodic save is throttled, so up to `SESSION_INTERVAL_MS` of progress
+ * would be lost on a normal quit. `pagehide` is the last reliable hook in the
+ * renderer; a `beforeunload` handler would also work but fires later in some
+ * shutdown paths and is more likely to be skipped.
+ */
+function onPageHide(): void {
+  player.flushSession()
+}
+
+onMounted(() => window.addEventListener('pagehide', onPageHide))
+onUnmounted(() => window.removeEventListener('pagehide', onPageHide))
 
 /**
  * Test hook for the end-to-end verifier (`tools/e2e-verify.mjs`).

@@ -11,6 +11,7 @@ import { computed, ref, shallowRef, toRaw } from 'vue'
 import type { AudioEngine } from '@shared/audio-engine'
 import { EQUALIZER_PRESETS } from '@shared/audio-engine'
 import type {
+  LastSession,
   LyricSource,
   OnlineMusicInfo,
   PlayableTrack,
@@ -116,6 +117,8 @@ export const usePlayerStore = defineStore('player', () => {
     instance.on('progress', (time, total) => {
       currentTime.value = time
       duration.value = total
+      // Throttled inside `snapshotSession`; the call itself is cheap.
+      snapshotSession()
     })
     instance.on('ready', (total) => {
       duration.value = total
@@ -685,7 +688,104 @@ export const usePlayerStore = defineStore('player', () => {
     if (minutes > 0) sleepTimer = setTimeout(() => { stop(); sleepAt.value = null }, minutes * 60_000)
   }
 
+  /* ------------------------------------------------------------ *
+   * Session resume
+   * ------------------------------------------------------------ */
+
+  /**
+   * Persist where playback is, so the next launch can offer to continue.
+   *
+   * ## Why throttled, not written on every tick
+   *
+   * `currentTime` updates several times a second. Writing the settings file on
+   * each update would hammer the disk and interleave with every other settings
+   * write. A save every few seconds is enough for a resume point: losing the
+   * last three seconds of position is not noticeable, whereas losing the track
+   * entirely would be — which is why the save also fires on pause and on quit.
+   *
+   * `flushSession` exists for the quit path, where a pending throttle would
+   * otherwise be dropped by the window closing.
+   */
+  let sessionTimer: number | null = null
+  let sessionDirty = false
+  const SESSION_INTERVAL_MS = 5_000
+
+  function snapshotSession(): void {
+    const track = currentTrack.value
+    if (!track || !queue.value.length) return
+    sessionDirty = true
+    if (sessionTimer !== null) return
+    // The global timer, not `window.setTimeout`: this store is exercised in
+    // Node by the regression suites, where no `window` exists.
+    sessionTimer = setTimeout(() => {
+      sessionTimer = null
+      writeSession()
+    }, SESSION_INTERVAL_MS) as unknown as number
+  }
+
+  function writeSession(): void {
+    const track = currentTrack.value
+    if (!track) return
+    sessionDirty = false
+    const library = useLibraryStore()
+    // Proxies cannot cross IPC; the queue is copied through JSON for the same
+    // reason `recordPlayed` does it.
+    void library.updateSettings({
+      lastSession: JSON.parse(JSON.stringify({
+        track: toIpcPayload(track),
+        position: currentTime.value,
+        queue: queue.value.length ? queue.value : [track],
+        index: currentIndex.value >= 0 ? currentIndex.value : 0,
+        at: Date.now()
+      }))
+    }).catch(() => undefined)
+  }
+
+  /** Write immediately when a save is pending (called as the app closes). */
+  function flushSession(): void {
+    if (sessionTimer !== null) {
+      clearTimeout(sessionTimer)
+      sessionTimer = null
+    }
+    if (sessionDirty || currentTrack.value) writeSession()
+  }
+
+  /**
+   * Restore the previous session's track, queue and position.
+   *
+   * Deliberately does **not** start playing: an app that begins making noise on
+   * launch is hostile, and the user may have opened it for something else. The
+   * track is loaded, seeked and left paused, so pressing play continues exactly
+   * where they stopped.
+   *
+   * Returns false when there is nothing usable to resume, so the caller can
+   * stay quiet instead of announcing a resume that did not happen.
+   */
+  async function restoreSession(session: LastSession | undefined): Promise<boolean> {
+    if (!session?.track) return false
+    if (!Array.isArray(session.queue) || session.queue.length === 0) return false
+
+    const list = session.queue as PlayableTrack[]
+    const index = Math.min(Math.max(0, session.index ?? 0), list.length - 1)
+    queue.value = list
+    currentIndex.value = index
+
+    try {
+      // `autoplay: false` loads and seeks without producing sound.
+      await playTrackAt(index, { autoplay: false })
+      if (session.position > 0) seek(session.position)
+      return true
+    } catch {
+      // A local file may have been moved or a source may be disabled; a failed
+      // resume is not worth an error, the app is simply empty.
+      return false
+    }
+  }
+
   function stop(): void {
+    // Capture the position before clearing state, or the resume point would
+    // always be at zero.
+    flushSession()
     playGeneration += 1
     lyricGeneration += 1
     clearStallTimer()
@@ -925,6 +1025,8 @@ export const usePlayerStore = defineStore('player', () => {
     setQuality,
     setEqualizer,
     reloadLyric,
+    flushSession,
+    restoreSession,
     refreshOutputDevices,
     setOutputDevice,
     applyEqualizerPreset,

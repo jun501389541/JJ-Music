@@ -5,6 +5,15 @@ export const UI_DEFAULTS = {
   showQualityBadge: true,
   showCheckboxes: false,
   lyricFontSize: 30,
+  /**
+   * Lyric line spacing as a multiple of the font size.
+   *
+   * Drives both the line box and the inter-line gap, because they are visually
+   * one property: a 30px line with `line-height: 1.5` plus `18px` padding
+   * occupies 81px, which is a 2.7x ratio and reads as loose. One multiplier
+   * keeps the two in proportion instead of letting them drift apart.
+   */
+  lyricLineHeight: 1.9,
   lyricAlign: 'left' as 'left' | 'center' | 'right',
   lyricBlur: false,
   lyricTranslation: true,

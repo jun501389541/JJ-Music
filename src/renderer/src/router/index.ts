@@ -29,7 +29,17 @@ export const router = createRouter({
       meta: { title: '歌曲' }
     },
     { path: '/genres', component: () => import('../views/CollectionView.vue'), meta: { title: '流派', collection: 'genre' } },
-    { path: '/folders', component: () => import('../views/CollectionView.vue'), meta: { title: '文件夹', collection: 'folder' } },
+    /*
+     * The folder *browser* is gone: it and the music library page both listed
+     * the same folders (one to manage them, one to browse into them), which
+     * reads as the same feature twice. Browsing now lives on the library page,
+     * which already knew about every folder.
+     *
+     * Kept as a redirect rather than deleted so existing history entries and
+     * bookmarks still land somewhere sensible.
+     */
+    { path: '/folders/:pathMatch(.*)*', redirect: '/music-library' },
+    { path: '/folders', redirect: '/music-library' },
     { path: '/music-library', component: () => import('../views/MusicLibraryView.vue'), meta: { title: '音乐库' } },
     {
       path: '/albums',

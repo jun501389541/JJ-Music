@@ -291,9 +291,38 @@ export interface Playlist {
  * App settings
  * ------------------------------------------------------------------ */
 
+/**
+ * Where playback stopped at the end of the previous session.
+ *
+ * Recorded on a throttle (periodically while playing, and once on quit) rather
+ * than on every time update, which would write the settings file several times
+ * a second.
+ */
+export interface LastSession {
+  /** The track that was loaded. */
+  track: PlayableTrack
+  /** Position within that track, in seconds. */
+  position: number
+  /** The queue it was playing from, so "continue" restores the context. */
+  queue: PlayableTrack[]
+  /** Index of `track` within `queue`. */
+  index: number
+  /** When this was written, so a very old session can be ignored. */
+  at: number
+}
+
 export interface AppSettings extends UiPreferences {
   /** Most recently played tracks, newest first, bounded to 100 entries. */
   recentPlayed: PlayableTrack[]
+  /**
+   * Where playback stopped last session, for "continue where you left off".
+   *
+   * Kept apart from `recentPlayed` (a history list) because this is a single
+   * resume point: the track, how far in, and the queue it belonged to. Merging
+   * the two would mean either losing the queue or storing a position for every
+   * history entry.
+   */
+  lastSession?: LastSession
   /** Preferred online quality; the engine falls back when unavailable. */
   playQuality: Quality
   /** Music library folders. */

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** Local music library: folder management, scanning, and the track table. */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { LocalMusicInfo, PlayableTrack } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
 import { useViewState } from '../composables/view-state'
+import AppIcon from '../components/AppIcon.vue'
 import TrackList from '../components/TrackList.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
 
@@ -35,6 +36,35 @@ const matching = ref<LocalMusicInfo | null>(null)
 watch([filter, sortKey, onlyLossless], () => {
   remembered.save({ filter: filter.value, sortKey: sortKey.value, onlyLossless: onlyLossless.value })
 })
+
+/** The virtualised track list, so "locate current" can drive its offset. */
+const trackList = ref<{ reveal: (index: number) => void } | null>(null)
+
+/**
+ * Scroll to the playing track.
+ *
+ * The playing track may be filtered out of view (the user typed a filter that
+ * excludes it). Jumping to a row that is not in the list would do nothing and
+ * look broken, so the filter is cleared first when that is the case — the
+ * button's promise is "show me what is playing", which outranks preserving a
+ * filter the user has probably forgotten about.
+ */
+function locateCurrent(): void {
+  const track = player.currentTrack
+  if (!track) return
+  let index = filtered.value.findIndex((item) => item.id === track.id)
+  if (index < 0 && (filter.value || onlyLossless.value)) {
+    filter.value = ''
+    onlyLossless.value = false
+    // Wait for the recomputed list to render before measuring rows.
+    void nextTick(() => {
+      const found = filtered.value.findIndex((item) => item.id === track.id)
+      if (found >= 0) trackList.value?.reveal(found)
+    })
+    return
+  }
+  if (index >= 0) trackList.value?.reveal(index)
+}
 
 /** Open the tag-match dialog for a local track. */
 function openMatch(track: PlayableTrack): void {
@@ -119,6 +149,16 @@ async function playAll(): Promise<void> {
         </p>
       </div>
       <div class="actions">
+        <button
+          class="btn"
+          type="button"
+          :disabled="!player.currentTrack"
+          title="定位到正在播放的曲目"
+          @click="locateCurrent"
+        >
+          <AppIcon name="play" :size="15" />
+          <span>当前播放</span>
+        </button>
         <button class="btn" type="button" @click="library.importFiles()">导入文件</button>
         <button class="btn" type="button" @click="$router.push('/music-library')"><span>管理音乐库</span></button>
         <button class="btn" type="button" :disabled="library.scanning" @click="scan">
@@ -169,6 +209,7 @@ async function playAll(): Promise<void> {
 
     <TrackList
       v-else
+      ref="trackList"
       :tracks="filtered"
       :show-album="false"
       :show-spec="false"

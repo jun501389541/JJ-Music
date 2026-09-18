@@ -8,16 +8,10 @@ import AppIcon from './AppIcon.vue'
 const route = useRoute(), router = useRouter(), library = useLibraryStore(), ui = useUiStore()
 const player = usePlayerStore()
 const counts = computed<Record<string, number>>(() => {
-  const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '')
-  const roots = library.folders.map(normalize).sort((a,b) => a.length-b.length)
-  const folders = new Set(library.tracks.map(track => {
-    const dir = normalize(track.path).split('/').slice(0,-1).join('/')
-    return roots.find(root => dir === root || dir.startsWith(root + '/')) || dir
-  }))
-  return { '/library': library.tracks.length, '/genres': new Set(library.tracks.map(t => t.genre || '未知流派')).size, '/albums': library.albums.length, '/artists': library.artists.length, '/folders': folders.size, '/music-library': library.folders.length, '/sources': library.userApis.length }
+  return { '/library': library.tracks.length, '/genres': new Set(library.tracks.map(t => t.genre || '未知流派')).size, '/albums': library.albums.length, '/artists': library.artists.length, '/music-library': library.folders.length, '/sources': library.userApis.length }
 })
 defineEmits<{ openNowPlaying: [] }>()
-const browse = [{ to: '/discover', label: '发现音乐', icon: 'cloud' }, { to: '/search', label: '全局搜索', icon: 'search' }, { to: '/library', label: '歌曲', icon: 'music' }, { to: '/genres', label: '曲风', icon: 'genre' }, { to: '/albums', label: '专辑', icon: 'album' }, { to: '/artists', label: '艺术家', icon: 'artist' }, { to: '/folders', label: '文件夹', icon: 'folder' }]
+const browse = [{ to: '/discover', label: '发现音乐', icon: 'cloud' }, { to: '/search', label: '全局搜索', icon: 'search' }, { to: '/library', label: '歌曲', icon: 'music' }, { to: '/genres', label: '曲风', icon: 'genre' }, { to: '/albums', label: '专辑', icon: 'album' }, { to: '/artists', label: '艺术家', icon: 'artist' }]
 const online = [ { to: '/sources', label: '音源管理', icon: 'cloud' }, {to:'/downloads',label:'下载管理',icon:'folder'}, {to:'/playlist-import',label:'导入歌单',icon:'list'}]
 const system = [{ to: '/music-library', label: '音乐库', icon: 'library' }, { to: '/settings', label: '设置', icon: 'settings' }]
 async function createPlaylist(): Promise<void> { const name = await ui.prompt('新建歌单'); if (!name?.trim()) return; const list = await library.createPlaylist(name.trim()); await router.push('/playlist/' + list.id) }

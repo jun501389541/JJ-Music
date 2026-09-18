@@ -37,6 +37,33 @@ const chosen = computed(() => selected.value.size ? props.tracks.filter(track =>
  * rows underneath are different. Restoring is therefore driven by the remembered
  * value at construction, while this watcher only clears the *selection*.
  */
+/**
+ * Scroll the given row into view and select it.
+ *
+ * Exposed for "jump to the playing track": the list is virtualised, so the row
+ * may not exist in the DOM at all and `querySelector` would fail. Driving the
+ * offset directly is both correct for a virtual list and instant — a smooth
+ * scroll over thousands of rows would animate through every intermediate frame.
+ *
+ * The row is centred rather than merely brought to an edge, because the user is
+ * looking for *this* track and the surrounding context is what makes it
+ * findable.
+ */
+function reveal(index: number): void {
+  if (index < 0 || index >= props.tracks.length) return
+  const el = viewport.value
+  if (!el) return
+  const target = index * rowHeight.value - el.clientHeight / 2 + rowHeight.value / 2
+  const top = Math.max(0, target)
+  el.scrollTop = top
+  scrollTop.value = top
+  // Selecting it also makes the row read as "the one you asked for" once the
+  // list stops moving.
+  const track = props.tracks[index]
+  if (track) { selected.value = new Set([track.id]); anchor = index }
+}
+defineExpose({ reveal })
+
 watch(() => props.tracks, () => { selected.value = new Set(); anchor = 0 })
 
 /** Keep the remembered offset in step with real scrolling. */

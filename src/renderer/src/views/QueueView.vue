@@ -2,11 +2,19 @@
 /** Current playback queue with reordering. */
 import type { PlayableTrack } from '@shared/types'
 import type { MenuItem } from '../stores/ui'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { usePlayerStore } from '../stores/player'
 import TrackList from '../components/TrackList.vue'
 
 const player = usePlayerStore()
+
+/**
+ * The virtualised list, so "locate current" can drive its scroll offset.
+ *
+ * The queue is not filtered, so the playing index is always a valid row and no
+ * fallback is needed (unlike the library view, where a filter can hide it).
+ */
+const queueList = ref<{ reveal: (index: number) => void } | null>(null)
 
 const totalDuration = computed(() => {
   const seconds = player.queue.reduce((sum, track) => {
@@ -53,6 +61,15 @@ function queueActions(track: PlayableTrack, index: number): MenuItem[] { return 
         </p>
       </div>
       <div class="actions">
+        <button
+          class="btn"
+          type="button"
+          :disabled="player.currentIndex < 0"
+          title="定位到正在播放的曲目"
+          @click="queueList?.reveal(player.currentIndex)"
+        >
+          当前播放
+        </button>
         <button class="btn" type="button" :disabled="player.queue.length === 0" @click="player.clearQueue()">
           清空队列
         </button>
@@ -66,6 +83,7 @@ function queueActions(track: PlayableTrack, index: number): MenuItem[] { return 
 
     <template v-else>
       <TrackList
+        ref="queueList"
         :tracks="player.queue"
         :extra-actions="queueActions"
         :show-album="true"

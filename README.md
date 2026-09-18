@@ -2,15 +2,15 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.1.2** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.1.3** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.2/JJ-Music-0.1.2-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.2/JJ-Music-0.1.2-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.2/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.3/JJ-Music-0.1.3-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.3/JJ-Music-0.1.3-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.3/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。更新前请先退出旧版；安装版和免安装版默认共用当前用户的配置。
 
@@ -57,8 +57,8 @@
 打包输出：
 
     release/
-      JJ Music-0.1.2-Setup-x64.exe
-      JJ Music-0.1.2-Portable-x64.zip
+      JJ Music-0.1.3-Setup-x64.exe
+      JJ Music-0.1.3-Portable-x64.zip
       win-unpacked/
 
 项目 .npmrc 为 Electron 和打包工具配置了镜像，缓存放在 .cache。可按网络环境调整镜像。打包脚本会先重新构建源码，并清除测试环境开关。

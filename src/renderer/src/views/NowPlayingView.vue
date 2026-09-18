@@ -380,7 +380,7 @@ function seekToLine(index: number): void {
       <button class="win-btn close" title="关闭" aria-label="关闭" @click="jj.window.close()"><AppIcon name="close" :size="15"/></button>
     </div>
     <div class="np__body">
-      <!-- left: artwork + meta -->
+      <!-- left: artwork only -->
       <section class="np__left">
         <div @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))" class="np__art" :class="{ 'is-spinning': player.playing }">
           <img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer" />
@@ -397,90 +397,7 @@ function seekToLine(index: number): void {
           </svg>
         </div>
 
-        <div class="np__meta">
-          <h1 class="np__title">{{ player.currentTrack?.name ?? '未在播放' }}</h1>
-          <p class="np__artist">{{ player.currentTrack?.singer ?? '—' }}</p>
-          <p v-if="player.currentTrack && 'albumName' in player.currentTrack && player.currentTrack.albumName" class="np__album">
-            {{ player.currentTrack.albumName }}
-          </p>
-          <p class="np__spec">{{ spec }}</p>
-        </div>
-
         <SpectrumVisualizer v-if="library.settings.showSpectrum" class="np__spectrum" />
-
-        <div class="np__transport">
-          <div class="np__times">
-            <span class="tnum">{{ formatTime(player.currentTime) }}</span>
-            <span class="tnum">{{ formatTime(player.duration) }}</span>
-          </div>
-
-          <!--
-            The chorus band sits behind the scrubber and is clickable on its own.
-            It is a *hint*, not a control that changes what the slider does: the
-            slider still scrubs anywhere, and the band just makes the section
-            visible and gives it a larger hit area.
-          -->
-          <div class="np__scrub">
-            <div
-              v-if="chorusBand"
-              class="np__chorus-band"
-              role="button"
-              tabindex="0"
-              :title="`跳到副歌（第 ${chorus?.occurrences} 次出现的段落）`"
-              :aria-label="`跳到副歌：${chorus?.preview ?? ''}`"
-              :style="{ left: `${chorusBand.left}%`, width: `${chorusBand.width}%` }"
-              @click.stop="jumpToChorus"
-              @keydown.enter.prevent="jumpToChorus"
-            />
-            <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
-          </div>
-
-          <div class="np__buttons">
-            <!--
-              Shared transport cluster: identical buttons, ordering and icons to
-              the toolbar, just at the larger scale this surface has room for.
-              Previously this block was hand-rolled here, which is how the two
-              surfaces drifted (different icon sizes, and a mode button that
-              existed only on this one).
-            -->
-            <TransportControls size="lg" />
-            <div
-              ref="volumeAnchor"
-              class="np__volume-group"
-              @mouseenter="openVolume"
-              @mouseleave="scheduleCloseVolume"
-              @wheel.prevent="bumpVolume"
-            >
-              <button
-                class="icon-btn"
-                type="button"
-                :title="player.muted ? '取消静音' : '音量'"
-                :aria-expanded="volumeOpen"
-                @click="toggleVolumePanel"
-              >
-                <TransportIcon :name="player.muted ? 'volume-mute' : 'volume'" :size="18" />
-              </button>
-              <div
-                v-if="volumeOpen"
-                class="np__volume-pop"
-                role="dialog"
-                aria-label="音量调节"
-                @mouseenter="cancelCloseVolume"
-                @mouseleave="scheduleCloseVolume"
-              >
-                <SliderBar
-                  variant="vertical"
-                  :value="player.muted ? 0 : player.volume"
-                  aria-label="音量"
-                  @update:value="onVolume"
-                />
-                <small class="np__volume-value">{{ player.muted ? '静音' : `${Math.round(player.volume * 100)}%` }}</small>
-              </div>
-            </div>
-          </div>
-
-          <div class="np__tools"><button class="btn" :aria-expanded="ui.playbackPanel === 'eq'" @click="togglePanel('eq')"><AppIcon name="audio" :size="16"/>EQ 均衡器</button><button class="btn" :aria-expanded="ui.playbackPanel === 'queue'" @click="togglePanel('queue')"><AppIcon name="list" :size="16"/>播放列表 <span>{{ player.queue.length }}</span></button></div>
-        </div>
       </section>
 
       <!-- right: lyrics -->
@@ -589,6 +506,112 @@ function seekToLine(index: number): void {
       </section>
     </div>
 
+    <!--
+      Bottom control bar.
+
+      The transport, progress and track identity live here rather than stacked
+      under the artwork. Two reasons: the controls sit on one horizontal axis at
+      a predictable place instead of moving with the artwork's height, and the
+      artwork column is left to be just artwork — which is what makes the
+      left/right split read as a player rather than a page with a form under it.
+
+      Three columns with equal outer flex basis, so the transport cluster is
+      centred in the *window*, not in whatever space the track name left over.
+    -->
+    <footer class="np__bar">
+      <div class="np__bar-side np__bar-side--left">
+        <span class="np__bar-title">{{ player.currentTrack?.name ?? '未在播放' }}</span>
+        <!--
+          Secondary facts sit beside the title, deliberately low-contrast: they
+          are useful when looked for and should not compete with the song name.
+        -->
+        <span class="np__bar-meta">
+          {{ player.currentTrack?.singer ?? '—' }}
+          <template v-if="player.currentTrack && 'albumName' in player.currentTrack && player.currentTrack.albumName">
+            · {{ player.currentTrack.albumName }}
+          </template>
+          <template v-if="spec"> · {{ spec }}</template>
+        </span>
+      </div>
+
+      <div class="np__bar-center">
+        <div class="np__times">
+          <span class="tnum">{{ formatTime(player.currentTime) }}</span>
+          <span class="tnum">{{ formatTime(player.duration) }}</span>
+        </div>
+
+        <!--
+          The chorus band sits behind the scrubber and is clickable on its own.
+          It is a *hint*, not a control that changes what the slider does: the
+          slider still scrubs anywhere, and the band just makes the section
+          visible and gives it a larger hit area.
+        -->
+        <div class="np__scrub">
+          <div
+            v-if="chorusBand"
+            class="np__chorus-band"
+            role="button"
+            tabindex="0"
+            :title="`跳到副歌（重复 ${chorus?.occurrences} 次）`"
+            :aria-label="`跳到副歌：${chorus?.preview ?? ''}`"
+            :style="{ left: `${chorusBand.left}%`, width: `${chorusBand.width}%` }"
+            @click.stop="jumpToChorus"
+            @keydown.enter.prevent="jumpToChorus"
+          />
+          <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
+        </div>
+
+        <TransportControls size="lg" />
+      </div>
+
+      <div class="np__bar-side np__bar-side--right">
+        <button class="icon-btn" :aria-expanded="ui.playbackPanel === 'eq'" title="EQ 均衡器" aria-label="EQ 均衡器" @click="togglePanel('eq')">
+          <AppIcon name="audio" :size="18" />
+        </button>
+        <button class="icon-btn" :aria-expanded="ui.playbackPanel === 'queue'" title="播放列表" aria-label="播放列表" @click="togglePanel('queue')">
+          <AppIcon name="list" :size="18" />
+        </button>
+
+        <div
+          ref="volumeAnchor"
+          class="np__volume-group"
+          @mouseenter="openVolume"
+          @mouseleave="scheduleCloseVolume"
+          @wheel.prevent="bumpVolume"
+        >
+          <button
+            class="icon-btn"
+            type="button"
+            :title="player.muted ? '取消静音' : '音量'"
+            :aria-expanded="volumeOpen"
+            @click="toggleVolumePanel"
+          >
+            <TransportIcon :name="player.muted ? 'volume-mute' : 'volume'" :size="18" />
+          </button>
+          <div
+            v-if="volumeOpen"
+            class="np__volume-pop"
+            role="dialog"
+            aria-label="音量调节"
+            @mouseenter="cancelCloseVolume"
+            @mouseleave="scheduleCloseVolume"
+          >
+            <SliderBar
+              variant="vertical"
+              :value="player.muted ? 0 : player.volume"
+              aria-label="音量"
+              @update:value="onVolume"
+            />
+            <small class="np__volume-value">{{ player.muted ? '静音' : `${Math.round(player.volume * 100)}%` }}</small>
+          </div>
+        </div>
+
+        <button class="icon-btn" title="更多播放选项" aria-label="更多播放选项" @click="ui.openMenu($event, playbackActions())">
+          <AppIcon name="more" :size="18" />
+        </button>
+      </div>
+    </footer>
+
     <div v-if="ui.playbackPanel" class="np-panel-layer" @click.self="ui.playbackPanel = null" @keydown.esc.stop="ui.playbackPanel = null">
       <aside class="np-panel" :aria-label="ui.playbackPanel === 'eq' ? 'EQ 均衡器' : '当前播放列表'">
         <header><div><h2>{{ ui.playbackPanel === 'eq' ? 'EQ 均衡器' : '播放列表' }}</h2><small v-if="ui.playbackPanel === 'queue'">{{ player.queue.length }} 首歌曲 · 双击切换播放</small></div><button class="icon-btn" aria-label="关闭播放面板" @click="ui.playbackPanel = null"><AppIcon name="close" :size="19"/></button></header>
@@ -693,27 +716,127 @@ function seekToLine(index: number): void {
 
 /* ---------------- layout ---------------- */
 
+/*
+ * Body = the two working columns; the control bar is a sibling below it.
+ *
+ * The artwork column is the flexible one and the lyric column is fixed-ish, so
+ * a long lyric line cannot squeeze the cover. `min-height: 0` on the body is
+ * what lets the lyric pane scroll instead of stretching the whole layout.
+ */
 .np__body {
   position: relative;
   z-index: 2;
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(320px, 5fr) minmax(300px, 4fr);
-  gap: 40px;
-  padding: 56px 52px 36px;
+  grid-template-columns: minmax(280px, 4fr) minmax(320px, 5fr);
+  gap: 48px;
+  padding: 52px 56px 24px;
+  align-items: center;
 }
 
-/* ---------------- left ---------------- */
+/*
+ * Bottom control bar.
+ *
+ * Three columns with equal flex basis on the outer two: the transport cluster
+ * is centred in the window itself, not centred in the space the track title
+ * happened to leave. Without that, a long title drags the buttons sideways.
+ *
+ * It carries an opaque background and sits above the body (`z-index`): the
+ * lyric pane scrolls underneath it, and with a transparent bar the lyrics
+ * showed through the controls.
+ */
+.np__bar {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 28px 20px;
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--divider);
+}
+
+.np__bar-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.np__bar-side--right {
+  justify-content: flex-end;
+}
+
+/* The identity block stacks name over metadata, and truncates rather than
+   pushing the transport cluster off-centre. */
+.np__bar-side--left {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.np__bar-title {
+  max-width: 100%;
+  font-size: var(--text-md);
+  font-weight: 550;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Secondary facts (artist / album / format) sit next to the title at low
+ * contrast: available when looked for, never competing with the song name.
+ */
+.np__bar-meta {
+  max-width: 100%;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.np__bar-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  width: min(520px, 46vw);
+}
+
+/* Times flank the scrubber on one line, as a compact readout rather than two
+   labels pushed to the far edges of a wide row. */
+.np__bar-center .np__times {
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+}
+
+.np__bar-center .np__scrub {
+  width: 100%;
+}
+
+/*
+ * ---------------- left ----------------
+ */
 
 .np__left {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
+  height: 100%;
 }
 
 .np__art {
-  width: min(100%, 340px);
+  width: min(100%, 420px, 46vh);
   aspect-ratio: 1;
   border-radius: var(--radius-xl);
   overflow: hidden;
@@ -723,7 +846,6 @@ function seekToLine(index: number): void {
   align-items: center;
   justify-content: center;
   box-shadow: var(--shadow-lg);
-  margin-bottom: 26px;
 }
 
 .np__art img {
@@ -732,46 +854,13 @@ function seekToLine(index: number): void {
   object-fit: cover;
 }
 
-.np__meta {
-  min-width: 0;
-}
-
-.np__title {
-  margin: 0 0 6px;
-  font-size: var(--text-2xl);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.25;
-  word-break: break-word;
-}
-
-.np__artist {
-  margin: 0;
-  font-size: var(--text-lg);
-  color: var(--text-secondary);
-}
-
-.np__album,
-.np__spec {
-  margin: 6px 0 0;
-  font-size: var(--text-base);
-  color: var(--text-tertiary);
-}
-
 .np__spectrum {
-  width: 100%;
+  width: min(100%, 420px);
   height: 44px;
-  margin: 22px 0 auto;
+  margin-top: 22px;
 }
 
 /* ---------------- transport ---------------- */
-
-.np__transport {
-  margin-top: 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
 
 .np__times {
   display: flex;
@@ -808,35 +897,6 @@ function seekToLine(index: number): void {
 .np__chorus-band:focus-visible {
   background: color-mix(in srgb, var(--accent) 62%, transparent);
   outline: none;
-}
-
-.np__buttons {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  margin-top: 4px;
-}
-
-.np__play {
-  width: 52px;
-  height: 52px;
-  border: none;
-  border-radius: 50%;
-  background: var(--accent);
-  color: var(--accent-text);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition:
-    transform var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-.np__play:hover {
-  background: var(--accent-hover);
-  transform: scale(1.05);
 }
 
 /* The speaker icon anchors the popover; the button itself is unchanged. */
@@ -1060,11 +1120,11 @@ code {
 }
 .np{--bg-base:#191b23;--bg-panel:#252832;--text-primary:#f5f5f7;--text-secondary:#b2b4c0;--text-tertiary:#777a89;color:var(--text-primary)}
 .np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 230px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:0;top:0;z-index:3;display:flex;height:var(--titlebar-height);-webkit-app-region:no-drag}.np__window-actions .win-btn{width:46px;display:grid;place-items:center;color:var(--text-secondary);background:none;border:0;cursor:pointer}.np__window-actions .win-btn:hover{background:var(--bg-hover)}.np__window-actions .win-btn.close:hover{background:#c42b1c;color:white}.np__window-actions .np__more{width:38px;height:var(--titlebar-height);display:grid;place-items:center;border-radius:0;color:var(--text-secondary)}.np__window-actions .np__more:hover{background:var(--bg-hover)}
-.np__body{grid-template-columns:minmax(280px, .9fr) minmax(300px,1.1fr);padding:82px 7vw 35px;gap:8vw}
-.np__left{align-items:center;justify-content:center}.np__art{width:min(100%,340px,39vh);flex-shrink:0;border-radius:8px;margin-bottom:24px}.circle-cover .np__art{border-radius:50%}.np__meta,.np__transport{width:100%;max-width:380px}.np__title{font-size:24px;font-weight:550}.np__artist{font-size:15px}.np__album{font-size:12px}.np__spec{font-size:11px}.np__transport{margin-top:28px}.np__play{background:#e7e8ed;color:#20232a}.np__play:hover{background:white}.np__buttons{gap:25px}.np__right{padding:16px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;padding:18px 8px;line-height:1.5;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative;padding:40vh 0}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}
-@media(max-height:700px){.np__body{padding-top:62px;padding-bottom:20px}.np__art{width:min(100%,29vh);margin-bottom:16px}.np__transport{margin-top:15px}.np__album{display:none}.np__title{font-size:20px}}
+.np__body{grid-template-columns:minmax(280px, 4fr) minmax(320px, 5fr);padding:52px 56px 24px;gap:48px;align-items:center}
+.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:min(100%,420px,46vh);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;padding:18px 8px;line-height:1.5;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative;padding:40vh 0}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}
+.np__bar{display:flex;align-items:center;gap:20px;padding:14px 28px 20px;flex:none;background:var(--bg-elevated);border-top:1px solid var(--divider)}.np__bar-side{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0}.np__bar-side--left{flex-direction:column;align-items:flex-start;gap:3px}.np__bar-side--right{justify-content:flex-end}.np__bar-title{font-size:var(--text-md);font-weight:550;color:var(--text-primary);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np__bar-meta{font-size:var(--text-xs);color:var(--text-tertiary);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np__bar-center{display:flex;flex-direction:column;align-items:center;gap:4px;flex:0 1 auto;width:min(520px,46vw)}.np__bar-center .np__times{width:100%;justify-content:space-between;gap:12px}.np__bar-center .np__scrub{width:100%}
+@media(max-height:700px){.np__body{padding:44px 40px 16px;gap:34px}.np__art{width:min(100%,300px,38vh)}.np__bar{padding:10px 22px 14px;gap:14px}}
 .np{color-scheme:dark;--bg-hover:#303340;--bg-active:#353947;--border-subtle:#ffffff10;--border-strong:#ffffff20;--bg-input:#191b23}
-.np__tools{display:flex;justify-content:center;gap:12px;margin:4px 0}.np__tools .btn{font-size:11px;border-color:#ffffff20;color:#c9cbd4;gap:8px;height:30px;border-radius:6px}.np__tools span{font-size:10px;opacity:.6}.np__tools .btn[aria-expanded="true"]{background:#ffffff18;color:white}
 /* Multi-source lyric picker. Sits above the panels so a choice is never
    obscured by the EQ/queue layer that may already be open. */
 .np__picker{position:absolute;inset:0;z-index:6;display:grid;place-items:center;background:#000000a8;backdrop-filter:blur(6px);padding:40px}
@@ -1080,5 +1140,5 @@ code {
 .np__picker-meta{font-size:11px;color:var(--text-secondary)}
 .np__picker-preview{font-size:11px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .np-panel-layer{position:absolute;inset:55px 0 0;z-index:4;background:#0002}.np-panel{position:absolute;right:18px;top:8px;bottom:20px;width:min(540px,88vw);display:flex;flex-direction:column;padding:24px;background:#22252df5;border:1px solid #ffffff1a;box-shadow:0 20px 60px #0006;backdrop-filter:blur(30px);border-radius:12px;overflow:auto}.np-panel>header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:26px;flex:none}.np-panel h2{margin:0;font-size:20px;font-weight:550}.np-panel small{display:block;margin-top:9px;font-size:11px;color:var(--text-secondary)}.np-panel :deep(.tracklist){height:auto;min-height:0;flex:1}.np-panel :deep(.track-head),.np-panel :deep(.track-row){grid-template-columns:24px minmax(0,1fr) 0px 38px 25px;gap:7px;padding-left:5px;padding-right:5px}.np-panel :deep(.track-album),.np-panel :deep(.track-head>span:nth-child(3)){visibility:hidden}.np-panel :deep(.track-label strong){font-size:12px}.np-panel :deep(.track-identity){gap:10px}.np-panel :deep(.track-cover){width:36px;height:36px}.np-panel :deep(.selection-toolbar){gap:8px;font-size:10px}
-@media(max-height:700px){.np__transport{gap:7px}.np-panel{padding:20px}.np-panel>header{margin-bottom:18px}}
+@media(max-height:700px){.np-panel{padding:20px}.np-panel>header{margin-bottom:18px}}
 </style>

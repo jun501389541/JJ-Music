@@ -49,9 +49,14 @@ test('bad responses fail cleanly and strict quality cannot silently downgrade',a
   const {manager,dir}=await setup({fetch:async()=>new Response('{"error":"expired"}')})
   const [id]=manager.add([track],'flac');assert.equal((await settled(manager,id)).status,'failed')
   assert.ok(!(await readdir(dir)).some(f=>/\.(part|flac)$/.test(f)))
-  const engine=new SourceEngine({},'unused')
+  const engine=new SourceEngine({list:()=>[{meta:{id:'api1',enabled:true}}]},'unused')
+  // Route the engine at a fake running script so `getMusicUrl` reaches the
+  // quality ladder. `providersFor` is derived from the started runtimes, so a
+  // minimal runtime stub is what makes the platform resolve.
   engine.getSources=()=>[{id:'wy',qualitys:['128k','flac']}]
-  const qualities=[];engine.request=async(_s,_a,args)=>{qualities.push(args.type);throw Error('unavailable')}
+  engine.runtimes=new Map([['api1',{api:{meta:{id:'api1',name:'测试源'}},dead:false,sources:[{id:'wy',type:'music',actions:['musicUrl'],qualitys:['128k','flac']}],pending:new Map(),nextId:1,logs:[],scratchDir:''}]]);
+  engine.rebuildOwners()
+  const qualities=[];engine.requestFrom=async(_api,_s,_a,args)=>{qualities.push(args.type);throw Error('unavailable')}
   await assert.rejects(()=>engine.getMusicUrl('wy',track,'flac',true));assert.deepEqual(qualities,['flac'])
 })
 test('MP3 embeds lyrics and cover and optional lyric downloads can be disabled',async()=>{

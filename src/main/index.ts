@@ -395,6 +395,31 @@ function registerIpc(): void {
       throw new Error('最多只能导入 20 个音源')
     }
     const meta = sourceStore.import(payload, name || '导入音源')
+
+    // Validate the new script before it is allowed to run.
+    //
+    // Imported scripts start disabled (see `SourceStore.upsert`), so nothing is
+    // started here — but the validation still runs so a dangerous script is
+    // quarantined immediately rather than sitting in the list waiting for the
+    // user to flip a switch. The refusal is reported, not thrown away.
+    const loaded = sourceStore.get(meta.id)
+    if (loaded) {
+      const report = sourceEngine.validate(loaded.source, meta.name)
+      if (report.blocked) {
+        const blocking = report.findings.filter(f => f.severity === 'block')
+        sourceStore.quarantine(
+          meta.id,
+          `导入时校验未通过：${blocking.map(f => f.title).join('；')}`
+        )
+        throw new Error(
+          `「${meta.name}」未通过启动前校验，已导入但保持停用：\n` +
+          blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')
+        )
+      }
+    }
+
+    // Only enabled scripts start; a freshly imported one is disabled, so this
+    // is a no-op for the new entry and simply re-affirms the existing set.
     await sourceEngine.startAll()
     return meta
   })
@@ -409,11 +434,33 @@ function registerIpc(): void {
     if (result.canceled || result.filePaths.length === 0) return null
 
     const imported = []
+    const refused: string[] = []
     for (const filePath of result.filePaths) {
       const content = await readFile(filePath, 'utf8')
-      imported.push(sourceStore.import(content, filePath.split(/[\\/]/).pop() ?? '导入音源'))
+      const meta = sourceStore.import(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
+      imported.push(meta)
+
+      // Same gate as the paste path: quarantine immediately rather than let a
+      // dangerous script sit in the list waiting to be switched on.
+      const loaded = sourceStore.get(meta.id)
+      if (!loaded) continue
+      const report = sourceEngine.validate(loaded.source, meta.name)
+      if (report.blocked) {
+        const blocking = report.findings.filter(f => f.severity === 'block')
+        sourceStore.quarantine(
+          meta.id,
+          `导入时校验未通过：${blocking.map(f => f.title).join('；')}`
+        )
+        refused.push(meta.name)
+      }
     }
+
     await sourceEngine.startAll()
+    if (refused.length > 0) {
+      throw new Error(
+        `以下音源未通过启动前校验，已导入但保持停用：${refused.join('、')}`
+      )
+    }
     return imported
   })
 
@@ -423,17 +470,75 @@ function registerIpc(): void {
     sourceStore.remove(id)
   })
 
+  /**
+   * Enable / disable a source.
+   *
+   * Enabling always runs pre-flight validation first and returns the report —
+   * the check is part of starting, not a separate command the user has to
+   * remember. A blocked script is quarantined and never started; a script with
+   * warnings is started, and the caller may show the warnings, but the decision
+   * to proceed has already been made by the user pressing "start".
+   *
+   * The return value is structured rather than a thrown string so the settings
+   * page can render each finding with its own severity and remedy.
+   */
   handle(IPC.sourcesToggle, async (id: string, enabled: boolean) => {
     const { sourceStore, sourceEngine } = requireServices()
-    sourceStore.setEnabled(id, enabled)
-    if (enabled) await sourceEngine.reload(id)
-    else await sourceEngine.stop(id)
+
+    if (!enabled) {
+      sourceStore.setEnabled(id, false)
+      await sourceEngine.stop(id)
+      return { started: false, report: null }
+    }
+
+    if (sourceStore.isQuarantined(id)) {
+      throw new Error(
+        '该音源处于隔离状态，无法直接启用。请先在卡片上「解除隔离」并确认你信任它。'
+      )
+    }
+
+    const loaded = sourceStore.get(id)
+    if (!loaded) throw new Error('音源不存在')
+
+    const report = sourceEngine.validate(loaded.source, loaded.meta.name)
+    if (report.blocked) {
+      const blocking = report.findings.filter(f => f.severity === 'block')
+      sourceStore.quarantine(
+        id,
+        `启用前校验未通过：${blocking.map(f => f.title).join('；')}`
+      )
+      return { started: false, report }
+    }
+
+    sourceStore.setEnabled(id, true)
+    await sourceEngine.reload(id)
+    return { started: true, report }
+  })
+
+  /** Validate a source on demand, without enabling it. */
+  handle(IPC.sourcesValidate, (id: string) => {
+    const { sourceStore, sourceEngine } = requireServices()
+    const loaded = sourceStore.get(id)
+    if (!loaded) throw new Error('音源不存在')
+    return sourceEngine.validate(loaded.source, loaded.meta.name)
   })
 
   handle(IPC.sourcesReload, async (id: string) => {
     const { sourceEngine } = requireServices()
     await sourceEngine.reload(id)
   })
+
+  /**
+   * Lift a safety quarantine.
+   *
+   * Quarantine is a verdict the app reached, not a user preference, so it is
+   * cleared only on an explicit user action — and the source stays disabled
+   * afterwards, so clearing it can never itself start a dangerous script. The
+   * user re-enables it as a separate, deliberate step.
+   */
+  handle(IPC.sourcesClearQuarantine, (id: string) =>
+    requireServices().sourceStore.clearQuarantine(id)
+  )
 
   handle(IPC.sourcesVerifyPlatform, async (id: SourceId) => {
     const { sourceEngine } = requireServices()

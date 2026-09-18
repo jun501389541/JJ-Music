@@ -109,6 +109,15 @@ export interface UserApiMeta {
   /** Last init error, if the script failed to initialise. */
   lastError?: string
   /**
+   * Set when this source was disabled for unsafe behaviour rather than by the
+   * user.
+   *
+   * A quarantined source stays disabled across restarts and cannot be switched
+   * back on without the user explicitly clearing the quarantine — the case that
+   * motivated it was a script that shut the machine down when started.
+   */
+  quarantined?: boolean
+  /**
    * Heuristic risk rating, computed at import time.
    *
    * Reported because a source is third-party code that runs with real

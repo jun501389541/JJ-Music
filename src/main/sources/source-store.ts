@@ -35,6 +35,12 @@ interface StoredApi {
   enabled?: boolean
   importedAt?: string
   lastError?: string
+  /**
+   * Set when the source was disabled for unsafe behaviour (see
+   * `SourceStore.quarantine`). Persisted so a restart cannot re-arm it and
+   * `setEnabled(true)` refuses until the user clears it.
+   */
+  quarantined?: boolean
 }
 
 interface StoredFile {
@@ -130,7 +136,16 @@ export class SourceStore {
       homepage: header.homepage,
       allowShowUpdateAlert: true,
       script: encodeScript(entry.source),
-      enabled: existing?.enabled ?? true,
+      // A re-import keeps the user's existing choice; a *new* script starts
+      // disabled.
+      //
+      // Defaulting to `true` meant importing a script marked it enabled before
+      // anything had looked at it, and the import handler's `startAll()` would
+      // then try to run it. Validation catches the dangerous ones today, but
+      // "imported means enabled" is the wrong default for code that runs with
+      // the user's privileges: the safe default is that nothing runs until the
+      // user asks for it, with the validation gate in between.
+      enabled: existing?.enabled ?? false,
       importedAt: new Date().toISOString()
     }
 
@@ -152,9 +167,44 @@ export class SourceStore {
   setEnabled(id: string, enabled: boolean): boolean {
     const api = this.apis.find((item) => item.id === id)
     if (!api) return false
+    // A quarantined source stays off until the user explicitly clears the
+    // quarantine. Without this a user re-enabling everything out of habit
+    // would re-arm the script that can shut the machine down.
+    if (enabled && api.quarantined) return false
     api.enabled = enabled
     this.persist()
     return true
+  }
+
+  /**
+   * Quarantine a source: disable it and remember why.
+   *
+   * Distinct from `setEnabled(false)` because quarantine is a verdict about the
+   * script's behaviour, not a user preference, and it must survive a restart
+   * and resist the user casually switching it back on.
+   */
+  quarantine(id: string, reason: string): void {
+    const api = this.apis.find((item) => item.id === id)
+    if (!api) return
+    api.enabled = false
+    api.quarantined = true
+    api.lastError = reason
+    this.persist()
+  }
+
+  /** Lift a quarantine so the source can be enabled again. */
+  clearQuarantine(id: string): boolean {
+    const api = this.apis.find((item) => item.id === id)
+    if (!api) return false
+    delete api.quarantined
+    delete api.lastError
+    this.persist()
+    return true
+  }
+
+  /** True when this source has been quarantined for unsafe behaviour. */
+  isQuarantined(id: string): boolean {
+    return Boolean(this.apis.find((item) => item.id === id)?.quarantined)
   }
 
   /** Record the outcome of the last init attempt, for display in settings. */
@@ -196,6 +246,7 @@ function toMeta(api: StoredApi): UserApiMeta {
     enabled: api.enabled !== false,
     importedAt: api.importedAt ?? '',
     ...(api.lastError ? { lastError: api.lastError } : {}),
+    ...(api.quarantined ? { quarantined: true } : {}),
     // Assessed on the fly for entries stored before risk rating existed, so an
     // already-imported library still gets a rating without a re-import.
     ...riskFor(api.script)
@@ -203,20 +254,31 @@ function toMeta(api: StoredApi): UserApiMeta {
 }
 
 /**
- * Risk metadata for a stored script, decoding it if necessary.
+ * Risk metadata for a stored script, decoded if necessary.
  *
- * Decoding is cheap relative to everything else the settings page does, and it
- * means the rating is always derived from the actual code rather than stale
- * stored state.
+ * ## Memoised by script text
+ *
+ * `metas()` runs on every settings-page refresh (toggles, imports, every
+ * `sourcesChanged`). Without memoisation each refresh re-inflates and
+ * re-scans all scripts — including the ~740 KB obfuscated packer whose regex
+ * passes are measurably the slowest part of the page. The key is the stored
+ * (encoded) script text itself: a re-import that changes the script
+ * invalidates naturally, and identical scripts share one entry.
  */
+const riskCache = new Map<string, Pick<UserApiMeta, 'risk' | 'riskNotes'>>()
 function riskFor(storedScript: string): Pick<UserApiMeta, 'risk' | 'riskNotes'> {
+  const cached = riskCache.get(storedScript)
+  if (cached) return cached
+  let result: Pick<UserApiMeta, 'risk' | 'riskNotes'>
   try {
     const source = decodeScript(storedScript)
     const report = assessScriptRisk(source)
-    return { risk: report.risk, riskNotes: report.notes }
+    result = { risk: report.risk, riskNotes: report.notes }
   } catch {
-    return { risk: 'medium', riskNotes: ['无法解码脚本内容，无法评估其行为'] }
+    result = { risk: 'medium', riskNotes: ['无法解码脚本内容，无法评估其行为'] }
   }
+  riskCache.set(storedScript, result)
+  return result
 }
 
 function isStoredApi(value: unknown): value is StoredApi {

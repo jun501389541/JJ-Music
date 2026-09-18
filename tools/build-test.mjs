@@ -57,6 +57,7 @@ await build({
     join(repoRoot, 'src', 'main', 'online', 'lyrics.ts'),
     join(repoRoot, 'src', 'main', 'store', 'json-file.ts'),
     join(repoRoot, 'src', 'main', 'media', 'media-response.ts'),
+    join(repoRoot, 'src', 'main', 'media', 'flac-repair.ts'),
     join(repoRoot, 'src', 'main', 'store', 'settings-store.ts')
   ],
   // `outbase` is the root the output tree mirrors. Setting it to `src/main`

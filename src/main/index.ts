@@ -22,6 +22,7 @@ import { dirname, isAbsolute, join, sep } from 'node:path'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { mediaPath, serveMedia } from './media/media-response'
+import { ensurePlayableFlac } from './media/flac-repair'
 import { IPC } from '@shared/ipc'
 import { fail, ok, type AppSettings, type LocalMusicInfo, type OnlineMusicInfo, type PlayableTrack, type Quality, type SourceId } from '@shared/types'
 import { SourceStore } from './sources/source-store'
@@ -436,12 +437,35 @@ function updateTaskbarButtons(state: { hasTrack: boolean; playing: boolean }): v
 const selectedAudioFiles = new Set<string>()
 
 function registerMediaProtocol(): void {
-  protocol.handle(MEDIA_SCHEME, (request) => {
+  protocol.handle(MEDIA_SCHEME, async (request) => {
     const { library, dataDir } = requireServices()
+    let requested: string | undefined
     let indexedFile: string[] = []
-    try { const path = mediaPath(request.url); if (library.getByPath(path)) indexedFile = [path] } catch { /* serveMedia returns a 400 for malformed URLs */ }
+    try {
+      requested = mediaPath(request.url)
+      if (library.getByPath(requested)) indexedFile = [requested]
+    } catch { /* serveMedia returns a 400 for malformed URLs */ }
+
+    const roots = [...library.getFolders(), join(dataDir, 'library', 'covers')]
+    const repairCache = join(dataDir, 'library', 'flac-repair')
+
+    // Repair a FLAC that Chromium cannot decode because its embedded cover has
+    // an empty MIME type. The repaired copy is served instead of the original;
+    // the user's file is never modified. Only .flac files are probed, and the
+    // probe reads the metadata region alone.
+    if (requested && requested.toLowerCase().endsWith('.flac')) {
+      try {
+        const result = await ensurePlayableFlac(requested, repairCache)
+        if (result.repaired && result.path !== requested) {
+          return serveMedia(request, { roots: [...roots, repairCache], files: [result.path] })
+        }
+      } catch {
+        // Repair is best-effort: fall through to the original file.
+      }
+    }
+
     return serveMedia(request, {
-      roots: [...library.getFolders(), join(dataDir, 'library', 'covers')],
+      roots,
       files: [...selectedAudioFiles, ...indexedFile]
     })
   })

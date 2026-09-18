@@ -13,7 +13,6 @@ import TransportControls from './TransportControls.vue'
 const emit = defineEmits<{ openNowPlaying: [] }>()
 const player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
 const cover = computed(() => { const t = player.currentTrack; return !t ? null : isLocalTrack(t) ? t.coverPath ? toMediaUrl(t.coverPath) : null : t.picUrl })
-const favorite = computed(() => library.favorites.some(track => track.id === player.currentTrack?.id))
 const lyric = computed(() => player.lyrics?.lines[player.activeLyricIndex]?.text)
 const spec = computed(() => { const t = player.currentTrack; return t && isLocalTrack(t) && t.sampleRate ? `${t.sampleRate / 1000} kHz` : t && !isLocalTrack(t) ? t.source.toUpperCase() : '—' })
 
@@ -64,19 +63,20 @@ function onVolume(value: number): void {
     @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"
   >
     <button class="mini-track" @click="emit('openNowPlaying')"><div class="mini-art"><img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer"/><AppIcon v-else name="music" :size="24"/></div><span class="mini-meta"><strong>{{ player.currentTrack?.name || '未载入歌曲' }}</strong><small>{{ player.currentTrack?.singer || '选择一首歌曲，开始聆听' }}</small></span></button>
-    <button class="icon-btn mini-heart" :class="{ liked: favorite }" :disabled="!player.currentTrack" aria-label="喜爱" @click="player.currentTrack && library.toggleFavorite(player.currentTrack)"><AppIcon name="heart" :size="18"/></button>
   </div>
   <div class="mini-center">
     <!--
       The transport cluster is the shared component, so the toolbar and the
       now-playing view cannot drift apart again: the mode button in particular
-      used to exist only on the now-playing view.
+      used to exist only on the now-playing view, and the favourite and queue
+      buttons used to sit at the bar's edges where each surface placed them
+      differently. Per the reference design they belong inside the cluster.
     -->
-    <TransportControls size="md" />
+    <TransportControls size="md" show-favorite show-queue />
   </div>
   <div class="mini-side mini-side--right">
     <button class="mini-lyric" @click="emit('openNowPlaying')">{{ player.error || lyric || (player.currentTrack ? `${formatTime(player.currentTime)} / ${formatTime(player.duration)}` : 'JJ Music') }}</button>
-    <div class="mini-right"><button class="icon-btn" title="播放队列" aria-label="播放队列" @click="$router.push('/queue')"><AppIcon name="list" :size="19"/></button><button class="icon-btn" title="更多" aria-label="播放更多选项" @click="ui.openMenu($event, playbackActions())"><AppIcon name="more" :size="19"/></button><div class="output-spec"><AppIcon name="audio" :size="17"/><small>{{ spec }}</small></div>
+    <div class="mini-right"><button class="icon-btn" title="更多" aria-label="播放更多选项" @click="ui.openMenu($event, playbackActions())"><AppIcon name="more" :size="19"/></button><div class="output-spec"><AppIcon name="audio" :size="17"/><small>{{ spec }}</small></div>
       <!--
         Toolbar volume stays an always-visible horizontal slider with the
         percentage beside it. A popover was tried here and rejected: in the
@@ -118,6 +118,5 @@ function onVolume(value: number): void {
 .mini-volume{display:flex;align-items:center;gap:5px}
 .mini-volume small{width:20px;font-size:11px;color:var(--text-secondary)}
 .volume-slider{width:65px}
-.liked{color:#ee8c9a}
 @media(max-width:1150px){.mini-lyric{display:none}.mini-track{max-width:200px}.volume-slider{width:48px}}
 </style>

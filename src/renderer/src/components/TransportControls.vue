@@ -10,15 +10,23 @@
  * affordance the toolbar lacked. Every previous fix to "the controls behave
  * differently here" was applied twice and drifted again.
  *
+ * ## The favourite and queue buttons live here too
+ *
+ * The reference design puts them inside the transport cluster — favourite left
+ * of the mode button, queue right of next — rather than scattered at the bar's
+ * edges where they previously sat. Since both bars render this component, the
+ * buttons are props here instead of per-surface markup: that is what makes
+ * "same cluster, same order" structural rather than something to maintain in
+ * two places. The favourite state comes from the library store, which this
+ * component can read directly for the same reason it reads playback state.
+ *
  * Sizes are expressed as tokens so a surface can scale the cluster without
  * forking it: the toolbar renders `md`, the now-playing view `lg`.
- *
- * Playback state is read from the store rather than passed in, because both
- * callers already share that store — passing it would only add a way for the
- * two to disagree.
  */
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { usePlayerStore } from '../stores/player'
+import { useLibraryStore } from '../stores/library'
 import AppIcon from './AppIcon.vue'
 import TransportIcon from './TransportIcon.vue'
 
@@ -27,13 +35,18 @@ const props = withDefaults(defineProps<{
   size?: 'md' | 'lg'
   /** Hide the play-mode button (used where the surface has no room). */
   hideMode?: boolean
-}>(), { size: 'md', hideMode: false })
+  /** Show the favourite toggle inside the cluster, left of the mode button. */
+  showFavorite?: boolean
+  /** Show the queue button inside the cluster, right of next. */
+  showQueue?: boolean
+}>(), { size: 'md', hideMode: false, showFavorite: false, showQueue: false })
 
 const player = usePlayerStore()
+const library = useLibraryStore()
 
 const dims = computed(() => props.size === 'lg'
-  ? { side: 22, play: 24, button: 44 }
-  : { side: 21, play: 23, button: 40 })
+  ? { side: 22, play: 24, button: 44, small: 18 }
+  : { side: 21, play: 23, button: 40, small: 17 })
 
 const modeIcon = computed(() =>
   player.playMode === 'single' ? 'single-loop'
@@ -47,10 +60,37 @@ const modeLabel = computed(() => ({
   single: '单曲循环',
   random: '随机播放'
 }[player.playMode] ?? '顺序播放'))
+
+/** Whether the playing track is in the favourites playlist. */
+const favorite = computed(() =>
+  library.favorites.some((track) => track.id === player.currentTrack?.id))
+
+/**
+ * Toggle favourite, guarding the no-track case.
+ *
+ * The whole cluster is disabled when nothing is loaded, so this cannot fire
+ * without a track in practice — but the guard keeps the helper total.
+ */
+function toggleFavorite(): void {
+  if (player.currentTrack) void library.toggleFavorite(player.currentTrack)
+}
 </script>
 
 <template>
   <div class="transport" :class="`transport--${size}`">
+    <button
+      v-if="showFavorite"
+      class="icon-btn"
+      type="button"
+      :class="{ liked: favorite }"
+      title="喜爱"
+      aria-label="喜爱"
+      :disabled="!player.currentTrack"
+      @click="toggleFavorite"
+    >
+      <AppIcon name="heart" :size="dims.small" />
+    </button>
+
     <button
       v-if="!hideMode"
       class="icon-btn"
@@ -96,10 +136,28 @@ const modeLabel = computed(() => ({
     </button>
 
     <!--
-      The now-playing view has room for a dedicated queue button; the toolbar
-      already shows one in its right cluster, so this slot is optional.
+      The queue button sits inside the cluster per the reference design, right
+      of next. `RouterLink` keeps the toolbar's behaviour of navigating to the
+      queue page.
     -->
-    <slot name="trailing" />
+    <slot name="trailing">
+      <RouterLink
+        v-if="showQueue"
+        v-slot="{ navigate, href }"
+        to="/queue"
+        custom
+      >
+        <a
+          class="icon-btn"
+          :href
+          title="播放队列"
+          aria-label="播放队列"
+          @click="navigate($event)"
+        >
+          <AppIcon name="list" :size="dims.small" />
+        </a>
+      </RouterLink>
+    </slot>
   </div>
 </template>
 
@@ -112,6 +170,12 @@ const modeLabel = computed(() => ({
 
 .transport--lg {
   gap: 10px;
+}
+
+/* Favourite is marked in the accent-adjacent pink the toolbar used, so the
+   state reads identically in both bars. */
+.liked {
+  color: #ee8c9a;
 }
 
 .transport__play {

@@ -639,7 +639,13 @@ function playArtworkFlight(): void {
           <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
         </div>
 
-        <TransportControls size="lg" />
+        <!--
+          Same cluster, same order, same buttons as the toolbar's — the two
+          bottom bars are one component with a different scale. The favourite
+          and queue buttons live inside it too, so neither bar can scatter them
+          to its own edges again.
+        -->
+        <TransportControls size="lg" show-favorite show-queue />
       </div>
 
       <div class="np__bar-side np__bar-side--right">

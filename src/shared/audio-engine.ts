@@ -106,6 +106,31 @@ export interface AudioEngine {
 
   /** Release all resources. The engine is unusable afterwards. */
   destroy(): void
+
+  /**
+   * List the audio outputs this engine can play to.
+   *
+   * Returns an empty array when the engine cannot enumerate devices (or the
+   * renderer has not been granted the `speaker-selection` permission), which
+   * the settings page renders as "system default only".
+   */
+  listOutputDevices(): Promise<AudioOutputDevice[]>
+  /**
+   * Route playback to a device, or to the system default when `deviceId` is
+   * empty. Changing the device mid-track may require a reload on some
+   * platforms; the caller decides whether to resume.
+   */
+  setOutputDevice(deviceId: string): Promise<boolean>
+  /** The device currently in use, or `''` for the system default. */
+  getOutputDevice(): string
+}
+
+/** One selectable audio output. */
+export interface AudioOutputDevice {
+  /** Platform id; `''` is the system default entry. */
+  deviceId: string
+  /** Human-readable name, already trimmed of the platform's default suffix. */
+  label: string
 }
 
 /** Equalizer band centres shared by all engines so presets stay portable. */

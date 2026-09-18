@@ -316,6 +316,16 @@ export interface AppSettings extends UiPreferences {
   downloadEmbedCover: boolean
   /** Show the desktop lyric window. */
   desktopLyric: boolean
+  /**
+   * Keep playing when the window is closed.
+   *
+   * When true, closing the window hides it to the tray instead of quitting;
+   * the audio keeps running and the tray menu is the way back. When false the
+   * app quits, which is the pre-existing behaviour.
+   */
+  minimizeToTray: boolean
+  /** Preferred audio output device id; empty means the system default. */
+  outputDeviceId: string
 }
 
 /* ------------------------------------------------------------------ *

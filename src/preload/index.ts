@@ -6,7 +6,7 @@
  * built-ins, or the raw channel names, so a compromised renderer cannot reach
  * arbitrary IPC channels.
  */
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
 import type {
   AppSettings,
@@ -52,6 +52,52 @@ const api = {
     close: () => invoke<void>(IPC.windowClose),
     isMaximized: () => invoke<boolean>(IPC.windowIsMaximized),
     fullscreen: () => invoke<boolean>(IPC.windowFullscreen)
+  },
+
+  /**
+   * Shell integration: taskbar thumbnail buttons and the tray menu.
+   *
+   * `onTrayCommand` receives transport requests from either surface. The
+   * renderer owns playback state, so both the tray menu and the thumbar route
+   * their clicks here rather than acting on the audio directly.
+   */
+  shell: {
+    /** Push playback state so the taskbar buttons stay accurate. */
+    setTaskbarState: (state: { hasTrack: boolean; playing: boolean }) =>
+      invoke<void>(IPC.taskbarState, state),
+    /** Subscribe to tray/thumbar transport commands; returns an unsubscribe. */
+    onTransportCommand: (
+      handler: (command: 'toggle' | 'previous' | 'next') => void
+    ) => {
+      const listener = (_event: unknown, command: 'toggle' | 'previous' | 'next'): void =>
+        handler(command)
+      ipcRenderer.on(IPC.trayCommand, listener)
+      return () => ipcRenderer.removeListener(IPC.trayCommand, listener)
+    },
+    /**
+     * Resolve a dropped `File` to its absolute path.
+     *
+     * Since Electron 32 a sandboxed renderer cannot read `File.path`; the
+     * supported route is `webUtils.getPathForFile`, which only works in the
+     * preload. Exposing just this narrow function keeps the renderer from
+     * gaining any other filesystem reach.
+     */
+    pathForFile: (file: File) => {
+      try {
+        return webUtils.getPathForFile(file)
+      } catch {
+        return ''
+      }
+    },
+    /**
+     * Hand dropped file paths to the main process, which classifies each one
+     * (audio / lyric / source script) and routes it.
+     */
+    importDroppedFiles: (paths: string[]) =>
+      invoke<{ audio: number; lyric: number; source: number; skipped: number }>(
+        IPC.filesDropped,
+        paths
+      )
   },
 
   settings: {

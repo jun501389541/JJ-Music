@@ -594,6 +594,41 @@ export const usePlayerStore = defineStore('player', () => {
     urlCache.clear()
   }
 
+  /**
+   * Output device handling.
+   *
+   * `setSinkId` takes effect on the element immediately, but some platforms
+   * only actually re-route on the next load — so a track that is currently
+   * playing is reloaded from its current position to make the switch audible
+   * rather than silently deferred.
+   */
+  const outputDeviceId = ref('')
+  const outputDevices = ref<Array<{ deviceId: string; label: string }>>([])
+
+  async function refreshOutputDevices(): Promise<void> {
+    const instance = ensureEngine()
+    outputDevices.value = await instance.listOutputDevices()
+  }
+
+  async function setOutputDevice(deviceId: string): Promise<boolean> {
+    const instance = ensureEngine()
+    const wasPlaying = playing.value
+    const position = currentTime.value
+    const ok = await instance.setOutputDevice(deviceId)
+    if (!ok) return false
+    outputDeviceId.value = deviceId
+    // Re-load so the new sink is actually used, then restore position/state.
+    if (wasPlaying && currentTrack.value) {
+      try {
+        await playTrackAt(currentIndex.value, { retryUrl: false })
+        if (position > 0) seek(position)
+      } catch {
+        /* leave playback stopped rather than failing the device switch */
+      }
+    }
+    return true
+  }
+
   function setEqualizer(gains: number[], preset?: string): void {
     if (preset) equalizerPreset.value = preset
     const normalized = Array.from({length: 10}, (_, index) => Number.isFinite(gains[index]) ? Math.max(-12, Math.min(12, gains[index])) : 0)
@@ -863,6 +898,8 @@ export const usePlayerStore = defineStore('player', () => {
     quality,
     equalizer,
     equalizerPreset,
+    outputDeviceId,
+    outputDevices,
     // getters
     currentTrack,
     activeLyricIndex,
@@ -885,6 +922,8 @@ export const usePlayerStore = defineStore('player', () => {
     setRate,
     setQuality,
     setEqualizer,
+    refreshOutputDevices,
+    setOutputDevice,
     applyEqualizerPreset,
     addToQueue,
     removeFromQueue,

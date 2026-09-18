@@ -22,6 +22,7 @@ import {
   type AudioEngineCapabilities,
   type AudioEngineEventName,
   type AudioEngineEvents,
+  type AudioOutputDevice,
   type LoadOptions
 } from '@shared/audio-engine'
 
@@ -60,6 +61,8 @@ export class WebAudioEngine implements AudioEngine {
   private muted = false
   private equalizerGains = new Array(EQUALIZER_BANDS.length).fill(0)
   private destroyed = false
+  /** Selected output device; `''` means the system default. */
+  private outputDeviceId = ''
   /** Guards against an `ended` event firing when we deliberately stop. */
   private suppressEnded = false
   private loadGeneration = 0
@@ -338,6 +341,56 @@ export class WebAudioEngine implements AudioEngine {
     // we allocate is always a plain ArrayBuffer, so the cast is sound.
     this.analyser.getByteFrequencyData(this.spectrum as Uint8Array<ArrayBuffer>)
     return this.spectrum
+  }
+
+  /* ------------------------------------------------------------ *
+   * Output device selection
+   *
+   * Implemented with `HTMLMediaElement.setSinkId`, which Chromium exposes but
+   * only after the `speaker-selection` permission is granted. Everything here
+   * degrades to "system default" when the API or the permission is missing, so
+   * the feature is additive rather than a hard requirement.
+   * ------------------------------------------------------------ */
+
+  async listOutputDevices(): Promise<AudioOutputDevice[]> {
+    const list: AudioOutputDevice[] = [{ deviceId: '', label: '系统默认输出' }]
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      for (const device of devices) {
+        if (device.kind !== 'audiooutput') continue
+        // Before permission is granted, labels are empty and deviceIds are
+        // blanked; skip those rather than offering unselectable rows.
+        if (!device.deviceId || device.deviceId === 'default') continue
+        list.push({
+          deviceId: device.deviceId,
+          label: device.label || `输出设备 ${list.length}`
+        })
+      }
+    } catch {
+      /* enumeration unavailable: default only */
+    }
+    return list
+  }
+
+  async setOutputDevice(deviceId: string): Promise<boolean> {
+    const element = this.element as HTMLAudioElement & {
+      setSinkId?: (id: string) => Promise<void>
+      sinkId?: string
+    }
+    if (typeof element.setSinkId !== 'function') return false
+    try {
+      await element.setSinkId(deviceId)
+      this.outputDeviceId = deviceId
+      return true
+    } catch {
+      // Most commonly a denied `speaker-selection` permission, or a device that
+      // disappeared between listing and selection.
+      return false
+    }
+  }
+
+  getOutputDevice(): string {
+    return this.outputDeviceId
   }
 
   /* ------------------------------------------------------------ *

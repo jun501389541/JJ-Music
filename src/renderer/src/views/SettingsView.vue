@@ -25,6 +25,35 @@ function navigate(to: string): void { search.value = ''; void router.push(to.sta
 function onSelect(item: SettingItem, event: Event): void { const value = (event.target as HTMLSelectElement).value; change(item, item.options?.find(option => String(option.value) === value)?.value ?? value) }
 async function reset(): Promise<void> { if (await ui.confirm('恢复外观与播放设置', '音乐库、歌单和音源会保留。')) { await update({ ...UI_DEFAULTS, theme: 'dark', accent: 'auto', playMode: 'list', volume: 0.8 }); toast.success('已恢复默认外观与播放设置') } }
 watch(section, value => { if (value === 'audio/equalizer') { ui.nowPlaying = true; ui.playbackPanel = 'eq'; void router.replace('/settings/audio') } }, { immediate: true })
+
+/* ---------------------------------------------------------------- *
+ * Audio output device
+ * ---------------------------------------------------------------- */
+const outputSupported = ref(true)
+
+/** Load the device list when the section opens, and reflect stored choice. */
+watch(section, async (value) => {
+  if (value !== 'audio/output') return
+  await player.refreshOutputDevices()
+  // A single "系统默认输出" entry means enumeration is unavailable in this
+  // environment; say so rather than showing a dropdown that cannot change.
+  outputSupported.value = player.outputDevices.length > 1
+  // Re-apply the saved device so a fresh launch honours the preference.
+  if (library.settings.outputDeviceId && outputSupported.value) {
+    await player.setOutputDevice(library.settings.outputDeviceId)
+  }
+}, { immediate: true })
+
+async function chooseOutputDevice(deviceId: string): Promise<void> {
+  const ok = await player.setOutputDevice(deviceId)
+  if (!ok) {
+    toast.error('无法切换到该输出设备，已保留原设备')
+    return
+  }
+  await update({ outputDeviceId: deviceId })
+  const label = player.outputDevices.find(d => d.deviceId === deviceId)?.label ?? deviceId
+  toast.success(`已切换到「${label || '系统默认输出'}」`)
+}
 </script>
 <template><div class="view settings-page">
   <div class="settings-topline"><nav class="breadcrumbs" aria-label="设置层级"><button @click="navigate('')">设置</button><template v-for="crumb in crumbs" :key="crumb.key"><AppIcon name="next" :size="12"/><button @click="navigate(crumb.key)">{{ crumb.title }}</button></template></nav><label class="settings-search"><AppIcon name="search" :size="15"/><input v-model="search" placeholder="查找设置" aria-label="查找设置"/></label></div>
@@ -46,6 +75,40 @@ watch(section, value => { if (value === 'audio/equalizer') { ui.nowPlaying = tru
   <div v-if="section === 'appearance/lyrics'" class="lyric-preview" :style="{ fontSize: library.settings.lyricFontSize + 'px', textAlign: library.settings.lyricAlign }"><span>让每一个音符</span><strong>都在此刻，与你相遇</strong><small v-if="library.settings.lyricTranslation">Let the music stay with you.</small></div>
   <div v-if="section === 'playback'" class="setting-row"><span class="setting-label"><strong>睡眠定时</strong><small>{{ player.sleepAt ? `将在 ${new Date(player.sleepAt).toLocaleTimeString()} 停止播放` : '在指定时间后停止播放' }}</small></span><select class="input" aria-label="睡眠定时" @change="player.setSleepMinutes(Number(($event.target as HTMLSelectElement).value))"><option value="0">关闭</option><option v-for="minutes in [15,30,45,60,90]" :key="minutes" :value="minutes">{{ minutes }} 分钟</option></select></div>
   <div v-if="section === 'data'" class="data-actions"><button class="btn" @click="jj.library.reveal('@data')">打开数据目录</button><button class="btn" @click="reset">恢复外观与播放设置</button></div>
+  <!--
+    Output device picker.
+
+    Rendered as a dedicated section (like the download-folder row above)
+    because the device list is dynamic: it comes from the renderer's audio
+    engine, not from `AppSettings`, so it cannot be expressed as a static
+    `select` item.
+  -->
+  <div v-if="section === 'audio/output' && !search" class="settings-items">
+    <div class="setting-row">
+      <span class="setting-label">
+        <strong>输出设备</strong>
+        <small>
+          切换后当前播放会从原位置继续。
+          <template v-if="!outputSupported">当前环境不支持选择输出设备，只能使用系统默认输出。</template>
+        </small>
+      </span>
+      <select
+        class="input"
+        aria-label="输出设备"
+        :value="player.outputDeviceId"
+        :disabled="!outputSupported"
+        @change="chooseOutputDevice(($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="device in player.outputDevices" :key="device.deviceId" :value="device.deviceId">
+          {{ device.label }}
+        </option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <span class="setting-label"><strong>刷新设备列表</strong><small>插入或拔出耳机后，重新读取可用输出</small></span>
+      <button class="btn" @click="player.refreshOutputDevices()">刷新</button>
+    </div>
+  </div>
   <div v-if="section === 'about'" class="about-mark"><span>J</span><div><strong>JJ Music</strong><p>本地收藏，在线发现。</p></div></div>
   <p v-if="section === 'appearance'" class="settings-footnote">云母和亚克力效果取决于 Windows 版本与系统透明效果设置。</p>
 </div></template>

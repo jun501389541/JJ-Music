@@ -47,15 +47,17 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
   'appearance/render': { title: '渲染', icon: 'genre', items: [range('显示缩放', 'displayScale', 85, 125, 5, '%'), toggle('减少动态效果', 'reduceMotion'), { label: '渲染引擎', description: 'Chromium · 硬件加速由系统与显卡驱动协商', kind: 'info' }] },
   audio: { title: '音频引擎', icon: 'audio', description: '音频流与输出', items: [
     { label: '当前音频引擎', kind: 'info', description: 'Web Audio · 系统共享输出' },
+    link('输出设备', 'audio/output', 'audio', '选择播放使用的音频输出设备'),
     link('在播放界面打开均衡器', 'audio/equalizer', 'audio', 'EQ 与预设已移至播放页面'),
     link('格式支持', 'audio/formats', 'music', '查看可播放的音频格式'),
     { label: '独占输出与完美采样率', kind: 'info', description: '当前 Web Audio 引擎不支持 WASAPI 独占、DSD 直通及无间隙播放。' }
   ] },
+  'audio/output': { title: '输出设备', icon: 'audio', description: '选择音频输出', items: [] },
   'audio/equalizer': { title: '音效', icon: 'audio', description: '10 段均衡器', items: [] },
   'audio/formats': { title: '格式支持', icon: 'music', items: [
     { label: 'FLAC · MP3 · WAV', kind: 'info', description: '支持播放与音频分析' }, { label: 'AAC · M4A · OGG · OPUS · WEBM', kind: 'info', description: '由 Chromium 解码，具体支持取决于封装与编码' }, { label: 'APE · DSF · DFF · WMA · AIFF', kind: 'info', description: '可读取本地标签；当前播放引擎不支持解码' }, { label: '标签写入', kind: 'info', description: 'MP3、FLAC；写入前预览差异并备份文件' }
   ] },
-  playback: { title: '播放', icon: 'play', items: [select('播放模式', 'playMode', [['顺序播放', 'list'], ['列表循环', 'repeat'], ['单曲循环', 'single'], ['随机播放', 'random']]), select('播放速度', 'playbackRate', [['0.5 ×', .5], ['0.75 ×', .75], ['1 ×', 1], ['1.25 ×', 1.25], ['1.5 ×', 1.5], ['2 ×', 2]])] },
+  playback: { title: '播放', icon: 'play', items: [select('播放模式', 'playMode', [['顺序播放', 'list'], ['列表循环', 'repeat'], ['单曲循环', 'single'], ['随机播放', 'random']]), select('播放速度', 'playbackRate', [['0.5 ×', .5], ['0.75 ×', .75], ['1 ×', 1], ['1.25 ×', 1.25], ['1.5 ×', 1.5], ['2 ×', 2]]), toggle('关闭窗口时最小化到托盘', 'minimizeToTray', '关闭主窗口后继续播放，可从托盘图标恢复窗口或退出')] },
   online: { title: '在线音乐', icon: 'cloud', description: '兼容 LX Music 自定义音源协议', items: [link('音源管理', '/sources', 'cloud', '导入、启用与诊断音源脚本'), select('在线音质', 'playQuality', [['标准 · 128K', '128k'], ['高品质 · 320K', '320k'], ['无损 · FLAC', 'flac'], ['高解析 · FLAC 24bit', 'flac24bit']]), toggle('优先播放本地文件', 'preferLocal', '同名、同艺术家且时长接近时，优先使用曲库中的文件'), { label: '自动降级与备用平台', kind: 'info', description: '优先请求选定音质，失败后降级；跨平台只匹配同一录音版本。' }] },
   shortcuts: { title: '键盘快捷键', icon: 'keyboard', items: [
     { label: '播放 / 暂停', description: 'Space', kind: 'info' }, { label: '上一首 / 下一首', description: 'Ctrl + ← / →', kind: 'info' }, { label: '后退 / 前进 5 秒', description: '← / →', kind: 'info' }, { label: '音量', description: 'Ctrl + ↑ / ↓', kind: 'info' }, { label: '全局搜索', description: 'Ctrl + F', kind: 'info' }, { label: '全屏', description: 'F11', kind: 'info' }, { label: '静音 / 收起播放界面', description: 'M / Esc', kind: 'info' }, { label: '歌曲列表多选', description: 'Ctrl + 单击 / Shift + 单击 / Ctrl + A', kind: 'info' }, { label: '快捷键生效范围', description: '应用窗口获得焦点时生效；输入框内保留正常输入行为。', kind: 'info' }

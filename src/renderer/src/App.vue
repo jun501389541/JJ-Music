@@ -8,11 +8,12 @@
  * route change so the player bar never unmounts and audio is never interrupted.
  */
 import { toMediaUrl } from '@shared/media-url'
-import { computed, onMounted, onUnmounted, toRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContextMenu from './components/ContextMenu.vue'
 import DialogHost from './components/DialogHost.vue'
 import { useUiStore } from './stores/ui'
+import { useToastStore } from './stores/toast'
 import TitleBar from './components/TitleBar.vue'
 import SideBar from './components/SideBar.vue'
 import PlayerBar from './components/PlayerBar.vue'
@@ -26,6 +27,7 @@ const library = useLibraryStore()
 const player = usePlayerStore()
 const route = useRoute()
 const router = useRouter()
+const toast = useToastStore()
 
 const ui = useUiStore()
 const nowPlayingOpen = toRef(ui, 'nowPlaying')
@@ -101,7 +103,71 @@ watch(() => [library.settings.reduceMotion, library.settings.fontFamily, library
 const systemTheme = window.matchMedia('(prefers-color-scheme: light)')
 const onSystemTheme = () => { if (library.settings.theme === 'system') applyTheme('system') }
 systemTheme.addEventListener('change', onSystemTheme)
-onUnmounted(() => systemTheme.removeEventListener('change', onSystemTheme))
+
+/** Tray menu and taskbar buttons drive the same transport actions. */
+let offTransportCommand: (() => void) | undefined
+
+/* ---------------------------------------------------------------- *
+ * Drag and drop import
+ *
+ * The depth counter (rather than a boolean) is load-bearing: `dragleave` fires
+ * every time the pointer crosses into a child element, so a boolean flag
+ * flickers and the overlay strobes as the user moves across the window.
+ * Counting enters and leaves keeps it stable until the pointer really leaves.
+ * ---------------------------------------------------------------- */
+const dragActive = ref(false)
+let dragDepth = 0
+
+function onDragEnter(): void {
+  dragDepth += 1
+  dragActive.value = true
+}
+
+function onDragOver(event: DragEvent): void {
+  // Required for the drop to fire at all; also shows the "copy" cursor.
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave(): void {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragActive.value = false
+}
+
+async function onDrop(event: DragEvent): Promise<void> {
+  dragDepth = 0
+  dragActive.value = false
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (files.length === 0) return
+
+  const paths = files.map((file) => window.jj.shell?.pathForFile(file) ?? '').filter(Boolean)
+  if (paths.length === 0) {
+    toast.error('无法读取拖入的文件路径')
+    return
+  }
+
+  try {
+    const result = await window.jj.shell.importDroppedFiles(paths)
+    const parts: string[] = []
+    if (result.audio > 0) parts.push(`${result.audio} 首音频`)
+    if (result.lyric > 0) parts.push(`${result.lyric} 个歌词`)
+    if (result.source > 0) parts.push(`${result.source} 个音源`)
+    if (parts.length === 0) {
+      toast.error('没有可导入的文件（支持音频、.lrc 歌词、音源脚本）')
+      return
+    }
+    toast.success(`已导入 ${parts.join('、')}`)
+    if (result.audio > 0) await library.refreshLibrary()
+    if (result.source > 0) await library.refreshSources()
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '导入失败')
+  }
+}
+
+onUnmounted(() => {
+  systemTheme.removeEventListener('change', onSystemTheme)
+  offTransportCommand?.()
+})
+
 
 // Keep the document title in step with playback, which is what the OS taskbar
 // and window switcher display.
@@ -110,6 +176,24 @@ watch(
   ([name, playing]) => {
     document.title = name ? `${playing ? '▶ ' : ''}${name} — JJ Music` : 'JJ Music'
   }
+)
+
+/**
+ * Taskbar thumbnail buttons.
+ *
+ * Windows caches the button set it is given, so the buttons only stay accurate
+ * if they are rebuilt on every playback transition — a `play` glyph left over
+ * from a paused state is what made them look frozen when the window was in the
+ * background. Pushing on state change (not just at startup) is the fix, and it
+ * keeps working while the window is hidden in the tray, which is exactly when
+ * these buttons matter most.
+ */
+watch(
+  () => [Boolean(player.currentTrack), player.playing] as const,
+  ([hasTrack, playing]) => {
+    void window.jj.shell?.setTaskbarState({ hasTrack, playing }).catch(() => undefined)
+  },
+  { immediate: true }
 )
 
 onMounted(async () => {
@@ -122,6 +206,12 @@ onMounted(async () => {
   player.setVolume(library.settings.volume)
   player.setPlayMode(library.settings.playMode)
   player.setQuality(library.settings.playQuality)
+
+  offTransportCommand = window.jj.shell?.onTransportCommand((command) => {
+    if (command === 'toggle') void player.toggle()
+    else if (command === 'previous') void player.previous()
+    else if (command === 'next') void player.next()
+  })
 
   // A track opened from the OS should start playing without extra clicks.
   const openId = route.query['play']
@@ -211,7 +301,16 @@ const contentKey = computed(() => route.fullPath)
 </script>
 
 <template>
-  <div class="shell" @keydown="onKeydown" tabindex="-1">
+  <div
+    class="shell"
+    :class="{ 'is-dragging': dragActive }"
+    tabindex="-1"
+    @keydown="onKeydown"
+    @dragenter.prevent="onDragEnter"
+    @dragover.prevent="onDragOver"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
+  >
     <TitleBar
       :show-back="route.name !== 'discover' && route.name !== undefined"
       @toggle-now-playing="nowPlayingOpen = !nowPlayingOpen"
@@ -235,6 +334,14 @@ const contentKey = computed(() => route.fullPath)
       <NowPlayingView v-if="nowPlayingOpen" @close="nowPlayingOpen = false" />
     </Transition>
 
+    <!-- Drop overlay: covers the window so the drop target is unambiguous. -->
+    <div v-if="dragActive" class="drop-zone">
+      <div class="drop-zone__card">
+        <strong>松开以导入</strong>
+        <span>音频文件加入曲库 · .lrc 匹配同名声轨 · 音源脚本导入后需手动启用</span>
+      </div>
+    </div>
+
     <ContextMenu />
     <DialogHost />
     <ToastHost />
@@ -247,6 +354,44 @@ const contentKey = computed(() => route.fullPath)
   flex-direction: column;
   height: 100%;
   outline: none;
+}
+
+/* Drop overlay. `pointer-events: none` matters: the overlay must not become
+   the drop target itself, or `dragleave` fires the moment the pointer enters
+   it and the zone cancels its own highlight. */
+.drop-zone {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: rgba(20, 22, 30, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.drop-zone__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 34px 52px;
+  border: 2px dashed var(--accent);
+  border-radius: 18px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.drop-zone__card strong {
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.drop-zone__card span {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  line-height: 1.7;
 }
 
 .shell__body {

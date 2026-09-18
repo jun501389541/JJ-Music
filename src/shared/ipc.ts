@@ -20,6 +20,12 @@ export const IPC = {
   windowFullscreen: 'window:fullscreen',
   libraryImportFiles: 'library:import-files',
   fileReveal: 'file:reveal',
+  /** Main → renderer: a tray menu item asked for a transport action. */
+  trayCommand: 'tray:command',
+  /** Renderer → main: keep the taskbar thumbnail buttons in sync. */
+  taskbarState: 'taskbar:state',
+  /** Renderer → main: files were dropped onto the window. */
+  filesDropped: 'files:dropped',
 
   // Settings
   settingsGet: 'settings:get',

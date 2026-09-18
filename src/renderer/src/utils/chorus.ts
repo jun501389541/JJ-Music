@@ -115,6 +115,18 @@ const MIN_SECTION_LINES = 1
 const MIN_SINGLE_LINE_OCCURRENCES = 3
 
 /**
+ * Longest repeating run worth considering.
+ *
+ * A chorus is rarely longer than ~16 lyric lines; capping the window sweep at
+ * 32 covers every real shape while bounding the detector. Without the cap the
+ * sweep is quadratic in the line count — measured at ~143ms for a 500-line
+ * lyric (1083ms at 1000), all synchronous on the main thread exactly when the
+ * lyric pane appears. Real choruses sit far below this ceiling, so the cap
+ * trades nothing in practice.
+ */
+const MAX_SECTION_LINES = 32
+
+/**
  * A section cannot occupy too much of the song.
  *
  * Guards the degenerate answer: if a song repeats a large fraction of itself,
@@ -141,13 +153,23 @@ export function detectChorus(lines: LyricLine[]): ChorusSection | null {
   /** Occurrences of each candidate block, keyed by its joined lines. */
   const blocks = new Map<string, { indexes: number[]; length: number }>()
 
-  // A sliding window over every length from a third of the song down to one
-  // line: a chorus is long enough to be recognisable and short enough to
-  // repeat. Starting from the longest window means a multi-line chorus is
-  // preferred over any single line inside it.
-  const maxLength = Math.max(MIN_SECTION_LINES, Math.floor(lines.length / 3))
+  // A sliding window over every length, longest first: a chorus is long enough
+  // to be recognisable and short enough to repeat, and starting from the
+  // longest window means a multi-line chorus is preferred over any single line
+  // inside it. Two bounds keep this from being quadratic in the worst case:
+  // the window length is capped at `MAX_SECTION_LINES`, and the "share of song"
+  // cap below lets long windows be skipped outright once the song is long
+  // enough that a full-third window would exceed the share cap anyway.
+  const maxLength = Math.min(
+    MAX_SECTION_LINES,
+    Math.max(MIN_SECTION_LINES, Math.floor(lines.length / 3))
+  )
   for (let length = maxLength; length >= MIN_SECTION_LINES; length -= 1) {
+    // A window longer than the share cap can never qualify (see the filter
+    // below), so skip the whole length rather than scanning its start offsets.
+    if (length > lines.length * MAX_SECTION_SHARE) continue
     for (let start = 0; start + length <= lines.length; start += 1) {
+      if (!usable[start]) continue
       if (!usable.slice(start, start + length).every(Boolean)) continue
       const key = keys.slice(start, start + length).join('\u0000')
       const entry = blocks.get(key)

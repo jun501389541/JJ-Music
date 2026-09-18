@@ -414,7 +414,10 @@ export const usePlayerStore = defineStore('player', () => {
     currentTime.value = 0
   }
 
-  async function playTrackAt(index: number, options: { autoplay?: boolean; retryUrl?: boolean } = {}): Promise<void> {
+  async function playTrackAt(
+    index: number,
+    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number } = {}
+  ): Promise<void> {
     if (index < 0 || index >= queue.value.length) return
     const generation = ++playGeneration
     lyricGeneration += 1
@@ -442,10 +445,25 @@ export const usePlayerStore = defineStore('player', () => {
       if (isStale()) return
 
       const instance = ensureEngine()
+      /*
+       * Seed the store's clock before `load()`: the progress loop only runs
+       * while playing, so with `autoplay: false` nothing would ever publish the
+       * restored position and the UI would read 0:00 even though the engine
+       * sits at the right spot.
+       */
+      if (options.startAt && options.startAt > 0) currentTime.value = options.startAt
       await instance.load({
         url: source.url,
         isLocal: isLocalTrack(track),
-        title: track.name
+        title: track.name,
+        /*
+         * Hand the resume position to the engine rather than calling `seek()`
+         * after `playTrackAt` returns: with `autoplay: false` the metadata may
+         * not be loaded yet, `duration` is still 0, and `seek()` clamps to
+         * `min(position, duration)` — the restore point silently became 0.
+         * `startAt` is applied by the engine itself once metadata arrives.
+         */
+        startAt: options.startAt
       })
       if (isStale()) return
 
@@ -771,13 +789,16 @@ export const usePlayerStore = defineStore('player', () => {
     currentIndex.value = index
 
     try {
-      // `autoplay: false` loads and seeks without producing sound.
-      await playTrackAt(index, { autoplay: false })
-      if (session.position > 0) seek(session.position)
+      // `autoplay: false` loads without producing sound; `startAt` positions
+      // the track once metadata is available (see the comment inside
+      // `playTrackAt` for why this must not be a post-return `seek()`).
+      await playTrackAt(index, { autoplay: false, startAt: session.position })
       return true
-    } catch {
+    } catch (error) {
       // A local file may have been moved or a source may be disabled; a failed
-      // resume is not worth an error, the app is simply empty.
+      // resume is not worth interrupting the user, but the reason should be
+      // findable when diagnosing.
+      console.warn('[player] 恢复上次播放失败:', error instanceof Error ? error.message : error)
       return false
     }
   }

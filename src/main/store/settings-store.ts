@@ -29,7 +29,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   downloadTranslation: true,
   downloadRomanization: true,
   downloadEmbedCover: true,
-  desktopLyric: false,
   minimizeToTray: false,
   outputDeviceId: ''
 }

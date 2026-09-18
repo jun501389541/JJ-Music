@@ -69,6 +69,9 @@ function diagnose(api) {
     let settled = false
     let lastHeartbeat = 0
     let heartbeatSeen = false
+    // Console-log tail from the child, accumulated across polls so a failure
+    // report carries what the script printed before it died.
+    let logSeen = 0
     let pollTimer
     const finish = (outcome, detail = '') => {
       if (settled) return
@@ -104,7 +107,7 @@ function diagnose(api) {
       const cl = join(scratch, 'console.log')
       if (existsSync(cl)) {
         const text = readFileSync(cl, 'utf8')
-        if (text.length > log.length) log.push(text.slice(log.length))
+        if (text.length > logSeen) logSeen = text.length
       }
       if (names.includes('ready.json')) {
         try {

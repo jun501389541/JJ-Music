@@ -343,8 +343,6 @@ export interface AppSettings extends UiPreferences {
   downloadTranslation: boolean
   downloadRomanization: boolean
   downloadEmbedCover: boolean
-  /** Show the desktop lyric window. */
-  desktopLyric: boolean
   /**
    * Keep playing when the window is closed.
    *

@@ -118,7 +118,10 @@ try {
  check('UI version matches release manifest',await evaluate('document.querySelector(".brand small").textContent')===JSON.parse(readFileSync(join(repoRoot,'package.json'),'utf8')).version)
  const screenshot = async name => { await sleep(350); const shot = await send('Page.captureScreenshot', {format:'png'}); writeFileSync(join(screenshotDir, name + '.png'), Buffer.from(shot.data, 'base64')) }
  const route = async path => { await evaluate(`location.hash = ${JSON.stringify('#' + path)}`); await sleep(550) }
- const click = async (selector,text) => evaluate(`(() => { const e=[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>e.textContent.includes(${JSON.stringify(text)})); if(!e) throw Error('Missing ${text}'); e.click(); return true })()`)
+ // Icon-only buttons carry their label in aria-label/title and have no text node,
+ // so matching on textContent alone silently stops finding them. All three are
+ // searched; existing call sites are unaffected.
+ const click = async (selector,text) => evaluate(`(() => { const e=[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>((e.textContent||'')+' '+(e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')).includes(${JSON.stringify(text)})); if(!e) throw Error('Missing ${text}'); e.click(); return true })()`)
  check('default landing remains discovery', await evaluate('document.querySelector("h1").textContent === "发现音乐"'))
  await evaluate(`uiTestLibrary.updateSettings({theme:'dark'})`)
  await route('/library')
@@ -170,14 +173,14 @@ try {
  check('search query updates on same-route navigation',await evaluate('document.querySelector(".searchbar input").value === "陈奕迅" && document.querySelector(".track-row")?.innerText.includes("陈奕迅")'))
  await evaluate('uiTestUi.nowPlaying = true')
  await sleep(400)
- await click('.np__tools button', 'EQ 均衡器')
+ await click('.np__bar-side button', 'EQ 均衡器')
  check('EQ opens inside playback screen', await evaluate('!!document.querySelector(".np .equalizer-content")'))
  await click('.eq-presets button', '摇滚')
  await sleep(500)
  check('EQ changes apply and persist', await evaluate('(async () => uiTestPlayer.equalizerPreset === "摇滚" && (await window.jj.settings.get()).equalizerName === "摇滚")()'))
  await screenshot('11-playback-equalizer')
  await click('.np-panel button[aria-label="关闭播放面板"]', '')
- await click('.np__tools button', '播放列表')
+ await click('.np__bar-side button', '播放列表')
  check('playback list opens within player', await evaluate('!!document.querySelector(".np-panel .tracklist") && document.querySelectorAll(".np-panel .track-row").length === 3'))
  await evaluate(`document.querySelectorAll('.np-panel .track-row')[1].dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`)
  await sleep(800)

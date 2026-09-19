@@ -87,7 +87,6 @@ await build({
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'web-audio-engine.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'settings-writer.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'local-search.ts'),
-    join(repoRoot, 'src', 'renderer', 'src', 'utils', 'chorus.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'library.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'player.ts')
   ],

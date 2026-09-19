@@ -18,7 +18,6 @@ import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import { formatAudioSpec, formatTime } from '../utils/format'
-import { chorusFromStoreLines } from '../utils/chorus'
 import SliderBar from '../components/SliderBar.vue'
 import SpectrumVisualizer from '../components/SpectrumVisualizer.vue'
 import TransportIcon from '../components/TransportIcon.vue'
@@ -184,37 +183,6 @@ const spec = computed(() => {
 })
 
 const lines = computed(() => player.lyrics?.lines ?? [])
-
-/**
- * The song's chorus, inferred from repeated lyric blocks.
- *
- * Derived from lyrics rather than analysed from audio: the repeat *is* the
- * definition of a chorus, and the timestamps already exist. Recomputed only
- * when the lyric set changes, because the detector is quadratic in line count.
- *
- * `null` is the normal answer for a through-composed song — the UI hides the
- * affordance rather than offering a jump to nowhere.
- */
-const chorus = computed(() => chorusFromStoreLines(lines.value))
-
-/** The chorus's position and width as percentages of the track, for the marker. */
-const chorusBand = computed(() => {
-  const section = chorus.value
-  const total = player.duration
-  if (!section || !Number.isFinite(total) || total <= 0) return null
-  const left = Math.max(0, Math.min(100, (section.start / total) * 100))
-  const right = Math.max(0, Math.min(100, (section.end / total) * 100))
-  // A band narrower than a couple of percent is not a usable click target.
-  if (right - left < 1.5) return null
-  return { left, width: right - left }
-})
-
-/** Jump to the first chorus. */
-function jumpToChorus(): void {
-  const section = chorus.value
-  if (!section) return
-  player.seek(section.start)
-}
 
 /**
  * Centre the active lyric line.
@@ -618,24 +586,7 @@ function playArtworkFlight(): void {
           <span class="tnum">{{ formatTime(player.duration) }}</span>
         </div>
 
-        <!--
-          The chorus band sits behind the scrubber and is clickable on its own.
-          It is a *hint*, not a control that changes what the slider does: the
-          slider still scrubs anywhere, and the band just makes the section
-          visible and gives it a larger hit area.
-        -->
         <div class="np__scrub">
-          <div
-            v-if="chorusBand"
-            class="np__chorus-band"
-            role="button"
-            tabindex="0"
-            :title="`跳到副歌（重复 ${chorus?.occurrences} 次）`"
-            :aria-label="`跳到副歌：${chorus?.preview ?? ''}`"
-            :style="{ left: `${chorusBand.left}%`, width: `${chorusBand.width}%` }"
-            @click.stop="jumpToChorus"
-            @keydown.enter.prevent="jumpToChorus"
-          />
           <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
         </div>
 
@@ -979,34 +930,11 @@ function playArtworkFlight(): void {
   color: var(--text-tertiary);
 }
 
-/*
- * Scrubber wrapper. `position: relative` is what lets the chorus band be placed
- * by percentage behind the slider; the band is drawn first so it never covers
- * the thumb's hit area.
- */
+/* Scrubber wrapper; kept as a block so the slider can be sized independently. */
 .np__scrub {
   position: relative;
   display: flex;
   align-items: center;
-}
-
-.np__chorus-band {
-  position: absolute;
-  top: 50%;
-  height: 10px;
-  transform: translateY(-50%);
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--accent) 38%, transparent);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out);
-  /* The slider owns the vertical band; the marker only widens its own area. */
-  z-index: 0;
-}
-
-.np__chorus-band:hover,
-.np__chorus-band:focus-visible {
-  background: color-mix(in srgb, var(--accent) 62%, transparent);
-  outline: none;
 }
 
 /* The speaker icon anchors the popover; the button itself is unchanged. */

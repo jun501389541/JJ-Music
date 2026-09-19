@@ -540,6 +540,22 @@ try {
         check('FLAC tags are writable', /将写入/.test(dryRun.note), dryRun.note)
         check('dry run does not write', dryRun.written === false)
       }
+
+      // The dry run above only proves the allow-list lets a file in. Tag writing
+      // is the single channel that mutates the user's originals, so also prove it
+      // still refuses a path no index entry ever held: an existing system file,
+      // named by a renderer-forged track object.
+      const outside = (process.env.COMSPEC ?? 'C:/Windows/system.ini').replace(/\\/g, '/')
+      const forged = await evaluate(
+        cdp,
+        `(async () => {
+           const candidate = { id: 'e2e-forged', path: ${JSON.stringify(outside)}, name: 'x', singer: 'x' }
+           try { await window.jj.match.apply(candidate, { album: '不应写入' }, { dryRun: true }); return { accepted: true } }
+           catch (error) { return { accepted: false, message: String(error?.message ?? error) } }
+         })()`
+      )
+      check('a path the index never held is refused', forged.accepted === false, forged.message ?? '')
+      console.log(`  索引外路径: ${outside} -> ${forged.accepted ? '竟然被接受' : forged.message}`)
     }
   }
 

@@ -470,7 +470,14 @@ function mediaAccess(extra: string[] = [], substitute?: string): MediaAccess {
 /** Check a renderer-supplied path and return its canonical form for the caller to use. */
 function allowedMediaPath(path: string, extra: string[] = []): Promise<string> {
   if (typeof path !== 'string' || !isAbsolute(path)) return Promise.reject(new Error('路径无效'))
-  return resolveAllowedPath(path, mediaAccess(extra))
+  // A path the index itself holds is permitted here, exactly as it is by
+  // `jjmedia://`. Without that, removing a folder from the settings while its
+  // tracks stay indexed produces a song that plays fine but refuses tag or lyric
+  // writes — the two channels would disagree about the same file. A renderer
+  // cannot forge an index entry: only a scan of a user-chosen folder, or a file
+  // chosen in a dialog, puts one there.
+  const { library } = requireServices()
+  return resolveAllowedPath(path, mediaAccess(library.getByPath(path) ? [path, ...extra] : extra))
 }
 
 /**

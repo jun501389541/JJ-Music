@@ -61,7 +61,7 @@
       JJ Music-0.1.3-Portable-x64.zip
       win-unpacked/
 
-项目 .npmrc 为 Electron 和打包工具配置了镜像，缓存放在 .cache。可按网络环境调整镜像。打包脚本会先重新构建源码，并清除测试环境开关。
+npm 缓存放在 `.cache`。Electron 与打包工具的二进制镜像改为通过环境变量配置（`ELECTRON_MIRROR`、`ELECTRON_BUILDER_BINARIES_MIRROR`），不再写入 `.npmrc`，因此默认从 GitHub Releases 获取；下载不通时按上面的变量指定镜像即可。打包脚本会先重新构建源码，并清除测试环境开关。
 
 ## 数据与限制
 

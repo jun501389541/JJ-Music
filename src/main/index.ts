@@ -21,8 +21,9 @@ import type { ImportedPlaylist } from '@shared/types'
 import { dirname, isAbsolute, join, sep } from 'node:path'
 import { existsSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { mediaPath, serveMedia } from './media/media-response'
+import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { ensurePlayableFlac } from './media/flac-repair'
+import { assertPublicHttpUrl } from './online/url-guard'
 import { IPC } from '@shared/ipc'
 import { fail, ok, type AppSettings, type LocalMusicInfo, type OnlineMusicInfo, type PlayableTrack, type Quality, type SourceId } from '@shared/types'
 import { SourceStore } from './sources/source-store'
@@ -429,14 +430,57 @@ function updateTaskbarButtons(state: { hasTrack: boolean; playing: boolean }): v
  * ------------------------------------------------------------------ */
 
 /**
+ * Files the user explicitly chose in a dialog or dropped onto the window.
+ *
+ * They belong in the allow-list because the renderer legitimately needs to play
+ * and annotate something that is not in the library yet. Bounded: the set is
+ * appended to for the whole life of the process and is copied into a fresh array
+ * for every range request Chromium issues while scrubbing.
+ */
+const PICKED_LIMIT = 256
+const userPickedFiles = new Set<string>()
+
+function rememberPicked(paths: string[]): void {
+  for (const path of paths) userPickedFiles.add(path)
+  // A Set iterates in insertion order, so the leading entries are the stalest.
+  // Re-picking a file leaves it in place, which only makes eviction early.
+  while (userPickedFiles.size > PICKED_LIMIT) {
+    const oldest = userPickedFiles.values().next().value
+    if (oldest === undefined) break
+    userPickedFiles.delete(oldest)
+  }
+}
+
+/**
+ * The media scope, shared with `jjmedia://` on purpose.
+ *
+ * The lyric and tag channels read and write files next to the same audio the
+ * protocol already serves, so giving them a looser rule of their own would let
+ * a compromised renderer reach anywhere on disk while the protocol held to the
+ * library. Keeping one definition is what stops the two from drifting.
+ */
+function mediaAccess(extra: string[] = [], substitute?: string): MediaAccess {
+  const { library, dataDir } = requireServices()
+  return {
+    roots: [...library.getFolders(), join(dataDir, 'library', 'covers')],
+    files: [...userPickedFiles, ...extra],
+    ...(substitute ? { substitute } : {})
+  }
+}
+
+/** Check a renderer-supplied path and return its canonical form for the caller to use. */
+function allowedMediaPath(path: string, extra: string[] = []): Promise<string> {
+  if (typeof path !== 'string' || !isAbsolute(path)) return Promise.reject(new Error('路径无效'))
+  return resolveAllowedPath(path, mediaAccess(extra))
+}
+
+/**
  * Serve a local file over `jjmedia://` with range support.
  *
  * Chromium's media stack issues range requests for seeking; honouring them is
  * what makes scrubbing a local FLAC work. The response also carries permissive
  * CORS headers so the renderer's Web Audio graph can analyse the stream.
  */
-const selectedAudioFiles = new Set<string>()
-
 function registerMediaProtocol(): void {
   protocol.handle(MEDIA_SCHEME, async (request) => {
     const { library, dataDir } = requireServices()
@@ -447,7 +491,6 @@ function registerMediaProtocol(): void {
       if (library.getByPath(requested)) indexedFile = [requested]
     } catch { /* serveMedia returns a 400 for malformed URLs */ }
 
-    const roots = [...library.getFolders(), join(dataDir, 'library', 'covers')]
     const repairCache = join(dataDir, 'library', 'flac-repair')
 
     // Repair a FLAC that Chromium cannot decode because its embedded cover has
@@ -460,21 +503,14 @@ function registerMediaProtocol(): void {
       try {
         const result = await ensurePlayableFlac(requested, repairCache)
         if (result.repaired && result.path !== requested) {
-          return serveMedia(request, {
-            roots,
-            files: [...selectedAudioFiles, ...indexedFile, result.path],
-            substitute: result.path
-          })
+          return serveMedia(request, mediaAccess([...indexedFile, result.path], result.path))
         }
       } catch {
         // Repair is best-effort: fall through to the original file.
       }
     }
 
-    return serveMedia(request, {
-      roots,
-      files: [...selectedAudioFiles, ...indexedFile]
-    })
+    return serveMedia(request, mediaAccess(indexedFile))
   })
 }
 
@@ -559,9 +595,10 @@ function registerIpc(): void {
     mainWindow.setFullScreen(!mainWindow.isFullScreen())
     return mainWindow.isFullScreen()
   })
-  handle(IPC.fileReveal, (path: string) => {
+  handle(IPC.fileReveal, async (path: string) => {
     if (path === '@data') return shell.openPath(requireServices().dataDir)
     if (typeof path !== 'string' || !existsSync(path)) throw new Error('文件不存在')
+    await allowedMediaPath(path)
     shell.showItemInFolder(path)
   })
 
@@ -657,7 +694,7 @@ function registerIpc(): void {
     }
 
     if (audioPaths.length > 0) {
-      for (const path of audioPaths) selectedAudioFiles.add(path)
+      rememberPicked(audioPaths)
       result.audio = await library.importFiles(audioPaths)
     }
 
@@ -670,7 +707,7 @@ function registerIpc(): void {
     })
     if (result.canceled) return 0
     const { library } = requireServices()
-    for (const path of result.filePaths) selectedAudioFiles.add(path)
+    rememberPicked(result.filePaths)
     return library.importFiles(result.filePaths)
   })
 
@@ -868,7 +905,17 @@ function registerIpc(): void {
     const request = probePlatform(source, {
       search: async platform => (await searchOnline(platform, '晴天 周杰伦', 1)).list,
       resolve: async track => (await sourceEngine.getMusicUrl(id, track, '128k')).url,
-      fetch: (url, options) => fetch(url, options)
+      // The URL comes from a user-imported script, which this codebase already
+      // treats as capable of hostile behaviour — fetching it unguarded would
+      // hand that script a request issued with the app's own privileges. A
+      // `Request` is refused outright: its method and body would bypass the
+      // URL check entirely.
+      fetch: (input, options) => {
+        if (typeof input === 'string' || input instanceof URL) {
+          return fetch(assertPublicHttpUrl(input), options)
+        }
+        return Promise.reject(new Error('平台探测不接受 Request 形式的地址'))
+      }
     })
     platformProbes.set(id, request)
     try { return await request } finally { if (platformProbes.get(id) === request) platformProbes.delete(id) }
@@ -1055,7 +1102,10 @@ function registerIpc(): void {
   handle(IPC.playlistClear, (id: string) => requireServices().playlists.clear(id))
 
   /* ---------------- lyrics ---------------- */
-  handle(IPC.lyricReadFile, (path: string) => readLyricFile(path))
+  // Allow-listed like the media protocol: this channel took an arbitrary
+  // absolute path and returned its text, so a renderer that had been reached
+  // through remote content could read anything the user could.
+  handle(IPC.lyricReadFile, async (path: string) => readLyricFile(await allowedMediaPath(path)))
 
   // Priority order lives in the service: sidecar → embedded tag → online.
   handle(IPC.lyricResolve, (track: LocalMusicInfo, allowOnline?: boolean) =>
@@ -1083,16 +1133,18 @@ function registerIpc(): void {
    */
   handle(IPC.lyricApplyCandidate, async (audioPath: string, lyric: string) => {
     if (typeof lyric !== 'string' || !lyric.trim()) throw new Error('歌词内容为空')
-    const savedTo = await saveSidecar(audioPath, lyric)
+    const target = await allowedMediaPath(audioPath)
+    const savedTo = await saveSidecar(target, lyric)
     // The cache holds the old lyric for this track; drop it so the next read
     // reflects the choice instead of the previous match.
-    const track = requireServices().library.getByPath(audioPath)
+    const track = requireServices().library.getByPath(target)
     if (track) clearLyricCache(track.id)
     else clearLyricCache()
     return savedTo
   })
 
   handle(IPC.lyricImport, async (audioPath: string) => {
+    const target = await allowedMediaPath(audioPath)
     const result = await dialog.showOpenDialog({
       title: '选择歌词文件',
       filters: [{ name: '歌词文件', extensions: ['lrc', 'txt'] }],
@@ -1100,15 +1152,19 @@ function registerIpc(): void {
     })
     if (result.canceled || !result.filePaths[0]) return null
 
-    const text = await readLyricFile(result.filePaths[0])
+    const picked = result.filePaths[0]
+    // This path never round-trips through the renderer, so it is trusted for
+    // the duration of this call rather than added to the standing list.
+    const text = await readLyricFile(picked)
     // Persist next to the audio file so it becomes the authoritative lyric.
-    const savedTo = await saveSidecar(audioPath, text)
+    const savedTo = await saveSidecar(target, text)
     clearLyricCache()
     return { text, savedTo }
   })
 
   handle(IPC.lyricSave, async (audioPath: string, text: string) => {
-    const savedTo = await saveSidecar(audioPath, text)
+    const target = await allowedMediaPath(audioPath)
+    const savedTo = await saveSidecar(target, text)
     clearLyricCache()
     return savedTo
   })
@@ -1136,7 +1192,12 @@ function registerIpc(): void {
       patch: TagPatch,
       options?: { withLyrics?: boolean; lyricFrom?: OnlineMusicInfo; dryRun?: boolean }
     ) => {
-      if (!canWriteTags(track.path)) {
+      // `track` arrives as a renderer-built object, so its `path` is only a
+      // claim about a file. Writing tags is the one channel that mutates the
+      // user's originals, which makes it the worst place to take that on trust.
+      const target = await allowedMediaPath(track.path)
+
+      if (!canWriteTags(target)) {
         return { written: false, note: '该格式暂不支持写入标签（目前支持 MP3 与 FLAC）' }
       }
 
@@ -1149,12 +1210,12 @@ function registerIpc(): void {
         if (lyric.trim()) effective.lyrics = lyric
       }
 
-      const result = await writeTags(track.path, effective, { dryRun: options?.dryRun === true })
+      const result = await writeTags(target, effective, { dryRun: options?.dryRun === true })
 
       if (result.written) {
         // Refresh the cached entry so the UI reflects the new tags immediately.
         const { library } = requireServices()
-        const refreshed = await library.readTrack(track.path)
+        const refreshed = await library.readTrack(target)
         await library.updateTrack(refreshed)
         clearLyricCache(track.id)
       }
@@ -1167,7 +1228,7 @@ function registerIpc(): void {
     const url = music.picUrl
     if (!url) return null
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) })
+      const response = await fetch(assertPublicHttpUrl(url), { signal: AbortSignal.timeout(10_000) })
       const buffer = await readBounded(response,8*1024*1024)
       const mime = response.headers.get('content-type') ?? 'image/jpeg'
       return { dataUrl: `data:${mime};base64,${buffer.toString('base64')}`, mime }
@@ -1192,7 +1253,7 @@ function registerIpc(): void {
       properties: ['openFile', 'multiSelections']
     })
     if (result.canceled) return null
-    for (const path of result.filePaths) selectedAudioFiles.add(path)
+    rememberPicked(result.filePaths)
     return result.filePaths
   })
 
@@ -1202,7 +1263,12 @@ function registerIpc(): void {
       filters: [{ name: '歌词文件', extensions: ['lrc', 'txt'] }],
       properties: ['openFile']
     })
-    return result.canceled ? null : (result.filePaths[0] ?? null)
+    if (result.canceled) return null
+    // The renderer gets the path and reads it back through `lyric:readFile`,
+    // which is allow-listed — so a dialog choice has to enter the list here or
+    // the user's own pick would be rejected on its return trip.
+    rememberPicked(result.filePaths)
+    return result.filePaths[0] ?? null
   })
 }
 

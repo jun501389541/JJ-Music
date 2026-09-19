@@ -327,7 +327,7 @@ const kuwoProvider: SearchProvider = {
   async search(keyword, page) {
     // `pn` is zero-based on this endpoint.
     const url =
-      'http://search.kuwo.cn/r.s?' +
+      'https://search.kuwo.cn/r.s?' +
       new URLSearchParams({
         all: keyword,
         ft: 'music',

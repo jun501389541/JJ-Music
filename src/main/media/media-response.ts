@@ -71,6 +71,20 @@ async function allowed(path: string, access: MediaAccess): Promise<boolean> {
   return false
 }
 
+/**
+ * Public entry point for the same allow-list `serveMedia` enforces.
+ *
+ * The lyric and tag IPC channels read and write files next to the audio these
+ * checks already cover, so they must not carry a second, weaker notion of what
+ * is reachable. Link resolution happens here too: a caller-supplied path that
+ * traverses a junction out of a library folder must not pass.
+ */
+export async function resolveAllowedPath(path: string, access: MediaAccess): Promise<string> {
+  const real = await realpath(path)
+  if (!await allowed(real, access)) throw new Error('路径不在允许的媒体范围内')
+  return real
+}
+
 /** Shared production handler, callable without starting Electron. */
 export async function serveMedia(request: Request, access: MediaAccess): Promise<Response> {
   if (!['GET', 'HEAD'].includes(request.method)) {

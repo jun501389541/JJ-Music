@@ -55,6 +55,7 @@ await build({
     join(repoRoot, 'src', 'main', 'library', 'tag-writer.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'lyrics.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'url-guard.ts'),
     join(repoRoot, 'src', 'main', 'store', 'json-file.ts'),
     join(repoRoot, 'src', 'main', 'media', 'media-response.ts'),
     join(repoRoot, 'src', 'main', 'media', 'flac-repair.ts'),

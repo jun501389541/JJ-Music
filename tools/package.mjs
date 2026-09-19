@@ -20,7 +20,7 @@
  *   node tools/package.mjs --dir    # portable folder → release/win-unpacked/JJ Music.exe
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -113,10 +113,15 @@ const report = (path, label) => {
 report(join(releaseDir, 'win-unpacked', 'JJ Music.exe'), '免安装版（双击即用）')
 
 if (existsSync(releaseDir)) {
-  for (const name of readdirSync(releaseDir)) {
-    if (name.endsWith('.exe') && name.startsWith('JJ Music-')) {
-      report(join(releaseDir, name), '安装包')
-    }
-    if (name.endsWith('.zip') && name.startsWith('JJ Music-')) report(join(releaseDir,name),'免安装 ZIP（完整解压后运行）')
+  // Select by version, not by product-name prefix. The artifact names moved
+  // from `JJ Music-` to `JJ-Music-` (GitHub turns spaces in release-asset
+  // filenames into dots), and the old prefix test had been matching only the
+  // leftover files from earlier releases -- so it reported filenames that were
+  // never built by this run.
+  const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
+  for (const name of readdirSync(releaseDir).sort()) {
+    if (!name.includes(version)) continue
+    if (name.endsWith('.exe')) report(join(releaseDir, name), '安装包')
+    if (name.endsWith('.zip')) report(join(releaseDir, name), '免安装 ZIP（完整解压后运行）')
   }
 }

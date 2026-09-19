@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push makes an in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, build, headless tests
+    # Windows, not ubuntu: this is a Windows-only app and several suites assume
+    # Windows paths, GBK decoding and the `runas` launcher. A Linux green would
+    # not describe the artifact that ships.
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      # No suite imports `electron` — `src/main/index.ts` is the only module
+      # that does, and it is not a test bundle entry point — so the ~100 MB
+      # binary download is dead weight. Skipping it also keeps CI independent
+      # of the npmmirror entry in .npmrc.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify
+        run: npm run verify
+
+      # `npm run test:e2e` is deliberately absent: it drives a real window, a
+      # real audio device and the developer's own music folder, so it cannot be
+      # a gate. It is re-run by hand before each release; see docs/.

@@ -19,7 +19,7 @@ import { importPlaylist } from './online/playlist-import'
 import { readBounded } from './online/read-bounded'
 import type { ImportedPlaylist } from '@shared/types'
 import { dirname, isAbsolute, join, sep } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { mediaPath, serveMedia } from './media/media-response'
 import { ensurePlayableFlac } from './media/flac-repair'
@@ -1210,6 +1210,37 @@ function registerIpc(): void {
  * Bootstrap
  * ------------------------------------------------------------------ */
 
+/**
+ * Report a bootstrap failure.
+ *
+ * Without this the rejection was unhandled: no window, no tray icon, no
+ * message, and the process lingered — indistinguishable from the app having
+ * crashed, and with no way to disable whatever in the user's settings made it
+ * fail. The dialog is the last thing that can still reach the user, so nothing
+ * here is allowed to throw before it.
+ */
+function reportStartupFailure(error: unknown): void {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+  console.error('JJ Music 启动失败:', detail)
+
+  let logPath = ''
+  try {
+    logPath = join(app.getPath('userData'), 'startup-error.log')
+    writeFileSync(logPath, `${new Date().toISOString()}\n${detail}\n`, 'utf8')
+  } catch (logError) {
+    logPath = ''
+    console.error('无法写入启动日志:', logError)
+  }
+
+  dialog.showErrorBox(
+    'JJ Music 无法启动',
+    `${detail}\n\n${logPath ? `完整信息已保存到：\n${logPath}` : '日志文件无法写入，请复制以上信息。'}`
+  )
+  // `exit`, not `quit`: `before-quit` waits on services that may be the very
+  // thing that failed, which would hang the app instead of closing it.
+  app.exit(1)
+}
+
 // A second instance would fight over the same JSON stores.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -1237,7 +1268,7 @@ if (!app.requestSingleInstanceLock()) {
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
     })
-  })
+  }).catch(reportStartupFailure)
 
   app.on('window-all-closed', () => {
     // With tray mode on, closing the window must NOT quit: the audio keeps

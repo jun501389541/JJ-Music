@@ -11,7 +11,7 @@
  * Usage: node tools/probe/probe-hook.mjs
  */
 import { spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -247,5 +247,9 @@ try {
 finally {
  if(send && original) { try { await send('Runtime.evaluate', {expression:`uiTestLibrary.updateSettings(JSON.parse(${JSON.stringify(original)}))`,awaitPromise:true}); } catch {} }
  child.kill(); await sleep(500)
+ // The copied profile holds a full copy of `library/` — covers included, so
+ // ~950 MB per run. Deleting it keeps a week of smoke runs from eating the disk.
+ if (process.argv.includes('--keep-profile')) console.log(`保留隔离 profile: ${testDataDir}`)
+ else { try { rmSync(testDataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 300 }) } catch (error) { console.log(`清理 profile 失败（${error.code ?? error.message}）: ${testDataDir}`) } }
 }
 process.exit(failed ? 1 : 0)

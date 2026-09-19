@@ -17,9 +17,15 @@
  *   5. the 音源 engine reported sources through IPC
  *
  * Usage: node tools/e2e-verify.mjs
+ *        node tools/e2e-verify.mjs --keep-profile   # keep the copied profile
+ *
+ * The app runs against a **copy** of the developer's data directory (see
+ * `createIsolatedProfile`), and the last check asserts the original came
+ * through untouched — this verifier plays real audio, and playing writes
+ * history.
  */
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -173,10 +179,68 @@ console.log('='.repeat(72))
 // EPERM; inheriting the parent's handles avoids that entirely. Renderer console
 // hygiene is checked over CDP instead of by scraping stderr.
 //
+/* ------------------------------------------------------------------ *
+ * Isolated profile
+ * ------------------------------------------------------------------ */
+
+const realDataDir = join(process.env.APPDATA ?? '', 'jj-music')
+const PROFILE_FILES = ['settings.json', 'playlists.json', 'library/index.json']
+
+/**
+ * Identity of the developer's own data, used to prove the run leaves it alone.
+ *
+ * Size + mtime of each file the app persists. A verification that cannot say
+ * "and I did not touch your library" is a verification that will be run against
+ * a machine you also use as a workstation.
+ */
+function fingerprintRealProfile() {
+  return PROFILE_FILES.map((name) => {
+    const file = join(realDataDir, name)
+    if (!existsSync(file)) return `${name}:-`
+    const info = statSync(file)
+    return `${name}:${info.size}:${Math.round(info.mtimeMs)}`
+  }).join(' | ')
+}
+
+/**
+ * Run against a copy of the profile rather than the live one.
+ *
+ * This verifier drives the real app, and the real app writes settings as it
+ * plays (`recentPlayed`, `lastSession`). An earlier revision instead ran on
+ * `%APPDATA%\jj-music` and, to look tidy, captured the whole settings object at
+ * startup and wrote it back at the end — which reverted whatever the user had
+ * changed in the meantime, folders included. Copying the profile removes the
+ * hazard at its root: the run can write anything it likes.
+ */
+function createIsolatedProfile() {
+  mkdirSync(join(repoRoot, '.cache'), { recursive: true })
+  const dir = mkdtempSync(join(repoRoot, '.cache', 'e2e-profile-'))
+  for (const name of ['settings.json', 'playlists.json', 'library', 'sources']) {
+    const source = join(realDataDir, name)
+    if (existsSync(source)) cpSync(source, join(dir, name), { recursive: true })
+  }
+  // Cover paths inside the copied JSON must point at the copy, or the app reads
+  // — and on repair, writes — the developer's originals.
+  for (const name of PROFILE_FILES) {
+    const file = join(dir, name)
+    if (!existsSync(file)) continue
+    const data = JSON.parse(readFileSync(file, 'utf8'), (_key, value) =>
+      typeof value === 'string' && value.startsWith(`${realDataDir}\\`)
+        ? dir + value.slice(realDataDir.length) : value)
+    writeFileSync(file, JSON.stringify(data))
+  }
+  return dir
+}
+
+const keepProfile = process.argv.includes('--keep-profile')
+const profileBefore = fingerprintRealProfile()
+const profileDir = createIsolatedProfile()
+console.log(`隔离 profile: ${profileDir}`)
+
 // The debug port is requested through JJ_DEBUG_PORT rather than a command-line
 // switch, because Electron rejects `--remote-debugging-port` as a forwarded argv
 // entry.
-const child = spawn(electronBin, ['.'], {
+const child = spawn(electronBin, ['.', `--user-data-dir=${profileDir}`], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: {
@@ -193,7 +257,7 @@ const child = spawn(electronBin, ['.'], {
 
 const rendererErrors = []
 
-let cdp, originalSettings
+let cdp
 try {
   const target = await waitForTarget()
   console.log(`\nrenderer target: ${target.url.slice(0, 80)}`)
@@ -202,7 +266,6 @@ try {
 
   // Give the app time to finish its initial IPC round-trips.
   await sleep(4000)
-  originalSettings = await evaluate(cdp, 'window.jj.settings.get()')
 
   /* ---------------- 1. bridge ---------------- */
   console.log('\n--- 1. preload bridge ---')
@@ -575,7 +638,11 @@ try {
   failed += 1
 } finally {
   try {
-    if (cdp && originalSettings) await evaluate(cdp, `window.__jj_player?.stop(); window.__jj_library.updateSettings(${JSON.stringify(originalSettings)})`)
+    // Only stop playback. This used to write the settings object captured at
+    // startup back over the profile, which reverted everything the app — or the
+    // user, if the app was open in parallel — had saved in the meantime. Running
+    // on a copy above makes that write-back unnecessary.
+    if (cdp) await evaluate(cdp, 'window.__jj_player?.stop()')
     cdp?.close()
   } catch {
     /* ignore */
@@ -584,6 +651,23 @@ try {
   // Give the renderer and GPU helper processes time to exit, so the next run
   // does not race a still-running instance for the single-instance lock.
   await sleep(1500)
+}
+
+// Prove the isolation instead of asserting it: the developer's own data must be
+// exactly as untouched as it was before this run started.
+check(
+  '真实 profile 未被写入',
+  fingerprintRealProfile() === profileBefore,
+  `对比项: ${PROFILE_FILES.join(', ')}`
+)
+
+if (keepProfile) console.log(`保留隔离 profile: ${profileDir}`)
+else {
+  try {
+    rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 300 })
+  } catch (error) {
+    console.log(`清理隔离 profile 失败（${error.code ?? error.message}），可手动删除: ${profileDir}`)
+  }
 }
 
 console.log(`\n${'='.repeat(72)}`)

@@ -464,10 +464,144 @@ const kugouProvider: SearchProvider = {
 }
 
 /* ------------------------------------------------------------------ *
+ * 咪咕音乐 (mg)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Migu search.
+ *
+ * This is the endpoint the v5 web player calls itself, discovered by observing
+ * its traffic rather than from documentation. Verified live before wiring in:
+ * HTTP 200 with `text=周杰伦`, from plain `curl` — no cookie, no app key and no
+ * request signature. Migu's older mobile route (`m.music.migu.cn/migu/remoting/
+ * scr_search_tag`, which many adapters still use) is **dead**: it now 301s to the
+ * H5 home page and returns HTML.
+ *
+ * Three quirks to know before editing this:
+ *  - `pageSize` is ignored; a page is always 20 items.
+ *  - the body is a bare array with no envelope, so there is no total. `pageNo`
+ *    does advance correctly (pages 1/2/3 measured with zero id overlap), so
+ *    `allPage` is a fixed depth cap. Omitting it instead would hide the pager
+ *    for this platform alone, because `SearchView` falls back to `?? 1`.
+ *  - nearly every format carries a `vip` tag and `restrictType: 1`, so search
+ *    succeeding says nothing about playback. Playback is resolved by a 音源
+ *    script regardless — see the note in `lyrics.ts`.
+ */
+interface MiguSong {
+  songId?: number | string
+  contentId?: string
+  copyrightId?: string
+  songName?: string
+  album?: string
+  albumId?: number | string
+  duration?: number
+  img1?: string
+  img2?: string
+  lrcUrl?: string
+  mrcUrl?: string
+  singerList?: Array<{ id?: string; name?: string }>
+  audioFormats?: Array<{ formatType?: string; isize?: string; asize?: string }>
+}
+
+/** Migu's tier names, mapped onto the four tiers LX understands. */
+const MG_FORMAT_TO_QUALITY: Record<string, Quality> = {
+  PQ: '128k',
+  HQ: '320k',
+  SQ: 'flac',
+  ZQ24: 'flac24bit'
+}
+// `Z3D` and `AV3A` also appear. They are 3D-audio and Audio-Vivid renders with
+// no LX equivalent, so they are deliberately left unmapped rather than folded
+// into `flac24bit`, which would offer a file the player cannot decode.
+
+const MG_IMAGE_HOST = 'https://d.musicapp.migu.cn'
+
+/** No total is available, so paging is capped at this depth instead. */
+const MG_MAX_PAGE = 25
+
+/**
+ * Map one Migu search row onto the app's track shape.
+ *
+ * Exported so the mapping is testable offline: the live loop in
+ * `lyrics-search.test.mts` only proves the endpoint answered, not that a tier
+ * like `SQ` became `flac` or that `Z3D` stayed out of the ladder.
+ */
+export function miguSongToInfo(item: MiguSong): OnlineMusicInfo {
+  const sizes: Partial<Record<Quality, number>> = {}
+  for (const format of item.audioFormats ?? []) {
+    const tier = format.formatType ? MG_FORMAT_TO_QUALITY[format.formatType] : undefined
+    if (!tier) continue
+    const bytes = Number.parseInt(format.isize ?? format.asize ?? '', 10)
+    if (Number.isFinite(bytes) && bytes > 0) sizes[tier] = bytes
+  }
+  // The other adapters declare the floor tier unconditionally and let the ladder
+  // probe it; do the same so an empty list never results.
+  sizes['128k'] = sizes['128k'] ?? 1
+
+  const songId = String(item.songId ?? '')
+  const cover = item.img2 ?? item.img1 ?? ''
+  return {
+    id: `mg_${songId}`,
+    name: (item.songName ?? '').trim(),
+    singer: (item.singerList ?? []).map((s) => (s.name ?? '').trim()).filter(Boolean).join('、'),
+    source: 'mg',
+    interval: toInterval(item.duration),
+    albumName: (item.album ?? '').trim(),
+    // `img*` arrives as a bare path, not a URL.
+    picUrl: cover.startsWith('/') ? `${MG_IMAGE_HOST}${cover}` : cover,
+    meta: {
+      songmid: songId,
+      songId: item.songId,
+      // Migu's resolvers key on `copyrightId` (see ARCHITECTURE §1.3); `songmid`
+      // keeps the short id so a script's `hash ?? songmid ?? id` fallback still
+      // finds something usable.
+      copyrightId: item.copyrightId ? String(item.copyrightId) : undefined,
+      albumId: item.albumId,
+      contentId: item.contentId,
+      // Carried through so the lyric lookup costs nothing extra; the
+      // custom-source API cannot supply lyrics for an online track.
+      lrcUrl: item.lrcUrl,
+      mrcUrl: item.mrcUrl,
+      qualitys: buildQualitys(sizes)
+    }
+  }
+}
+
+const miguProvider: SearchProvider = {
+  id: 'mg',
+  name: '咪咕音乐',
+  async search(keyword, page) {
+    const url =
+      'https://app.u.nf.migu.cn/pc/resource/song/item/search/v1.0?' +
+      new URLSearchParams({
+        text: keyword,
+        pageNo: String(Math.max(1, page)),
+        pageSize: '20'
+      }).toString()
+
+    const text = await httpGet(url, {
+      headers: { Referer: 'https://music.migu.cn/', Origin: 'https://music.migu.cn' }
+    })
+    const payload = JSON.parse(text) as MiguSong[]
+    // A bare array is the normal shape; an error envelope is not, and must not
+    // turn into a page of empty rows.
+    const list = Array.isArray(payload) ? payload : []
+
+    return {
+      list: list
+        // Without either id the track cannot be resolved or looked up later.
+        .filter((item) => item.songId || item.copyrightId)
+        .map(miguSongToInfo),
+      allPage: MG_MAX_PAGE
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Registry
  * ------------------------------------------------------------------ */
 
-const PROVIDERS: SearchProvider[] = [tencentProvider, neteaseProvider, kuwoProvider, kugouProvider]
+const PROVIDERS: SearchProvider[] = [tencentProvider, neteaseProvider, kuwoProvider, kugouProvider, miguProvider]
 
 /** Platforms we can search without a user-supplied 音源 source. */
 export function searchProviders(): Array<{ id: SourceId; name: string }> {

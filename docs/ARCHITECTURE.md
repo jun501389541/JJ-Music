@@ -456,4 +456,13 @@ node tools/probe/restore-library.mjs "D:\Music\华语歌曲" --scan
 2. **CUE 分轨**与 ReplayGain —— 本地无损曲库的常见需求。
 3. **文件夹监听**（`fs.watch` + 防抖）替代手动重扫。
 4. **标签编辑**与下载管理。
-5. **酷狗/咪咕搜索适配器**（需要签名算法）。
+5. ~~酷狗/咪咕搜索适配器（需要签名算法）~~ —— 两个都已实现，且**都不需要签名**：酷狗用
+   `song_search_v2` 而非要求签名的 `complexsearch`；咪咕用 v5 网页端自己调用的
+   `app.u.nf.migu.cn/pc/resource/song/item/search/v1.0`，实测无 cookie、无 appKey、
+   无签名即可返回 20 条。原先"需要签名算法"的判断来自旧移动端接口，那条路现在
+   301 到 H5 首页，已经废弃。咪咕还把每条结果的 `lrcUrl` 直接放在搜索响应里，
+   所以它的歌词适配器不需要第二次查询。
+
+   补这个适配器顺带修好了一条静默失效的路径：平台抽测靠宿主搜索取测试曲
+   （`probePlatform` 的 `deps.search`），而 `ONLINE_SOURCE_IDS` 早就包含 `mg`，
+   于是咪咕此前只能报"无法取得该平台的测试歌曲"。

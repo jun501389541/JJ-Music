@@ -9,7 +9,7 @@
 const { parseLyrics, activeLineIndex, stripTimestamps } = await import(
   './renderer/audio/lyrics.js'
 )
-const { searchOnline, searchProviders, hasSearchProvider } = await import(
+const { searchOnline, searchProviders, hasSearchProvider, miguSongToInfo } = await import(
   './online/search.js'
 )
 
@@ -132,6 +132,67 @@ check('has providers registered', providers.length > 0)
 check('hasSearchProvider is true for tx', hasSearchProvider('tx'))
 check('hasSearchProvider is true for kg (added with the aggregate work)', hasSearchProvider('kg'))
 check('hasSearchProvider is false for an unknown platform', !hasSearchProvider('no-such-platform'))
+check('hasSearchProvider is true for mg', hasSearchProvider('mg'))
+
+/*
+ * Migu row mapping, against the shape captured from the live endpoint.
+ *
+ * The network loop below only proves the endpoint answered. It cannot tell that
+ * `SQ` became `flac`, that the 3D renders were left out, or that a bare image
+ * path got a host — and CI has no network, so this is the only place those are
+ * ever checked.
+ */
+console.log('\n--- mg row mapping (offline fixture) ---')
+const miguRow = {
+  songId: 3790007,
+  contentId: '600902000006889366',
+  copyrightId: '60054701923',
+  songName: '晴天',
+  album: '叶惠美',
+  albumId: 8592,
+  duration: 270,
+  img2: '/data/oss/resource/00/4t/9y/b604231d05474ddfb7a48a094cb63e37.webp',
+  lrcUrl: 'https://d.musicapp.migu.cn/data/oss/resource/00/5b/o7/abc',
+  singerList: [{ id: '112', name: '周杰伦' }],
+  audioFormats: [
+    { formatType: 'PQ', isize: '4317311' },
+    { formatType: 'HQ', isize: '10792962' },
+    { formatType: 'SQ', isize: '31931278' },
+    // Both of these appear on real Migu rows and must never reach the ladder:
+    // no LX tier corresponds to them, and the player cannot decode them.
+    { formatType: 'Z3D', isize: '11603556' },
+    { formatType: 'AV3A', isize: '31140081' }
+  ]
+}
+const mapped = miguSongToInfo(miguRow)
+const tiers = (mapped.meta.qualitys ?? []).map((q) => q.type)
+check('mg: id is prefixed with the short song id', mapped.id === 'mg_3790007', mapped.id)
+check('mg: seconds become mm:ss', mapped.interval === '04:30', mapped.interval)
+check('mg: singers join with the app separator', mapped.singer === '周杰伦', mapped.singer)
+check('mg: PQ/HQ/SQ map onto the LX tiers', tiers.join(',') === '128k,320k,flac', tiers.join(','))
+check('mg: 3D and Audio-Vivid renders are excluded', tiers.length === 3, tiers.join(','))
+check(
+  'mg: a bare image path gets its host',
+  mapped.picUrl.startsWith('https://d.musicapp.migu.cn/'),
+  mapped.picUrl
+)
+check('mg: copyrightId is carried for the 音源 to resolve with', mapped.meta.copyrightId === '60054701923')
+check('mg: lrcUrl is carried so lyrics need no second request', typeof mapped.meta.lrcUrl === 'string')
+check(
+  'mg: byte sizes are reported as MB',
+  /^[\d.]+ MB$/.test(mapped.meta.qualitys?.[0]?.size ?? ''),
+  mapped.meta.qualitys?.[0]?.size
+)
+
+// A row with no formats must still declare the floor tier, or the quality
+// ladder gets nothing to try and the track reads as unplayable.
+const bare = miguSongToInfo({ songId: 1, songName: 'x' })
+check(
+  'mg: no formats still declares 128k',
+  (bare.meta.qualitys ?? []).length === 1 && bare.meta.qualitys[0].type === '128k',
+  JSON.stringify(bare.meta.qualitys)
+)
+check('mg: a missing cover stays empty rather than becoming a broken URL', bare.picUrl === '', bare.picUrl)
 
 console.log('\n--- live search (network) ---')
 const KEYWORD = '周杰伦'

@@ -11,10 +11,11 @@
  * The endpoints below are the public web endpoints each platform's own player
  * uses. They are read-only lookups by track id; nothing is downloaded.
  *
- * All three were verified reachable from this machine before being wired in:
+ * All four were verified reachable from this machine before being wired in:
  *   QQ  → c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg
  *   网易云 → music.163.com/api/song/lyric
  *   酷我  → m.kuwo.cn/newh5/singles/songinfoandlrc
+ *   咪咕  → the `lrcUrl` each search result carries, on d.musicapp.migu.cn
  */
 import type { LyricResult, OnlineMusicInfo, SourceId } from '@shared/types'
 
@@ -135,10 +136,35 @@ async function lyricFromKuwo(music: OnlineMusicInfo): Promise<LyricResult> {
   return { lyric }
 }
 
+/**
+ * Migu.
+ *
+ * No lookup-by-id call is needed: the search response already carries a public
+ * `lrcUrl` for every track, so the adapter stores it in `meta` (see
+ * `online/search.ts`) and this just reads it. Verified live: the URL returns
+ * `text/plain`, 2575 bytes of ordinary `[mm:ss.xx]` LRC with no cookie or
+ * referer requirement, which the shared parser consumes directly.
+ *
+ * `mrcUrl` is Migu's word-level (karaoke) format and is richer than LRC, but its
+ * encoding is undocumented here and unverified, so it is carried through and
+ * left unused rather than guessed at.
+ */
+async function lyricFromMigu(music: OnlineMusicInfo): Promise<LyricResult> {
+  const url = music.meta?.lrcUrl
+  if (typeof url !== 'string' || !url) return { lyric: '' }
+
+  const text = await httpGet(url, 'https://music.migu.cn/')
+  // An error page or JSON envelope must not be handed to the parser as if it
+  // were lyric text; every real Migu file starts with a timestamp.
+  if (!text.includes('[')) return { lyric: '' }
+  return { lyric: text }
+}
+
 const PROVIDERS: Record<string, (music: OnlineMusicInfo) => Promise<LyricResult>> = {
   tx: lyricFromTencent,
   wy: lyricFromNetease,
-  kw: lyricFromKuwo
+  kw: lyricFromKuwo,
+  mg: lyricFromMigu
 }
 
 export function hasLyricProvider(source: SourceId): boolean {

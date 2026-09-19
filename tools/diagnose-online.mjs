@@ -38,7 +38,7 @@ if (!existsSync(WORKER)) {
 
 /** A minimal, well-formed source script. Mirrors what LX scripts look like. */
 const SYNTHETIC = `/*!
- * @name 引擎鑷音源
+ * @name 引擎自检音源
  * @description returns a fixed URL to prove the engine works
  * @version 1.0.0
  * @author diagnose
@@ -65,7 +65,7 @@ send(EVENT_NAMES.inited, {
 const TRACK = {
   id: 'kw_474678847',
   name: '花海',
-  singer: '周杰伦,
+  singer: '周杰伦',
   source: 'kw',
   interval: '03:30',
   albumName: '',
@@ -83,24 +83,25 @@ function heading(text) {
  * A. Engine self-test with a synthetic source
  * ------------------------------------------------------------------ */
 
-heading('A. 引擎鑷（合成音源，不依赖任何上游）')
+heading('A. 引擎自检（合成音源，不依赖任何上游）')
 
 const tmpA = mkdtempSync(join(tmpdir(), 'jj-diag-engine-'))
 const storeA = new SourceStore(tmpA)
 storeA.load()
-storeA.import(SYNTHETIC, '引擎鑷音源')
+const metaA = storeA.import(SYNTHETIC, '引擎自检音源')
+storeA.setEnabled(metaA.id, true)
 const engineA = new SourceEngine(storeA, WORKER)
 
 try {
   await engineA.startAll()
   const sources = engineA.getSources()
-  console.log(`  worker 鍚姩锛屽０鏄庡钩鍙? ${sources.map((s) => s.id).join(', ') || '(无'}`)
+  console.log(`  worker 启动，声明平台: ${sources.map((s) => s.id).join(', ') || '(无)'}`)
 
   if (sources.length === 0) {
-    console.log('  ✗引擎鏈敹鍒颁换浣曞钩鍙板０鏄?——这是引擎问题')
+    console.log('  ✗ 引擎未收到任何平台声明 —— 这是引擎问题')
     problems += 1
   } else {
-    console.log('  ✗引擎鍚姩骞舵敹鍒板钩鍙板０鏄?)
+    console.log('  ✓ 引擎启动并收到平台声明')
   }
 
   // The ladder should hand back the highest tier the source advertises.
@@ -110,7 +111,7 @@ try {
       const expected = `probe-${result.quality}.mp3`
       const ok = result.url.includes(expected)
       console.log(
-        `  ${ok ? '✗ : '✗} 请求 ${quality} →实际 ${result.quality}: ${result.url}`
+        `  ${ok ? '✓' : '✗'} 请求 ${quality} → 实际 ${result.quality}: ${result.url}`
       )
       if (!ok) problems += 1
     } catch (error) {
@@ -122,24 +123,25 @@ try {
   // A source that throws must not break the engine.
   const storeErr = new SourceStore(mkdtempSync(join(tmpdir(), 'jj-diag-err-')))
   storeErr.load()
-  storeErr.import(
-    '/*! * @name 鎶涢敊音源 * @version 1 */ const {on,EVENT_NAMES,send}=globalThis.lx;' +
+  const metaErr = storeErr.import(
+    '/*! * @name 抛错音源 * @version 1 */ const {on,EVENT_NAMES,send}=globalThis.lx;' +
       'on(EVENT_NAMES.request,()=>{throw new Error("boom")});' +
       'send(EVENT_NAMES.inited,{sources:{kw:{type:"music",actions:["musicUrl"],qualitys:["128k"]}}})',
-    '鎶涢敊音源'
+    '抛错音源'
   )
+  storeErr.setEnabled(metaErr.id, true)
   const engineErr = new SourceEngine(storeErr, WORKER)
   await engineErr.startAll()
   try {
     await engineErr.getMusicUrl('kw', TRACK, '128k')
-    console.log('  ✗鎶涢敊音源绔熺劧返回浜嗙粨鏋?)
+    console.log('  ✗ 抛错音源竟然返回了结果')
     problems += 1
   } catch (error) {
-    console.log(`  ✗鎶涢敊音源琚纭姤鍛? ${error.message.slice(0, 80)}`)
+    console.log(`  ✓ 抛错音源被正确报告: ${error.message.slice(0, 80)}`)
   }
   await engineErr.stopAll()
 } catch (error) {
-  console.log(`  ✗引擎鑷异常: ${error.message}`)
+  console.log(`  ✗ 引擎自检异常: ${error.message}`)
   problems += 1
 } finally {
   await engineA.stopAll()
@@ -161,44 +163,54 @@ if (existsSync(realFile)) sourceFile = realFile
 else if (existsSync(lxFile)) sourceFile = lxFile
 
 if (!sourceFile) {
-  console.log('  鎵句笉鍒伴煶婧愭枃浠讹紝璺宠繃')
+  console.log('  找不到音源文件，跳过')
 } else {
-  console.log(`  鏂囦欢: ${sourceFile}`)
+  console.log(`  文件: ${sourceFile}`)
   const tmpB = mkdtempSync(join(tmpdir(), 'jj-diag-real-'))
   const storeB = new SourceStore(tmpB)
   storeB.load()
   const imported = storeB.importLxFile(readFileSync(sourceFile, 'utf8'))
-  console.log(`  瀵煎叆: ${imported.map((m) => `${m.name} v${m.version}`).join(', ')}`)
+  // Imported-as-disabled applies here too. Quarantined scripts stay off and
+  // are counted, because a diagnostic that silently skips them would hide
+  // exactly the failure this tool exists to surface.
+  let enabledCount = 0
+  let quarantined = 0
+  for (const meta of imported) {
+    if (storeB.isQuarantined(meta.id)) quarantined += 1
+    if (storeB.setEnabled(meta.id, true)) enabledCount += 1
+  }
+  console.log(`  启用: ${enabledCount}/${imported.length}（另有 ${quarantined} 个处于隔离，本次不启动）`)
+  console.log(`  导入: ${imported.map((m) => `${m.name} v${m.version}`).join(', ')}`)
 
   const engineB = new SourceEngine(storeB, WORKER)
   try {
     await engineB.startAll()
     const sources = engineB.getSources()
-    console.log(`  婢圭増妲戦獮鍐插酱: ${sources.map((s) => `${s.id}(${s.qualitys.join('/')})`).join(', ')}`)
+    console.log(`  声明的平台: ${sources.map((s) => `${s.id}(${s.qualitys.join('/')})`).join(', ')}`)
 
     if (sources.length === 0) {
-      console.log('  ✗真实音源鏈０鏄庝换浣曞钩鍙?)
+      console.log('  ✗ 真实音源未声明任何平台')
       problems += 1
     }
 
     // Try every platform with a plausible track so we see which ones answer.
     const probes = [
       { source: 'kw', meta: { songmid: '474678847' }, name: '花海' },
-      { source: 'tx', meta: { songmid: '0039MnYb0qxYhV' }, name: '鏅村ぉ' },
-      { source: 'wy', meta: { songmid: '186016' }, name: '鏅村ぉ' },
+      { source: 'tx', meta: { songmid: '0039MnYb0qxYhV' }, name: '晴天' },
+      { source: 'wy', meta: { songmid: '186016' }, name: '晴天' },
       { source: 'kg', meta: { hash: 'A1B2C3D4E5F6', songmid: '1' }, name: 'test' },
       { source: 'mg', meta: { copyrightId: '600908000001234567' }, name: 'test' }
     ]
 
     for (const probe of probes) {
       if (!engineB.hasSource(probe.source)) {
-        console.log(`  —${probe.source}: 璇ラ煶婧愭湭鎻愪緵姝ゅ钩鍙癭)
+        console.log(`  — ${probe.source}: 该音源未提供此平台`)
         continue
       }
       const track = {
         id: `${probe.source}_x`,
         name: probe.name,
-        singer: '周杰伦,
+        singer: '周杰伦',
         source: probe.source,
         meta: { ...probe.meta, qualitys: [{ type: '128k' }] }
       }
@@ -206,7 +218,7 @@ if (!sourceFile) {
       try {
         const result = await engineB.getMusicUrl(probe.source, track, '128k')
         const ms = Date.now() - started
-        console.log(`  ✗${probe.source}: ${result.quality} →${result.url.slice(0, 90)}  (${ms} ms)`)
+        console.log(`  ✓ ${probe.source}: ${result.quality} → ${result.url.slice(0, 90)}  (${ms} ms)`)
       } catch (error) {
         const ms = Date.now() - started
         console.log(`  ✗${probe.source}: ${error.message.slice(0, 300)}`)
@@ -218,13 +230,13 @@ if (!sourceFile) {
     // explains which of its backends failed.
     const logs = engineB.getLogs(imported[0]?.id ?? '')
     if (logs.length > 0) {
-      console.log(`\n  鑴氭湰鏃ュ織锛堟渶鍚?${Math.min(12, logs.length)} 鏉★級:`)
+      console.log(`\n  脚本日志（最后 ${Math.min(12, logs.length)} 条）:`)
       for (const line of logs.slice(-12)) {
         console.log(`    ${line.slice(0, 200)}`)
       }
     }
   } catch (error) {
-    console.log(`  ✗真实音源鍚姩失败: ${error.message}`)
+    console.log(`  ✗ 真实音源启动失败: ${error.message}`)
     problems += 1
   } finally {
     await engineB.stopAll()
@@ -236,11 +248,11 @@ if (!sourceFile) {
  * Verdict
  * ------------------------------------------------------------------ */
 
-heading('缁撹')
+heading('结论')
 if (problems === 0) {
-  console.log('  引擎鑷全部通过 →引擎鏈韩娌℃湁问銆?)
-  console.log('  鑻ョ湡瀹為煶婧愪粛无法取到地址锛岄棶棰樺湪上游涓浆服务鍣紝需要佹洿鎹㈤煶婧愩€?)
+  console.log('  引擎自检全部通过 → 引擎本身没有问题')
+  console.log('  若真实音源仍取不到地址，问题在上游中转服务，需要更换音源')
 } else {
-  console.log(`  鍙戠幇 ${problems} 涓紩鎿庡眰闈㈢殑问锛岄渶瑕佷慨澶嶃€俙)
+  console.log(`  发现 ${problems} 个引擎层面的问题，需要修复`)
 }
 process.exit(problems === 0 ? 0 : 1)

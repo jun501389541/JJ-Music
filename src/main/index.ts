@@ -16,14 +16,13 @@ import { randomUUID } from 'node:crypto'
 import { DownloadManager } from './downloads/download-manager'
 import { flushJsonWrites } from './store/json-file'
 import { importPlaylist } from './online/playlist-import'
-import { readBounded } from './online/read-bounded'
 import type { ImportedPlaylist } from '@shared/types'
 import { dirname, isAbsolute, join, sep } from 'node:path'
 import { existsSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { ensurePlayableFlac } from './media/flac-repair'
-import { assertPublicHttpUrl } from './online/url-guard'
+import { safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
 import { fail, ok, type AppSettings, type LocalMusicInfo, type OnlineMusicInfo, type PlayableTrack, type Quality, type SourceId } from '@shared/types'
 import { SourceStore } from './sources/source-store'
@@ -598,8 +597,9 @@ function registerIpc(): void {
   handle(IPC.fileReveal, async (path: string) => {
     if (path === '@data') return shell.openPath(requireServices().dataDir)
     if (typeof path !== 'string' || !existsSync(path)) throw new Error('文件不存在')
-    await allowedMediaPath(path)
-    shell.showItemInFolder(path)
+    // Reveal the resolved path rather than the one handed to us, so the check and
+    // the action cannot be pointed at different files.
+    shell.showItemInFolder(await allowedMediaPath(path))
   })
 
   /** The renderer reports playback state; the taskbar buttons follow it. */
@@ -912,7 +912,7 @@ function registerIpc(): void {
       // URL check entirely.
       fetch: (input, options) => {
         if (typeof input === 'string' || input instanceof URL) {
-          return fetch(assertPublicHttpUrl(input), options)
+          return safeFetchResponse(input, { init: options })
         }
         return Promise.reject(new Error('平台探测不接受 Request 形式的地址'))
       }
@@ -1228,10 +1228,9 @@ function registerIpc(): void {
     const url = music.picUrl
     if (!url) return null
     try {
-      const response = await fetch(assertPublicHttpUrl(url), { signal: AbortSignal.timeout(10_000) })
-      const buffer = await readBounded(response,8*1024*1024)
-      const mime = response.headers.get('content-type') ?? 'image/jpeg'
-      return { dataUrl: `data:${mime};base64,${buffer.toString('base64')}`, mime }
+      const { body, contentType } = await safeFetchBytes(url, { maxBytes: 8 * 1024 * 1024, timeoutMs: 10_000 })
+      const mime = contentType ?? 'image/jpeg'
+      return { dataUrl: `data:${mime};base64,${body.toString('base64')}`, mime }
     } catch {
       return null
     }

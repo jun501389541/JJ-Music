@@ -18,11 +18,16 @@
  *   咪咕  → the `lrcUrl` each search result carries, on d.musicapp.migu.cn
  */
 import type { LyricResult, OnlineMusicInfo, SourceId } from '@shared/types'
+import { readBounded } from './read-bounded'
+import { safeFetchText } from './url-guard'
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 const TIMEOUT_MS = 12_000
+
+/** Lyrics are tens of kilobytes; anything larger is not a lyric file. */
+const LYRIC_MAX_BYTES = 512 * 1024
 
 async function httpGet(url: string, referer: string): Promise<string> {
   const controller = new AbortController()
@@ -37,7 +42,9 @@ async function httpGet(url: string, referer: string): Promise<string> {
       signal: controller.signal
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.text()
+    // Bounded: these hosts are fixed, but a body is still a body, and `text()`
+    // would happily materialise whatever size an upstream decides to send.
+    return (await readBounded(response, LYRIC_MAX_BYTES)).toString('utf8')
   } finally {
     clearTimeout(timer)
   }
@@ -145,6 +152,14 @@ async function lyricFromKuwo(music: OnlineMusicInfo): Promise<LyricResult> {
  * `text/plain`, 2575 bytes of ordinary `[mm:ss.xx]` LRC with no cookie or
  * referer requirement, which the shared parser consumes directly.
  *
+ * That convenience is also the reason this is the one lyric provider that cannot
+ * use `httpGet`: every other platform here interpolates an id into a URL on a
+ * host we chose, so the request destination is not attacker-influenced. Here the
+ * destination arrives from a remote JSON body and, through `music:enrich`, from
+ * the renderer. So the address is validated per hop and pinned to Migu's own
+ * domains -- `allowedHosts` is what stops a hostile response from turning a
+ * lyric lookup into a request to loopback or a metadata endpoint.
+ *
  * `mrcUrl` is Migu's word-level (karaoke) format and is richer than LRC, but its
  * encoding is undocumented here and unverified, so it is carried through and
  * left unused rather than guessed at.
@@ -153,7 +168,20 @@ async function lyricFromMigu(music: OnlineMusicInfo): Promise<LyricResult> {
   const url = music.meta?.lrcUrl
   if (typeof url !== 'string' || !url) return { lyric: '' }
 
-  const text = await httpGet(url, 'https://music.migu.cn/')
+  let text: string
+  try {
+    text = await safeFetchText(url, {
+      headers: { 'User-Agent': UA, Referer: 'https://music.migu.cn/' },
+      allowedHosts: ['migu.cn'],
+      maxBytes: LYRIC_MAX_BYTES,
+      timeoutMs: TIMEOUT_MS
+    })
+  } catch {
+    // A rejected or unreachable lyric file is a missing lyric, not an error the
+    // player should surface -- consistent with every other provider here.
+    return { lyric: '' }
+  }
+
   // An error page or JSON envelope must not be handed to the parser as if it
   // were lyric text; every real Migu file starts with a timestamp.
   if (!text.includes('[')) return { lyric: '' }

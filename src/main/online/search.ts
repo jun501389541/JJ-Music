@@ -25,9 +25,13 @@
  */
 import vm from 'node:vm'
 import type { OnlineMusicInfo, Quality, SourceId } from '@shared/types'
+import { readBounded } from './read-bounded'
 
 /** Shared HTTP helper with a browser-ish UA and a hard timeout. */
 const DEFAULT_TIMEOUT_MS = 12_000
+
+/** A search page is tens of kilobytes; this is room to grow, not a soft cap. */
+const SEARCH_MAX_BYTES = 4 * 1024 * 1024
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -55,7 +59,9 @@ async function httpGet(url: string, options: FetchOptions = {}): Promise<string>
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`)
     }
-    return await response.text()
+    // Bounded rather than `response.text()`: the destination here is a host we
+    // chose, but the size still comes from someone else's answer.
+    return (await readBounded(response, SEARCH_MAX_BYTES)).toString('utf8')
   } finally {
     clearTimeout(timer)
   }

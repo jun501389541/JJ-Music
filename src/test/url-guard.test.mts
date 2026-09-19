@@ -22,7 +22,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { assertPublicHttpUrl } = await import('./online/url-guard.js')
+const { assertPublicHttpUrl, isHostAllowed, resolveRedirect } = await import('./online/url-guard.js')
 
 const allowed = (raw) => {
   assert.doesNotThrow(() => assertPublicHttpUrl(raw))
@@ -93,4 +93,65 @@ test('a returned URL is usable by the caller', () => {
   const url = assertPublicHttpUrl('https://a.example.com:8443/img.png?x=1')
   assert.equal(url.protocol, 'https:')
   assert.equal(url.port, '8443')
+})
+
+/*
+ * Host allow-lists.
+ *
+ * These exist because the private-address blocklist is not enough on its own:
+ * `http://attacker.test/` is a perfectly public address. The Migu lyric
+ * lookup pins to the platform's own domain for exactly that reason.
+ */
+test('allow-list matching respects dot boundaries', () => {
+  assert.equal(isHostAllowed('migu.cn', ['migu.cn']), true)
+  assert.equal(isHostAllowed('d.musicapp.migu.cn', ['migu.cn']), true)
+  // The two forms that a naive suffix check lets through.
+  assert.equal(isHostAllowed('evil-migu.cn', ['migu.cn']), false)
+  assert.equal(isHostAllowed('migu.cn.attacker.test', ['migu.cn']), false)
+  assert.equal(isHostAllowed('attacker.test', ['migu.cn']), false)
+})
+
+test('a public host outside the allow-list is refused', () => {
+  assert.throws(() => assertPublicHttpUrl('https://93.184.216.34/a', ['migu.cn']), /允许的主机/)
+  assert.throws(() => assertPublicHttpUrl('https://attacker.test/a', ['migu.cn']), /允许的主机/)
+  assert.doesNotThrow(() => assertPublicHttpUrl('https://d.musicapp.migu.cn/a', ['migu.cn']))
+})
+
+/*
+ * Redirect handling.
+ *
+ * The fetch loop cannot be exercised offline — it would need a public host that
+ * answers with a redirect somewhere private — so the per-hop decision is tested
+ * on its own. This is the check that a single upfront `assertPublicHttpUrl`
+ * paired with a bare `fetch` does not make.
+ */
+test('a redirect may not escape to an internal address', () => {
+  const publicBase = new URL('https://d.musicapp.migu.cn/lyric/1')
+  assert.throws(() => resolveRedirect('http://169.254.169.254/latest/meta-data', publicBase), /内部地址/)
+  assert.throws(() => resolveRedirect('http://127.0.0.1:8080/admin', publicBase), /内部地址/)
+  assert.throws(() => resolveRedirect('file:///C:/Windows/win.ini', publicBase), /只允许/)
+})
+
+test('a redirect may not escape the host allow-list', () => {
+  const publicBase = new URL('https://d.musicapp.migu.cn/lyric/1')
+  assert.throws(() => resolveRedirect('https://evil-migu.cn/x', publicBase, ['migu.cn']), /允许的主机/)
+  assert.throws(() => resolveRedirect('https://attacker.test/x', publicBase, ['migu.cn']), /允许的主机/)
+})
+
+test('a relative redirect resolves against the current URL, not the origin root', () => {
+  const base = new URL('https://d.musicapp.migu.cn/lyric/1')
+  assert.equal(resolveRedirect('../2', base).href, 'https://d.musicapp.migu.cn/2')
+  assert.equal(resolveRedirect('/3', base).hostname, 'd.musicapp.migu.cn')
+  // A Location that is not a URL at all resolves as a path on the current host
+  // rather than throwing, which is only acceptable because the host check runs
+  // on the result of the resolution, not on the string.
+  assert.equal(resolveRedirect('not a url at all :)', base).hostname, 'd.musicapp.migu.cn')
+  // The origin-changing forms have to be caught by the allow-list. Measured
+  // against Node's WHATWG parser: a leading `//` is protocol-relative, and
+  // `/\\host` looks like a path yet reparents the origin -- that one is the
+  // trap, because it passes for a same-site relative Location.
+  assert.throws(() => resolveRedirect('//evil.test/x', base, ['migu.cn']), /允许的主机/)
+  assert.throws(() => resolveRedirect('/\\\\evil.test', base, ['migu.cn']), /允许的主机/)
+  // A lone leading backslash, by contrast, stays a path on the current host.
+  assert.equal(resolveRedirect('\\evil.test\\x', base, ['migu.cn']).hostname, 'd.musicapp.migu.cn')
 })

@@ -11,6 +11,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# This workflow only compiles and tests; it never publishes. Without an explicit
+# grant the token inherits whatever default the repo/org is configured with, and
+# that default has historically been writable.
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: Typecheck, build, headless tests

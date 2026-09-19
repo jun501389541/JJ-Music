@@ -28,6 +28,7 @@ const load = (relative) =>
 
 const { SourceStore } = await load('sources/source-store.js')
 const { SourceEngine } = await load('sources/source-engine.js')
+const { searchOnline, hasSearchProvider } = await load('online/search.js')
 
 const WORKER = join(repoRoot, 'out', 'test', 'source-host.cjs')
 
@@ -74,6 +75,7 @@ const TRACK = {
 }
 
 let problems = 0
+let unresolved = 0
 
 function heading(text) {
   console.log(`\n${'='.repeat(72)}\n${text}\n${'='.repeat(72)}`)
@@ -193,36 +195,57 @@ if (!sourceFile) {
       problems += 1
     }
 
-    // Try every platform with a plausible track so we see which ones answer.
-    const probes = [
-      { source: 'kw', meta: { songmid: '474678847' }, name: '花海' },
-      { source: 'tx', meta: { songmid: '0039MnYb0qxYhV' }, name: '晴天' },
-      { source: 'wy', meta: { songmid: '186016' }, name: '晴天' },
-      { source: 'kg', meta: { hash: 'A1B2C3D4E5F6', songmid: '1' }, name: 'test' },
-      { source: 'mg', meta: { copyrightId: '600908000001234567' }, name: 'test' }
-    ]
-
-    for (const probe of probes) {
-      if (!engineB.hasSource(probe.source)) {
-        console.log(`  — ${probe.source}: 该音源未提供此平台`)
+    // Real tracks, from the host's own search adapters.
+    //
+    // This replaces a fixed table of fabricated ids, which could not prove
+    // anything: an aggregator that matches on title answers a made-up
+    // copyrightId regardless, so a green run said nothing about whether the ids
+    // this app actually emits resolve -- the one thing worth diagnosing.
+    // Platforms with no host-side search are reported as untested rather than
+    // probed with invented data.
+    const KEYWORD = '周杰伦'
+    for (const source of sources) {
+      if (!hasSearchProvider(source.id)) {
+        console.log(`  — ${source.id}: 无宿主搜索适配器，跳过（编造 id 验证不了任何事）`)
         continue
       }
-      const track = {
-        id: `${probe.source}_x`,
-        name: probe.name,
-        singer: '周杰伦',
-        source: probe.source,
-        meta: { ...probe.meta, qualitys: [{ type: '128k' }] }
-      }
-      const started = Date.now()
+      let tracks
       try {
-        const result = await engineB.getMusicUrl(probe.source, track, '128k')
-        const ms = Date.now() - started
-        console.log(`  ✓ ${probe.source}: ${result.quality} → ${result.url.slice(0, 90)}  (${ms} ms)`)
+        // Two recordings, as platform verification does: one unavailable track
+        // must not read as a dead platform.
+        tracks = (await searchOnline(source.id, KEYWORD, 1)).list.slice(0, 2)
       } catch (error) {
-        const ms = Date.now() - started
-        console.log(`  ✗${probe.source}: ${error.message.slice(0, 300)}`)
-        console.log(`      (${ms} ms)`)
+        console.log(`  ✗ ${source.id}: 取得真实曲目失败 — ${error.message.slice(0, 120)}`)
+        unresolved += 1
+        continue
+      }
+      if (tracks.length === 0) {
+        console.log(`  ✗ ${source.id}: 搜索没有返回任何曲目`)
+        unresolved += 1
+        continue
+      }
+
+      let resolved = null
+      const errors = []
+      const started = Date.now()
+      for (const track of tracks) {
+        try {
+          resolved = { track, result: await engineB.getMusicUrl(source.id, track, '128k') }
+          break
+        } catch (error) {
+          errors.push(`${track.name}: ${error.message}`)
+        }
+      }
+      const ms = Date.now() - started
+      if (resolved) {
+        console.log(
+          `  ✓ ${source.id}: "${resolved.track.name}" → ${resolved.result.quality} ` +
+            `${resolved.result.url.slice(0, 70)}  (${ms} ms)`
+        )
+      } else {
+        unresolved += 1
+        console.log(`  ✗ ${source.id}: ${tracks.length} 首真实曲目均未取到地址 (${ms} ms)`)
+        for (const line of errors.slice(0, 2)) console.log(`      ${line.slice(0, 200)}`)
       }
     }
 
@@ -251,8 +274,13 @@ if (!sourceFile) {
 heading('结论')
 if (problems === 0) {
   console.log('  引擎自检全部通过 → 引擎本身没有问题')
-  console.log('  若真实音源仍取不到地址，问题在上游中转服务，需要更换音源')
 } else {
   console.log(`  发现 ${problems} 个引擎层面的问题，需要修复`)
+}
+// Upstream failures are reported but do not set the exit code: this tool exists
+// to tell "our engine is broken" apart from "the relays are dead", and only the
+// first is actionable here.
+if (unresolved > 0) {
+  console.log(`  ${unresolved} 个平台用真实曲目仍取不到地址 → 上游中转或版权限制，需更换音源`)
 }
 process.exit(problems === 0 ? 0 : 1)

@@ -122,7 +122,7 @@ try {
  check('default landing remains discovery', await evaluate('document.querySelector("h1").textContent === "发现音乐"'))
  await evaluate(`uiTestLibrary.updateSettings({theme:'dark'})`)
  await route('/library')
- check('classification and playlist counts are visible', await evaluate(`['/library','/genres','/albums','/artists','/folders','/music-library','/sources','/playlist/default','/playlist/favorites'].every(path => /^\\d+$/.test(document.querySelector('.sidebar a[href="#'+path+'"] small')?.textContent || ''))`))
+ check('classification and playlist counts are visible', await evaluate(`['/library','/genres','/albums','/artists','/music-library','/sources','/playlist/default','/playlist/favorites'].every(path => /^\\d+$/.test(document.querySelector('.sidebar a[href="#'+path+'"] small')?.textContent || ''))`))
  check('virtualized library rows', await evaluate('uiTestLibrary.tracks.length > 0 && document.querySelectorAll(".track-row").length < 35'))
  for (const path of ['/genres','/folders','/music-library','/albums','/artists','/playlist/favorites','/search','/settings','/settings/appearance/lyrics']) {
    await route(path); check(`route ${path}`, await evaluate('!!document.querySelector(".view")'))
@@ -137,6 +137,27 @@ try {
  await screenshot('09-discovery-history')
  const query = await evaluate('uiTestPlayer.currentTrack.name')
  await route('/search')
+ // Tabs must be the adapters the main process reports. They were a hand-copied
+ // literal and silently lost 咪咕 when its adapter landed, which no other check
+ // could see -- the adapter worked, the tab simply was not there.
+ const searchTabs = await evaluate(`(() => {
+   const tabs = [...document.querySelectorAll('.platforms .platform')].map((e) => e.textContent.trim())
+   return window.jj.music.providers().then((providers) => JSON.stringify({
+     tabs,
+     providerCount: providers.length,
+     missing: providers.filter((p) => !tabs.includes(p.name)).map((p) => p.id + ':' + p.name)
+   }))
+ })()`)
+ {
+   const parsedTabs = JSON.parse(searchTabs)
+   // The count and the non-empty checks are what keep this from passing when
+   // `providers()` answers nothing, and they are also what would have caught the
+   // old literal: 6 tabs against 5 adapters plus 2 scopes.
+   check('search tabs cover every host search adapter',
+     parsedTabs.providerCount > 0 && parsedTabs.missing.length === 0 &&
+       parsedTabs.tabs.length === parsedTabs.providerCount + 2,
+     searchTabs)
+ }
  await evaluate(`(() => {const e=document.querySelector('.searchbar__input');e.value=${JSON.stringify(query)};e.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.searchbar').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))})()`)
  await sleep(300)
  check('global search renders local matches before network completes', await evaluate('document.querySelector(".track-row")?.innerText.includes("本地")'))

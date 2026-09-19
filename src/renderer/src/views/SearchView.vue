@@ -9,7 +9,15 @@ import TrackList from '../components/TrackList.vue'
 
 const library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore()
 const router = useRouter(), route = useRoute()
-const platforms = [{ id: 'all', name: '全部' }, { id: 'local', name: '本地音乐' }, { id: 'tx', name: 'QQ音乐' }, { id: 'wy', name: '网易云音乐' }, { id: 'kw', name: '酷我音乐' }, { id: 'kg', name: '酷狗音乐' }]
+// `all` and `local` are this view's own scopes, not platforms. Everything else
+// is asked of the main process: the list used to be a literal copy of the search
+// adapters and silently fell behind when 咪咕 was added, because nothing but a
+// human noticing could tell it had drifted.
+const VIEW_SCOPES: Array<{ id: SourceId; name: string }> = [
+  { id: 'all', name: '全部' },
+  { id: 'local', name: '本地音乐' }
+]
+const platforms = ref<Array<{ id: SourceId; name: string }>>([...VIEW_SCOPES])
 const keyword = ref(typeof route.query.q === 'string' ? route.query.q : '')
 const submittedQuery = ref(''), activeSource = ref<SourceId>('all')
 const onlineResults = ref<OnlineMusicInfo[]>([]), searching = ref(false), searched = ref(false)
@@ -33,7 +41,7 @@ async function runSearch(targetPage = 1): Promise<void> {
       const result = await window.jj.music.searchAll(query, targetPage)
       if (request !== generation) return
       onlineResults.value = result.list; total.value = result.total; allPage.value = result.allPage
-      if (result.failed.length) searchError.value = `部分在线平台暂不可用：${result.failed.map(item => platforms.find(p => p.id === item.source)?.name || item.source).join('、')}`
+      if (result.failed.length) searchError.value = `部分在线平台暂不可用：${result.failed.map(item => platforms.value.find(p => p.id === item.source)?.name || item.source).join('、')}`
     } else {
       const result = await window.jj.music.search(activeSource.value, query, targetPage)
       if (request !== generation) return
@@ -51,7 +59,15 @@ async function playAt(index: number): Promise<void> {
   if (!isLocalTrack(track) && !hasSources.value) { toast.error('在线播放需要可用音源，可在音源管理中导入'); return }
   await player.playQueue(results.value, index)
 }
-onMounted(() => { if (keyword.value) void runSearch() })
+onMounted(() => {
+  // A failure here costs only the extra tabs; `全部` and `本地音乐` are always
+  // present, and a broken search surfaces through runSearch's own error rather
+  // than silently hiding platforms.
+  void window.jj.music.providers()
+    .then((providers) => { platforms.value = [...VIEW_SCOPES, ...providers] })
+    .catch(() => undefined)
+  if (keyword.value) void runSearch()
+})
 watch(() => route.query.q, value => { keyword.value=typeof value==='string'?value:'';void runSearch() })
 </script>
 <template>

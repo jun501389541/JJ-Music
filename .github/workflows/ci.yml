@@ -49,3 +49,41 @@ jobs:
       # `npm run test:e2e` is deliberately absent: it drives a real window, a
       # real audio device and the developer's own music folder, so it cannot be
       # a gate. It is re-run by hand before each release; see docs/.
+
+  # What the `verify` job above cannot catch: it runs from `out/`, with the
+  # developer's own data, on a machine that already has the forked host unpacked
+  # and the file system warm. A downloaded build on another machine fails
+  # differently -- asar unpacking, the fork's cwd and module resolution, a source
+  # that has to pass validation on a fresh import. This job packages, then drives
+  # the packaged exe with an empty profile, so that class of failure is a build
+  # failure rather than a user report.
+  packaged-sources:
+    name: Packaged build can start 音源
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      # Unlike `verify`, this job must have the real Electron binary: packaging
+      # assembles it. Hence no ELECTRON_SKIP_BINARY_DOWNLOAD here, and no
+      # dependency on the mirror that used to sit in .npmrc.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the unpacked distribution
+        run: npm run pack
+
+      - name: Check the artifact itself
+        run: node tools/probe/verify-package.mjs
+
+      - name: Import, enable and play through the packaged build
+        run: node tools/probe/clean-profile-sources.mjs --synthetic

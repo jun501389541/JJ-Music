@@ -108,7 +108,11 @@ try {
     ['歌词来源徽章', '在线匹配', renderer],
     ['标签匹配对话框', '写入预览', renderer],
     ['歌词编辑器', '打时间戳', renderer],
-    ['歌词可用徽章', '词·同步', renderer]
+    // Was '词·同步', a string that exists nowhere in the sources or in the
+    // shipped 0.1.3 asar: this line has been reporting MISS for a badge whose
+    // actual label is 逐行. The tool is a probe and nothing ran it in CI, so the
+    // wrong marker outlived the wording it was meant to detect.
+    ['歌词可用徽章', '逐行', renderer]
   ]
 
   console.log('\nfeature markers:')

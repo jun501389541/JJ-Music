@@ -200,15 +200,17 @@ if (process.env.JJ_LIVE_TESTS !== '1') console.log('  SKIP: live provider reques
 for (const provider of process.env.JJ_LIVE_TESTS === '1' ? providers : []) {
   try {
     // These endpoints fail in two ways without provoking the adapter: Kugou
-    // answers `{"lists":[]}` to a perfectly good keyword (measured: 1 empty
-    // answer in 3 identical back-to-back runs), and QQ's TLS connection is
-    // occasionally reset (`fetch failed`, twice in five runs). Both are upstream
-    // flake, so one retry each. Without this the gate cries wolf and everyone
-    // learns to ignore a red `npm run test:online`.
+    // answers `{"lists":[]}` to a perfectly good keyword, and QQ's TLS connection
+    // is occasionally reset (`fetch failed`). Measured today: Kugou answered empty
+    // in 2 of 6 suite runs — twice back to back 1.5 s apart, while four standalone
+    // requests minutes later each returned 58 KB — so the throttle outlives a
+    // short pause. Three attempts with a widening gap; failing all three is a
+    // signal worth red on.
+    const BACKOFF = [1500, 6000]
     let retried = false
     let result = null
     let firstError = null
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    for (let attempt = 1; attempt <= BACKOFF.length + 1; attempt += 1) {
       const page = await searchOnline(provider.id, KEYWORD, 1).catch((error) => {
         if (attempt === 1) firstError = error
         return null
@@ -218,12 +220,12 @@ for (const provider of process.env.JJ_LIVE_TESTS === '1' ? providers : []) {
         break
       }
       if (page) result = result ?? page
-      if (attempt === 1) {
+      if (attempt <= BACKOFF.length) {
         retried = true
-        await new Promise((done) => setTimeout(done, 1500))
+        await new Promise((done) => setTimeout(done, BACKOFF[attempt - 1]))
       }
     }
-    if (!result) throw firstError ?? new Error('两次搜索都没有响应')
+    if (!result) throw firstError ?? new Error('三次搜索都没有响应')
     const first = result.list[0]
     const ok = result.list.length > 0 && first?.id && first?.name
     console.log(

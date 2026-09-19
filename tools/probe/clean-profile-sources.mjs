@@ -15,22 +15,60 @@
  *   node tools/probe/clean-profile-sources.mjs --app=release/win-unpacked
  *   node tools/probe/clean-profile-sources.mjs --limit=3      # first 3 scripts
  *   node tools/probe/clean-profile-sources.mjs --keep        # keep the profile
+ *
+ * The app is copied to the temp dir before it runs unless --no-isolate is passed.
+ * See `devNodeModulesAncestor` below: without that step this check can pass for a
+ * reason that has nothing to do with what ships.
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SYNTHETIC_SOURCE_NAME, syntheticSource } from './synthetic-source.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
-const appDir = resolve(repoRoot, arg('app', join('release', 'win-unpacked')))
-const exe = join(appDir, 'JJ Music.exe')
+const srcDir = resolve(repoRoot, arg('app', join('release', 'win-unpacked')))
 const limit = Number(arg('limit', '0')) || Infinity
 const keep = process.argv.includes('--keep')
+
+/**
+ * An ancestor `node_modules` makes this check lie.
+ *
+ * The forked host resolves its bare `require('iconv-lite')` by walking up from
+ * its own file path. Inside the repository — or a CI workspace — the dev
+ * `node_modules` sits on that chain and satisfies a dependency that is *not*
+ * unpacked next to the shipped host, so sources start here and fail on a user's
+ * machine. Run from a copy outside any such tree instead.
+ */
+function devNodeModulesAncestor(dir) {
+  let current = resolve(dir)
+  for (;;) {
+    const parent = dirname(current)
+    if (parent === current) return null
+    if (existsSync(join(parent, 'node_modules'))) return parent
+    current = parent
+  }
+}
+
+let appDir = srcDir
+let copiedDir = null
+if (!process.argv.includes('--no-isolate')) {
+  const polluted = devNodeModulesAncestor(srcDir)
+  if (polluted) {
+    copiedDir = mkdtempSync(join(tmpdir(), 'jj-packaged-app-'))
+    appDir = join(copiedDir, basename(srcDir))
+    console.log(`隔离: ${srcDir} 的祖先里有开发用 node_modules（${polluted}），复制一份到临时目录再测\n`)
+    cpSync(srcDir, appDir, { recursive: true })
+  } else {
+    console.log('隔离: 该目录没有祖先 node_modules，就地测试\n')
+  }
+}
+
+const exe = join(appDir, 'JJ Music.exe')
 
 if (!existsSync(exe)) {
   console.error(`找不到打包程序: ${exe}\n先运行 npm run pack`)
@@ -79,6 +117,9 @@ if (synthetic) {
     process.exit(1)
   }
   entries = (JSON.parse(readFileSync(devStore, 'utf8').replace(/^﻿/, '')).userApis ?? []).slice(0, limit)
+  // A profile may hold at most 20 sources, so sampling more would report the
+  // product's own ceiling as a build failure.
+  if (entries.length > 20) entries = entries.slice(0, 20)
   console.log(`样本: ${entries.length} 个音源脚本（取自本机已导入列表，按原样重新导入）\n`)
 }
 
@@ -153,6 +194,8 @@ const evaluate = async (expression) => {
 }
 
 let failures = 0
+/** Sources the startup validator stopped on purpose — not a broken build. */
+let blocked = 0
 const report = (mark, label, detail = '') => {
   console.log(`  ${mark} ${label}${detail ? `  ${detail}` : ''}`)
   if (mark === 'x') failures += 1
@@ -174,6 +217,7 @@ try {
       catch (error) { return { ok: false, message: String(error?.message ?? error) } }
     })()`)
     if (result.ok) { imported.push({ name: entry.name, ...result }); report('ok', `导入 ${entry.name}`, `id=${result.id}`) }
+    else if (/未通过启动前校验/.test(result.message)) { blocked += 1; report('—', `导入 ${entry.name}：被启动前校验拦下`, '属预期行为，不计入构建失败') }
     else { report('x', `导入 ${entry.name} 失败`, result.message.slice(0, 140)) }
   }
 
@@ -272,6 +316,10 @@ try {
   if (dead.length > 0) {
     console.log('\n  状态异常的音源:')
     for (const d of dead.slice(0, 8)) console.log(`    - ${d.name} enabled=${d.enabled} quarantined=${d.quarantined} ${(d.tail ?? []).join(' | ').slice(0, 160)}`)
+    if (dead.some((d) => /ERR_MODULE_NOT_FOUND|Cannot find (?:package|module)/i.test((d.tail ?? []).join(' ')))) {
+      console.log('    提示: 子进程连自己的依赖都解析不到。要么 asarUnpack 漏了 host 需要的包，')
+      console.log('          要么这次运行发生在某个开发用 node_modules 之下（见 devNodeModulesAncestor）。')
+    }
   }
 } finally {
   child.kill()
@@ -279,8 +327,19 @@ try {
   await sleep(500)
   if (keep) console.log(`\n保留配置目录: ${profile}`)
   else rmSync(profile, { recursive: true, force: true })
+  if (copiedDir) {
+    if (keep) console.log(`保留应用副本: ${copiedDir}`)
+    else {
+      try {
+        rmSync(copiedDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 300 })
+      } catch (error) {
+        console.log(`清理应用副本失败（${error.code ?? error.message}），可手动删除: ${copiedDir}`)
+      }
+    }
+  }
   ws.close()
 }
 
+if (blocked) console.log(`\n被启动前校验拦下: ${blocked} 个（预期行为，与构建无关）`)
 console.log(`\n未通过项: ${failures}`)
 process.exit(failures === 0 ? 0 : 1)

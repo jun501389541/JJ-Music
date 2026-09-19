@@ -40,9 +40,27 @@ files:
 # step is required and the packaged app stays portable across machines.
 asar: true
 
-# Keep the forked host script outside the archive so `fork()` can load it.
+# Keep the forked host script outside the archive so `fork()` can load it, and keep
+# the packages it imports reachable from that on-disk location.
+#
+# The second rule is not redundant with the first. Inside the archive, Electron's
+# patched `fs` lets the *main* process `require('iconv-lite')` normally, but the
+# fork runs with `ELECTRON_RUN_AS_NODE` — plain Node, no asar support — so bare
+# specifiers resolve by walking up from the host file's real path:
+# `resources/app.asar.unpacked/out/main/` … `resources/app.asar.unpacked/`. Nothing
+# along that chain holds a `node_modules`, because the dependency is still packed
+# inside `app.asar`. The child then dies during its own import, before any user
+# script runs, and every source reports 「音源进程退出（退出码 1）」.
+#
+# Measured on 2026-09-19 against the published 0.1.5 Portable zip: no source would
+# start until `iconv-lite` (and its own dependency) was unpacked beside the host,
+# after which all of them advertised their platforms. A `release/win-unpacked` run
+# from inside the repository hides this completely, because the repo's own
+# `node_modules` is an ancestor directory — and so does CI, for the same reason.
 asarUnpack:
   - out/main/source-host.js
+  - node_modules/iconv-lite/**
+  - node_modules/safer-buffer/**
 
 win:
   target:

@@ -1,6 +1,6 @@
 {
   "name": "jj-music",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "description": "JJ Music — 支持本地与联网的音乐播放器，兼容 LX Music 音源脚本，UI 参考 Salt Player",
   "main": "./out/main/index.js",
   "author": "JJ Music",

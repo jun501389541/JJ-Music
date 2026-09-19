@@ -199,12 +199,36 @@ const KEYWORD = '周杰伦'
 if (process.env.JJ_LIVE_TESTS !== '1') console.log('  SKIP: live provider requests (run npm run test:online)')
 for (const provider of process.env.JJ_LIVE_TESTS === '1' ? providers : []) {
   try {
-    const result = await searchOnline(provider.id, KEYWORD, 1)
+    // These endpoints fail in two ways without provoking the adapter: Kugou
+    // answers `{"lists":[]}` to a perfectly good keyword (measured: 1 empty
+    // answer in 3 identical back-to-back runs), and QQ's TLS connection is
+    // occasionally reset (`fetch failed`, twice in five runs). Both are upstream
+    // flake, so one retry each. Without this the gate cries wolf and everyone
+    // learns to ignore a red `npm run test:online`.
+    let retried = false
+    let result = null
+    let firstError = null
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const page = await searchOnline(provider.id, KEYWORD, 1).catch((error) => {
+        if (attempt === 1) firstError = error
+        return null
+      })
+      if (page && page.list.length > 0) {
+        result = page
+        break
+      }
+      if (page) result = result ?? page
+      if (attempt === 1) {
+        retried = true
+        await new Promise((done) => setTimeout(done, 1500))
+      }
+    }
+    if (!result) throw firstError ?? new Error('两次搜索都没有响应')
     const first = result.list[0]
     const ok = result.list.length > 0 && first?.id && first?.name
     console.log(
       `  ${provider.id.padEnd(3)} ${String(result.list.length).padStart(2)} results, ` +
-        `total=${result.total ?? '?'} allPage=${result.allPage ?? '?'}`
+        `total=${result.total ?? '?'} allPage=${result.allPage ?? '?'}${retried ? ' (重试后)' : ''}`
     )
     if (first) {
       console.log(`       first: "${first.name}" — ${first.singer || '?'} [${first.id}]`)

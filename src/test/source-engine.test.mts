@@ -305,7 +305,22 @@ if (sampleScript && process.env.JJ_LIVE_TESTS === '1') {
     }
 
     check('script initialised and advertised sources', sources.length > 0, `${sources.length} sources`)
-    check('all sources are known platforms', sources.every((s) => ['kw', 'kg', 'tx', 'wy', 'mg', 'local'].includes(s.id)))
+    // Not "every id is one of LX's five": a real aggregate source legitimately
+    // registers private platforms, and section 2 above asserts the engine keeps
+    // them. The promises worth holding here are the ones `normaliseSources`
+    // actually makes.
+    check(
+      'advertised sources are well-formed',
+      sources.every(
+        (s) =>
+          typeof s.id === 'string' && s.id.trim() !== '' && s.id !== 'local' &&
+          s.type === 'music' && Array.isArray(s.actions) && s.actions.length > 0
+      ) && new Set(sources.map((s) => s.id)).size === sources.length
+    )
+    const privateIds = sources.filter((s) => !['kw', 'kg', 'tx', 'wy', 'mg'].includes(s.id))
+    if (privateIds.length) {
+      console.log(`  private platforms kept for playback: ${privateIds.map((s) => s.id).join(', ')}`)
+    }
     check('no invalid quality survived', sources.every((s) => s.qualitys.every((q) => ['128k', '320k', 'flac', 'flac24bit'].includes(q))))
 
     // A real request: resolve a URL for a known track. This exercises the

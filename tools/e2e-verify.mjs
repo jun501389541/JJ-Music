@@ -252,10 +252,35 @@ try {
   console.log(`  scripts: ${apis.length}, live platforms: ${sources.map((s) => s.id).join(', ') || 'none'}`)
   check('imported scripts are listed', Array.isArray(apis) && apis.length > 0, `${apis.length}`)
   check('engine booted and advertised platforms', sources.length > 0, `${sources.length}`)
+  // What used to be asserted here — "every advertised id must be one of LX's
+  // five" — contradicts the product's own contract: `SourceId` admits custom
+  // ids, `SourceInfo.id` documents "a custom id such as `git`", and the
+  // cross-source failover deliberately filters unknown ids out (player.ts).
+  // Aggregate sources routinely register private platforms, so on a machine
+  // with those imported the old check could only fail. What actually matters
+  // is what `normaliseSources` promises, so that is what is asserted now.
+  const ids = sources.map((s) => s.id)
+  const malformed = ids.filter((id) => typeof id !== 'string' || !id.trim())
+  const leakedLocal = ids.filter((id) => id === 'local')
+  const actionless = sources.filter((s) => !Array.isArray(s.actions) || s.actions.length === 0)
+  const wrongType = sources.filter((s) => s.type !== 'music')
   check(
-    'advertised platforms respect the LX allow-list',
-    sources.every((s) => ['kw', 'kg', 'tx', 'wy', 'mg', 'local'].includes(s.id))
+    'advertised platforms are well-formed',
+    malformed.length === 0 && leakedLocal.length === 0 &&
+      actionless.length === 0 && wrongType.length === 0 &&
+      new Set(ids).size === ids.length,
+    `${sources.length} platforms${malformed.length ? `, malformed: ${malformed.join(',')}` : ''}` +
+      `${leakedLocal.length ? ', leaked `local`' : ''}${actionless.length ? ', without actions' : ''}` +
+      `${wrongType.length ? ', non-music type' : ''}` +
+      `${new Set(ids).size === ids.length ? '' : ', duplicate ids'}`
   )
+  // Reported, not asserted: private platforms are supported for playback but
+  // have no host-side search, so their cards settle at 未能验证 by design.
+  const standard = ['kw', 'kg', 'tx', 'wy', 'mg']
+  const extra = ids.filter((id) => !standard.includes(id))
+  if (extra.length) console.log(`  note: 脚本声明的私有平台（仅参与播放）: ${extra.join(', ')}`)
+  const missingStandard = standard.filter((id) => !ids.includes(id))
+  if (missingStandard.length) console.log(`  note: 本次未提供的标准平台: ${missingStandard.join(', ')}`)
 
   /* ---------------- 4. search ---------------- */
   console.log('\n--- 4. online search via IPC ---')

@@ -19,7 +19,7 @@ import type {
   Quality,
   SourceId
 } from '@shared/types'
-import { isLocalTrack } from '@shared/types'
+import { isLocalTrack, ONLINE_SOURCE_IDS } from '@shared/types'
 import type { ResolvedLyric } from '@shared/library-types'
 import { WebAudioEngine } from '../audio/web-audio-engine'
 import { activeLineIndex, parseLyrics, type ParsedLyrics } from '../audio/lyrics'
@@ -239,7 +239,7 @@ export const usePlayerStore = defineStore('player', () => {
           p.id !== track.source &&
           p.actions.includes('musicUrl') &&
           // Only the known platforms: an unknown id is not a song source.
-          ['kw', 'kg', 'tx', 'wy', 'mg'].includes(p.id)
+          ONLINE_SOURCE_IDS.includes(p.id)
       )
       .map((p) => p.id)
 

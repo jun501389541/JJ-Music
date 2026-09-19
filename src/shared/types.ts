@@ -10,7 +10,7 @@ import type { UiPreferences } from './preferences'
  * ------------------------------------------------------------------ */
 
 /** Built-in source identifiers used by LX Music and compatible 音源 scripts. */
-export type SourceId = 'kw' | 'kg' | 'tx' | 'wy' | 'mg' | 'local' | (string & {})
+export type SourceId = (typeof LX_SOURCE_IDS)[number] | (string & {})
 
 /** Quality tiers, ordered from lowest to highest fidelity. */
 export type Quality = '128k' | '320k' | 'flac' | 'flac24bit' | 'hires' | 'atmos' | 'master'
@@ -28,6 +28,19 @@ export const LX_QUALITIES: Quality[] = ['128k', '320k', 'flac', 'flac24bit']
 
 /** Source ids the LX custom-source API recognises. */
 export const LX_SOURCE_IDS = ['kw', 'kg', 'tx', 'wy', 'mg', 'local'] as const
+
+/**
+ * The platforms the app will cross-reference when it has to find the same
+ * recording somewhere else.
+ *
+ * `local` is excluded: it is this app's own library, not a song source.
+ * Everything outside this list is still playable — a script that registers a
+ * private id such as `qs` resolves its own playback URLs — but the app never
+ * looks for a match there, because it has no host-side search for it. Scripts
+ * advertise those ids freely, which is expected; `SourceId` allows them and
+ * `normaliseSources` keeps the raw key as the display name on purpose.
+ */
+export const ONLINE_SOURCE_IDS: readonly string[] = LX_SOURCE_IDS.filter((id) => id !== 'local')
 
 /**
  * The three actions a custom source may implement.

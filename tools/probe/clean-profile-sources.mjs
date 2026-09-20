@@ -27,7 +27,7 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SYNTHETIC_SOURCE_NAME, syntheticSource } from './synthetic-source.mjs'
+import { SYNTHETIC_PLAY_URL, SYNTHETIC_SOURCE_NAME, syntheticSource } from './synthetic-source.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
@@ -264,7 +264,7 @@ try {
     // Ask for a tier above the floor on purpose: a ladder that quietly falls
     // back to 128k would still play, and would hide a source that cannot
     // actually serve what it declared.
-    const expected = `${base}/probe-320k.mp3`
+    const expected = `${SYNTHETIC_PLAY_URL}320k.mp3`
     const result = await evaluate(`(async () => {
       const track = { id: 'kw_selfcheck', name: '自检', singer: '自检', source: 'kw',
         meta: { songmid: 'selfcheck', qualitys: [{ type: '128k' }, { type: '320k' }] } }

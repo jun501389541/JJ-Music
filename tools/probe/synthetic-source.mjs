@@ -14,6 +14,20 @@
  */
 export const SYNTHETIC_SOURCE_NAME = '打包自检音源'
 
+/**
+ * The playback address the synthetic source hands back, minus the quality tier.
+ *
+ * Nobody fetches it. The request that proves the packaged host works is the
+ * marker fetch inside the child, on loopback, which the harness watches.
+ *
+ * This one has to *look* public because main treats a script-supplied playback
+ * address as attacker-chosen: a source could otherwise point the app at its own
+ * localhost services or the cloud metadata address, so `isValidMusicUrl` refuses
+ * loopback, private and link-local targets. Making the self-check hand back a
+ * loopback URL would be asserting that the guard stays open.
+ */
+export const SYNTHETIC_PLAY_URL = 'https://jj-music-probe.invalid/probe-'
+
 /** @param {Record<string, string>} markers URLs the harness serves and watches */
 export function syntheticSource(baseUrl, markers = {}) {
   const sourceTable = Object.fromEntries(
@@ -56,7 +70,7 @@ on(EVENT_NAMES.request, ({ source, action, info }) => {
       if (!response || code !== 200 || size <= 0) {
         return reject(new Error('lx.request 未能取回标记内容 (statusCode=' + code + ' size=' + size + ')'))
       }
-      resolve(BASE + '/probe-' + info.type + '.mp3')
+      resolve(${JSON.stringify(SYNTHETIC_PLAY_URL)} + info.type + '.mp3')
     })
   })
 })

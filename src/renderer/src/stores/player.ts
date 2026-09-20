@@ -586,11 +586,19 @@ export const usePlayerStore = defineStore('player', () => {
     if (!Number.isFinite(value)) return
     volume.value = Math.max(0, Math.min(1, value))
     engine.value?.setVolume(volume.value)
+    // The toolbar renders this control as `muted ? 0 : volume`, so raising the
+    // fader while muted is the user's way of asking for sound back. Without the
+    // un-mute the handle springs back to zero and the control looks broken.
+    if (volume.value > 0 && muted.value) setMuted(false)
   }
 
   function toggleMute(): void {
-    muted.value = !muted.value
-    engine.value?.setMuted(muted.value)
+    setMuted(!muted.value)
+  }
+
+  function setMuted(value: boolean): void {
+    muted.value = value
+    engine.value?.setMuted(value)
   }
 
   function setPlayMode(mode: PlayMode): void {
@@ -681,6 +689,10 @@ export const usePlayerStore = defineStore('player', () => {
     stop()
     queue.value = []
     currentIndex.value = -1
+    // `stop()` just snapshotted the queue that is now gone, so the resume point
+    // has to be dropped afterwards or the next launch restores what was cleared.
+    clearSession()
+    cancelSleepTimer()
   }
 
   function insertNext(tracks: PlayableTrack[]): void {
@@ -696,9 +708,19 @@ export const usePlayerStore = defineStore('player', () => {
   const sleepAt = ref<number | null>(null)
   let sleepTimer: ReturnType<typeof setTimeout> | undefined
   function setSleepMinutes(minutes: number): void {
-    clearTimeout(sleepTimer)
+    cancelSleepTimer()
     sleepAt.value = minutes > 0 ? Date.now() + minutes * 60_000 : null
-    if (minutes > 0) sleepTimer = setTimeout(() => { stop(); sleepAt.value = null }, minutes * 60_000)
+    if (minutes > 0) sleepTimer = setTimeout(() => { sleepTimer = undefined; stop(); sleepAt.value = null }, minutes * 60_000)
+  }
+
+  /**
+   * Abandon a pending sleep timer. Without this a timer armed for a session the
+   * user has already torn down goes off against whatever they start next.
+   */
+  function cancelSleepTimer(): void {
+    if (sleepTimer !== undefined) clearTimeout(sleepTimer)
+    sleepTimer = undefined
+    sleepAt.value = null
   }
 
   /* ------------------------------------------------------------ *
@@ -761,6 +783,17 @@ export const usePlayerStore = defineStore('player', () => {
       sessionTimer = null
     }
     if (sessionDirty || currentTrack.value) writeSession()
+  }
+
+  /** Forget the resume point, so the next launch does not reopen a closed book. */
+  function clearSession(): void {
+    if (sessionTimer !== null) {
+      clearTimeout(sessionTimer)
+      sessionTimer = null
+    }
+    sessionDirty = false
+    const library = useLibraryStore()
+    void library.updateSettings({ lastSession: undefined }).catch(() => undefined)
   }
 
   /**

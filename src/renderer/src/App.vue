@@ -23,7 +23,7 @@ import NowPlayingView from './views/NowPlayingView.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useLibraryStore } from './stores/library'
 import { usePlayerStore } from './stores/player'
-import { applyAccent, applyAccentFromImage, resetAccent } from './theme/accent'
+import { accentApplied, applyAccent, applyAccentFromImage, resetAccent } from './theme/accent'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
@@ -132,6 +132,13 @@ let offDesktopLyricCommand: (() => void) | undefined
  * ---------------------------------------------------------------- */
 const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
   if (!library.settings.desktopLyric) return null
+  // Depend on the counter the theme watcher bumps when an accent lands, then
+  // read the colour off the document: cover extraction finishes asynchronously,
+  // so a strip that only recomputed on the next lyric line could keep showing
+  // the previous colour indefinitely — paused between tracks, for instance.
+  void accentApplied.value
+  const accent =
+    getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffd166'
   const { line, translation, romanization } = activeLines(player.lyrics?.lines ?? [], player.activeLyricIndex)
   return {
     line,
@@ -142,10 +149,7 @@ const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
     fontSize: library.settings.desktopLyricFontSize,
     showTranslation: library.settings.lyricTranslation,
     locked: library.settings.desktopLyricLocked,
-    // Read at push time rather than tracked: the accent is applied to a CSS
-    // custom property by the theme watcher, and a strip that catches up on the
-    // next lyric line is not worth a second source of truth for the colour.
-    accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffd166'
+    accent
   }
 })
 

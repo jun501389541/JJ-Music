@@ -6,7 +6,7 @@ import TrackList from '../components/TrackList.vue'
 import LocatePlaying from '../components/LocatePlaying.vue'
 import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { formatAudioSpec } from '../utils/format'
@@ -19,6 +19,13 @@ const route = useRoute()
 const selected = useDrilldown('album')
 const selectedAlbum = computed(() => albums.value.find(album => album.name === selected.value))
 const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
+/*
+ * The content view is keyed by path, so arriving here from a context-menu
+ * 转到 → 专辑 while already on this page changes only the query and does not
+ * remount. Without this the filter box would keep its old text and the click
+ * would appear to do nothing.
+ */
+watch(() => route.query.q, value => { filter.value = typeof value === 'string' ? value : '' })
 
 const albums = computed(() => {
   const needle = filter.value.trim().toLowerCase()

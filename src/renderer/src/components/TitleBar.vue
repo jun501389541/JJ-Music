@@ -19,7 +19,7 @@ const version = __APP_VERSION__
  * refresh in `afterEach` rather than a watcher on the route.
  */
 const navFlags = ref({ back: false, forward: false })
-router.afterEach(() => {
+const offNavigation = router.afterEach(() => {
   const state = router.options.history.state as { back?: string | null; forward?: string | null }
   navFlags.value = { back: Boolean(state.back), forward: Boolean(state.forward) }
 })
@@ -63,7 +63,12 @@ function runSearch(): void {
   closeSearch()
 }
 
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onPointerDown, true))
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onPointerDown, true)
+  // A global guard outlives the component that registered it, and would keep
+  // writing to this instance's state from then on.
+  offNavigation()
+})
 function systemMenu(event: MouseEvent): void { ui.openMenu(event, [
   { label: '置于顶层', checked: library.settings.alwaysOnTop, action: () => library.updateSettings({ alwaysOnTop: !library.settings.alwaysOnTop }) },
   { label: '全屏', icon: 'expand', shortcut: 'F11', action: () => jj.window.fullscreen() },

@@ -199,13 +199,28 @@ export const useLibraryStore = defineStore('library', () => {
     scheduleVerification(force)
   }
 
+  let libraryRefreshGeneration = 0
   async function refreshLibrary(): Promise<void> {
-    tracks.value = await window.jj.library.tracks()
+    const generation = ++libraryRefreshGeneration
+    const nextTracks = await window.jj.library.tracks()
+    // A scan finishing and a user action can both ask for the list at once. The
+    // later ask wins, otherwise the older reply overwrites the newer one.
+    if (generation !== libraryRefreshGeneration) return
+    tracks.value = nextTracks
   }
 
+  let playlistRefreshGeneration = 0
   async function refreshPlaylists(): Promise<void> {
-    playlists.value = await window.jj.playlists.list()
-    favorites.value = await window.jj.playlists.items('favorites')
+    const generation = ++playlistRefreshGeneration
+    const [nextPlaylists, nextFavorites] = await Promise.all([
+      window.jj.playlists.list(),
+      window.jj.playlists.items('favorites')
+    ])
+    // Read together and assigned together: awaiting the two in turn leaves the
+    // sidebar showing a new playlist list over stale favourite tracks.
+    if (generation !== playlistRefreshGeneration) return
+    playlists.value = nextPlaylists
+    favorites.value = nextFavorites
   }
 
   /**

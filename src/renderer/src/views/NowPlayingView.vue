@@ -368,16 +368,6 @@ function playArtworkFlight(): void {
       menu, and a second button of the same kind on the same surface would open
       a different list.
     -->
-    <!--
-      The now-playing view takes over the whole window, so it must carry the
-      same window controls the title bar does — otherwise the only way to
-      minimise or close is to leave this view first. "收起" (the chevron at the
-      top left) returns to the library; these buttons act on the window itself.
-
-      There is deliberately no 更多 button up here: the bottom bar owns the one
-      menu, and a second button of the same kind on the same surface would open
-      a different list.
-    -->
     <div class="np__window-actions"><WindowControls /></div>
     <div class="np__body">
       <!-- left: artwork only -->

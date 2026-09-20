@@ -20,9 +20,8 @@
  * two places. The favourite state comes from the library store, which this
  * component can read directly for the same reason it reads playback state.
  *
- * Sizes are expressed as tokens so a surface can scale the cluster without
- * forking it. Both bars render `md`: the now-playing view's bottom bar is the
- * shared PlayerBar now, so there is no second scale in use.
+ * The now-playing view's bottom bar is the shared PlayerBar now, so one scale
+ * serves both surfaces; there is no second size to fork the cluster for.
  */
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -32,18 +31,14 @@ import { useLibraryStore } from '../stores/library'
 import AppIcon from './AppIcon.vue'
 import TransportIcon from './TransportIcon.vue'
 
-const props = withDefaults(defineProps<{
-  /** Visual scale of the cluster. */
-  size?: 'md' | 'lg'
-  /** Hide the play-mode button (used where the surface has no room). */
-  hideMode?: boolean
+withDefaults(defineProps<{
   /** Show the favourite toggle inside the cluster, left of the mode button. */
   showFavorite?: boolean
   /** Show the queue button inside the cluster, right of next. */
   showQueue?: boolean
   /** Show the desktop-lyric toggle inside the cluster, right of the queue. */
   showDesktopLyric?: boolean
-}>(), { size: 'md', hideMode: false, showFavorite: false, showQueue: false, showDesktopLyric: false })
+}>(), { showFavorite: false, showQueue: false, showDesktopLyric: false })
 
 const player = usePlayerStore()
 const library = useLibraryStore()
@@ -52,9 +47,7 @@ function toggleDesktopLyric(): void {
   void library.updateSettings({ desktopLyric: !library.settings.desktopLyric })
 }
 
-const dims = computed(() => props.size === 'lg'
-  ? { side: 22, play: 24, button: 44, small: 18 }
-  : { side: 21, play: 23, button: 40, small: 17 })
+const dims = { side: 21, play: 23, button: 40, small: 17 }
 
 /**
  * One row per mode, in the order a click steps through them.
@@ -112,7 +105,7 @@ function toggleFavorite(): void {
 </script>
 
 <template>
-  <div class="transport" :class="`transport--${size}`">
+  <div class="transport">
     <button
       v-if="showFavorite"
       class="icon-btn"
@@ -126,7 +119,7 @@ function toggleFavorite(): void {
       <AppIcon name="heart" :size="dims.small" />
     </button>
 
-    <span v-if="!hideMode" class="transport__mode">
+    <span class="transport__mode">
       <button
         class="icon-btn"
         type="button"
@@ -219,30 +212,22 @@ function toggleFavorite(): void {
 </template>
 
 <style scoped>
+/*
+  The buttons are given one shared box and a wide gap, and the group carries no
+  panel of its own — it sits directly on the bar, like the reference. Previously
+  the favourite, mode and queue icons were width-less buttons around a 40 px play
+  disc, so the row read as five different heights.
+*/
 .transport {
   display: flex;
   align-items: center;
-  gap: 6px;
-}
-
-/*
-  In the compact toolbar the buttons are given one shared box and a wide gap,
-  and the group carries no panel of its own — it sits directly on the bar, like
-  the reference. Previously the favourite, mode and queue icons were width-less
-  buttons around a 40 px play disc, so the row read as five different heights.
-*/
-.transport--md {
   gap: 9px;
 }
 
-.transport--md .icon-btn {
+.transport .icon-btn {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-}
-
-.transport--lg {
-  gap: 10px;
 }
 
 /* Favourite is marked in the accent-adjacent pink the toolbar used, so the
@@ -259,7 +244,7 @@ function toggleFavorite(): void {
 
 /*
  * The mode name, in a bubble over the button. Anchored to the button rather
- * than the bar so it stays centred on the glyph at either scale, and
+ * than the bar so it stays centred on the glyph, and
  * `pointer-events: none` so a fading label can never eat a click meant for the
  * next cycle.
  */

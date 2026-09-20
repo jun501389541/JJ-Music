@@ -104,7 +104,7 @@ function openPlayingView(): void {
       buttons used to sit at the bar's edges where each surface placed them
       differently. Per the reference design they belong inside the cluster.
     -->
-    <TransportControls size="md" show-favorite show-queue show-desktop-lyric />
+    <TransportControls show-favorite show-queue show-desktop-lyric />
   </div>
   <div class="mini-side mini-side--right">
     <span class="mini-time tnum" aria-label="播放时长">{{ player.currentTrack ? `${formatTime(player.currentTime)} / ${formatTime(player.duration)}` : 'JJ Music' }}</span>

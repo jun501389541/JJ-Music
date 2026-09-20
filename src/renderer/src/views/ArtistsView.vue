@@ -6,7 +6,7 @@ import TrackList from '../components/TrackList.vue'
 import LocatePlaying from '../components/LocatePlaying.vue'
 import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 
@@ -15,6 +15,9 @@ const player = usePlayerStore()
 
 const route = useRoute()
 const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
+// Keyed by path now, so a 转到 → 艺术家 from the context menu while already on
+// this page changes only the query; without this the filter kept its old text.
+watch(() => route.query.q, value => { filter.value = typeof value === 'string' ? value : '' })
 const selected = useDrilldown('artist')
 
 const artists = computed(() => {

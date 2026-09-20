@@ -10,9 +10,21 @@
  * Everything is best-effort: a cross-origin cover that taints the canvas, or
  * any decode failure, falls back to the static accent token.
  */
+import { ref } from 'vue'
 
 /** The token value from tokens.css, restored when no cover is available. */
 const FALLBACK_ACCENT = '#4cc2ff'
+
+/**
+ * Bumped every time an accent lands on the document.
+ *
+ * Cover extraction is asynchronous, so a component that mirrors the accent
+ * somewhere else (the desktop lyric strip) cannot tell when the value it read
+ * off the CSS variable went stale. Depending on this counter is what lets it
+ * repaint on the colour change itself rather than on whatever else happens to
+ * wake it up next.
+ */
+export const accentApplied = ref(0)
 
 /** Convert sRGB to HSL so we can reason about saturation and lightness. */
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
@@ -63,6 +75,7 @@ function currentTheme(): 'dark' | 'light' {
 export function applyAccent(hex: string): void {
   const root = document.documentElement.style
   root.setProperty('--accent', hex)
+  accentApplied.value += 1
 
   // Derive hover/pressed/soft variants from the same hue so custom accents
   // behave consistently with the default.
@@ -93,6 +106,7 @@ export function resetAccent(): void {
   ]) {
     root.removeProperty(token)
   }
+  accentApplied.value += 1
   void FALLBACK_ACCENT
 }
 

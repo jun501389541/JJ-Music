@@ -693,22 +693,24 @@ try {
         `(async () => {
            const before = await window.jj.library.folders()
            const originalVolume = (await window.jj.settings.get()).volume
-           try { await window.jj.settings.update({ libraryFolders: [...before, 'C:\\\\'], volume: 0.37 }) }
+           const originalDownload = (await window.jj.settings.get()).downloadFolder
+           try { await window.jj.settings.update({ libraryFolders: [...before, 'C:\\\\'], downloadFolder: 'C:\\\\Windows', volume: 0.37 }) }
            catch (error) { return { threw: String(error?.message ?? error) } }
            const after = await window.jj.library.folders()
-           const persisted = (await window.jj.settings.get()).libraryFolders
-           const volume = (await window.jj.settings.get()).volume
+           const persisted = await window.jj.settings.get()
            await window.jj.settings.update({ volume: originalVolume })
            return {
              foldersUnchanged: JSON.stringify(before) === JSON.stringify(after),
-             persistedUnchanged: JSON.stringify(before) === JSON.stringify(persisted),
-             otherFieldApplied: volume === 0.37,
+             persistedFoldersUnchanged: JSON.stringify(before) === JSON.stringify(persisted.libraryFolders),
+             downloadUnchanged: persisted.downloadFolder === originalDownload,
+             otherFieldApplied: persisted.volume === 0.37,
              count: after.length
            }
          })()`
       )
-      check('经设置通道扩大白名单无效', widened.foldersUnchanged === true && widened.persistedUnchanged === true,
+      check('经设置通道扩大白名单无效', widened.foldersUnchanged === true && widened.persistedFoldersUnchanged === true,
         JSON.stringify(widened))
+      check('经设置通道改下载目录无效', widened.downloadUnchanged === true, `未变=${widened.downloadUnchanged}`)
       check('同一次写入的其它设置仍然生效', widened.otherFieldApplied === true, `volume=${widened.otherFieldApplied}`)
       console.log(`  伪造写入 → ${widened.threw ? '被拒：' + widened.threw : `列表 ${widened.count} 个，未变动`}`)
     }

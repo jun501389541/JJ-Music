@@ -41,7 +41,13 @@ const api = {
     add: (tracks: OnlineMusicInfo[], quality: Quality) => invoke<string[]>(IPC.downloadsAdd, tracks, quality),
     cancel: (id: string) => invoke<void>(IPC.downloadsCancel, id),
     retry: (id: string) => invoke<void>(IPC.downloadsRetry, id),
-    folder: () => invoke<string>(IPC.downloadsFolder)
+    folder: () => invoke<string>(IPC.downloadsFolder),
+    /**
+     * Pick the download directory. Takes no path and returns the stored result:
+     * the main process shows the picker and writes the setting, because this
+     * folder is where downloads and tag writes land. `null` means cancelled.
+     */
+    chooseFolder: () => invoke<string | null>(IPC.downloadsChooseFolder)
   },
   playlistImport: {
     preview: (source: SourceId, input: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input),

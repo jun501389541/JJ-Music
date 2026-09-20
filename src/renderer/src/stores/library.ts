@@ -270,6 +270,21 @@ export const useLibraryStore = defineStore('library', () => {
     await refreshLibrary()
   }
 
+  /*
+   * The download directory is picked by a dialog the main process opens, and
+   * written there — this is where downloaded audio and tag-write output land, so
+   * it must not arrive as a path the renderer names. The empty patch pulls the
+   * authoritative settings back through the writer rather than by assigning
+   * `settings.value` directly, which keeps the ordering right with any write that
+   * is still in flight.
+   */
+  async function chooseDownloadFolder(): Promise<string | null> {
+    const folder = await window.jj.downloads.chooseFolder()
+    if (folder === null) return null
+    await writeSettings({})
+    return folder
+  }
+
   async function rescan(): Promise<void> {
     scanning.value = true
     scanProgress.value = null
@@ -395,6 +410,7 @@ export const useLibraryStore = defineStore('library', () => {
     updateSettings,
     addFolder,
     removeFolder,
+    chooseDownloadFolder,
     rescan,
     importSource,
     importSourceFile,

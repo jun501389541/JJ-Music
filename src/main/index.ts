@@ -801,19 +801,20 @@ function registerIpc(): void {
   handle(IPC.settingsUpdate, async (patch: Partial<AppSettings>) => {
     const { settings } = requireServices()
     /*
-     * Folder membership is the file-access allow-list, so it is not writable
-     * through the settings channel. It changes only via the two dedicated
-     * channels, one of which shows the picker itself. This branch used to add and
-     * scan every folder a patch named, which made it the wider of the two doors:
-     * a renderer could widen access without ever calling `libraryAddFolder`.
+     * Neither of these is writable from the renderer, because both decide where
+     * the app may touch the disk: `libraryFolders` is the read allow-list, and
+     * `downloadFolder` is where downloads and tag writes land. Each has its own
+     * channel that opens the picker in this process, so a path the user chose
+     * never arrives as a claim over IPC. The `libraryFolders` branch here used to
+     * add and scan every folder a patch named, which was the wider door.
      *
-     * The key is dropped rather than the call rejected, because a caller that
-     * writes the rest of the settings in one go — a restore, a test teardown —
-     * should still succeed. The guarantee is that the allow-list cannot move
-     * through here, not that naming the field is punished. The returned `after`
-     * carries the real list, so the renderer's copy is corrected by the same call.
+     * Dropped rather than rejected, because a caller writing the rest of the
+     * settings in one go — a reset, a test teardown restoring a snapshot — must
+     * still succeed. The guarantee is that these cannot move through here, not
+     * that naming them is punished; the returned `after` carries the real values,
+     * so the renderer's copy is corrected by the same call.
      */
-    const { libraryFolders: _notWritable, ...writable } = patch
+    const { libraryFolders: _libraryFolders, downloadFolder: _downloadFolder, ...writable } = patch
     const after = await settings.update(writable)
     if (patch.displayScale !== undefined) mainWindow?.webContents.setZoomFactor(Math.min(1.25, Math.max(0.85, after.displayScale / 100)))
     if (patch.alwaysOnTop !== undefined) mainWindow?.setAlwaysOnTop(after.alwaysOnTop)
@@ -1176,6 +1177,26 @@ function registerIpc(): void {
   handle(IPC.downloadsCancel, (id: string) => requireServices().downloads.cancel(id))
   handle(IPC.downloadsRetry, (id: string) => requireServices().downloads.retry(id))
   handle(IPC.downloadsFolder, () => requireServices().settings.get().downloadFolder || join(app.getPath('downloads'), 'JJ Music'))
+
+  /*
+   * The picker runs here, and so does the write. `downloadFolder` is where
+   * downloaded audio is saved and where tag writes put their output, so a path
+   * arriving over IPC would be a claim about the user's disk rather than a folder
+   * they chose — the same shape as the library folder list, and the reason it is
+   * not a writable setting either.
+   */
+  handle(IPC.downloadsChooseFolder, async () => {
+    const current = requireServices().settings.get().downloadFolder
+    const result = await dialog.showOpenDialog({
+      title: '选择下载目录',
+      ...(current ? { defaultPath: current } : {}),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    const { settings } = requireServices()
+    await settings.update({ downloadFolder: result.filePaths[0] })
+    return settings.get().downloadFolder
+  })
   const importPreviews = new Map<string, ImportedPlaylist>()
   handle(IPC.playlistImportPreview, async (source: SourceId, input: string) => {
     if (typeof input !== 'string' || input.length > 4096) throw Error('歌单链接无效')

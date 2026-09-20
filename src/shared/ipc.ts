@@ -10,6 +10,7 @@ export const IPC = {
   downloadsCancel: 'downloads:cancel',
   downloadsRetry: 'downloads:retry',
   downloadsFolder: 'downloads:folder',
+  downloadsChooseFolder: 'downloads:choose-folder',
   playlistImportPreview: 'playlist:import-preview',
   playlistImportSave: 'playlist:import-save',
   // Window controls (frameless window)

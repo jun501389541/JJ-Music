@@ -14,7 +14,7 @@ const jj = window.jj
 const search = ref('')
 const defaultDownloadFolder = ref('系统下载目录 / JJ Music')
 void window.jj.downloads?.folder().then(path => {defaultDownloadFolder.value=path})
-async function chooseDownloadFolder(): Promise<void> { const path=await jj.dialog.openFolder();if(path)await update({downloadFolder:path}) }
+async function chooseDownloadFolder(): Promise<void> { await library.chooseDownloadFolder() }
 const section = computed(() => Array.isArray(route.params.section) ? route.params.section.join('/') : String(route.params.section || ''))
 const page = computed(() => SETTINGS_PAGES[section.value] || SETTINGS_PAGES[''])
 const crumbs = computed(() => section.value.split('/').filter(Boolean).map((_, i, parts) => { const key = parts.slice(0, i + 1).join('/'); return { key, title: SETTINGS_PAGES[key]?.title || key } }))

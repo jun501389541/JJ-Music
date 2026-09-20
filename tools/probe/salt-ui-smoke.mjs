@@ -263,8 +263,19 @@ try {
  await sleep(400)
  check('legacy EQ entry opens playback EQ', await evaluate('!!document.querySelector(".np .equalizer-content")'))
  await evaluate('uiTestPlayer.stop();uiTestUi.nowPlaying=false')
- await evaluate('uiTestLibrary.updateSettings({libraryFolders:uiTestLibrary.folders})')
- check('reactive folder settings save through IPC', await evaluate('(async () => JSON.stringify((await window.jj.settings.get()).libraryFolders) === JSON.stringify(uiTestLibrary.folders))()'))
+ await evaluate('uiTestLibrary.updateSettings({recentPlayed:uiTestLibrary.recentPlayed})')
+ check('reactive list settings save through IPC', await evaluate('(async () => JSON.stringify((await window.jj.settings.get()).recentPlayed) === JSON.stringify(uiTestLibrary.recentPlayed))()'))
+ // This check used to ride on `libraryFolders`, which was incidental — that field
+ // is now the file-access allow-list and the settings channel drops it, so the
+ // round-trip is proven with a list the renderer does own, and the allow-list is
+ // asserted not to move below.
+ const folderWrite = await evaluate(`(async () => {
+   const before = await window.jj.library.folders()
+   await window.jj.settings.update({ libraryFolders: [] })
+   const after = await window.jj.library.folders()
+   return { same: JSON.stringify(before) === JSON.stringify(after), count: after.length }
+ })()`)
+ check('设置通道改不动曲库白名单', folderWrite.same === true && folderWrite.count > 0, JSON.stringify(folderWrite))
  await evaluate('(async()=>{ const writes=[];for(let i=0;i<30;i++)writes.push(uiTestLibrary.updateSettings({volume:i/100}));await Promise.all(writes)})()')
  check('settings burst retains last input and live player state', await evaluate('(async () => Math.abs(uiTestPlayer.volume-.29)<.001 && (await window.jj.settings.get()).volume===.29)()'))
  await route('/playlists')

@@ -252,17 +252,21 @@ export const useLibraryStore = defineStore('library', () => {
     return result
   }
 
+  /*
+   * The picker lives in the main process, so no folder path is ever handed over
+   * IPC as a user choice — this list is the file-access allow-list. `null` is a
+   * cancelled dialog. Neither call writes `libraryFolders` back through settings:
+   * the main process already persists it, and that channel now refuses the field.
+   */
   async function addFolder(): Promise<void> {
-    const folder = await window.jj.dialog.openFolder()
-    if (!folder) return
-    folders.value = await window.jj.library.addFolder(folder)
-    await updateSettings({ libraryFolders: folders.value })
+    const result = await window.jj.library.addFolder()
+    if (!result) return
+    folders.value = result
     await refreshLibrary()
   }
 
   async function removeFolder(folder: string): Promise<void> {
     folders.value = await window.jj.library.removeFolder(folder)
-    await updateSettings({ libraryFolders: folders.value })
     await refreshLibrary()
   }
 

@@ -800,8 +800,21 @@ function registerIpc(): void {
   handle(IPC.settingsGet, () => requireServices().settings.get())
   handle(IPC.settingsUpdate, async (patch: Partial<AppSettings>) => {
     const { settings } = requireServices()
-    const before = settings.get()
-    const after = await settings.update(patch)
+    /*
+     * Folder membership is the file-access allow-list, so it is not writable
+     * through the settings channel. It changes only via the two dedicated
+     * channels, one of which shows the picker itself. This branch used to add and
+     * scan every folder a patch named, which made it the wider of the two doors:
+     * a renderer could widen access without ever calling `libraryAddFolder`.
+     *
+     * The key is dropped rather than the call rejected, because a caller that
+     * writes the rest of the settings in one go — a restore, a test teardown —
+     * should still succeed. The guarantee is that the allow-list cannot move
+     * through here, not that naming the field is punished. The returned `after`
+     * carries the real list, so the renderer's copy is corrected by the same call.
+     */
+    const { libraryFolders: _notWritable, ...writable } = patch
+    const after = await settings.update(writable)
     if (patch.displayScale !== undefined) mainWindow?.webContents.setZoomFactor(Math.min(1.25, Math.max(0.85, after.displayScale / 100)))
     if (patch.alwaysOnTop !== undefined) mainWindow?.setAlwaysOnTop(after.alwaysOnTop)
     if (patch.windowMaterial !== undefined && process.platform === 'win32') { mainWindow?.setBackgroundMaterial(after.windowMaterial === 'acrylic' ? 'acrylic' : after.windowMaterial === 'mica' ? 'mica' : 'none'); mainWindow?.setBackgroundColor(after.windowMaterial === 'none' ? '#1B1D26' : '#00000000') }
@@ -823,18 +836,6 @@ function registerIpc(): void {
       desktopLyrics?.sync()
     }
 
-    // Apply library folder changes immediately so the UI stays consistent.
-    if (patch.libraryFolders) {
-      const { library } = requireServices()
-      for (const folder of after.libraryFolders) {
-        if (!library.getFolders().includes(folder) && existsSync(folder)) {
-          await library.addFolder(folder)
-        }
-      }
-      for (const folder of before.libraryFolders) {
-        if (!after.libraryFolders.includes(folder) && library.getFolders().includes(folder)) await library.removeFolder(folder)
-      }
-    }
     return after
   })
 
@@ -1129,9 +1130,22 @@ function registerIpc(): void {
   /* ---------------- local library ---------------- */
   handle(IPC.libraryFolders, () => requireServices().library.getFolders())
 
-  handle(IPC.libraryAddFolder, async (folder: string) => {
+  /*
+   * The picker is opened here, not in the renderer, for the same reason
+   * `libraryImportFiles` is: this list *is* the file-access allow-list —
+   * `jjmedia://`, lyric reads and tag writes all key off it — so a folder
+   * arriving over IPC is a claim the renderer makes about the user's disk rather
+   * than something the user chose. Reproduced before this change: naming a
+   * directory made every media file under it readable.
+   */
+  handle(IPC.libraryAddFolder, async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择音乐文件夹',
+      properties: ['openDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return null
     const { library, settings } = requireServices()
-    await library.addFolder(folder, {
+    await library.addFolder(result.filePaths[0], {
       onProgress: (progress) => mainWindow?.webContents.send(IPC.libraryProgress, progress)
     })
     const folders = library.getFolders()

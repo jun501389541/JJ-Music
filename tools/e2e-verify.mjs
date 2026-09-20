@@ -677,6 +677,40 @@ try {
         realLyric.ok === true && realLyric.length > 0,
         `${realLyric.source ?? ''} ${realLyric.length ?? 0} 字 ${realLyric.message ?? ''}`
       )
+
+      /* ---------------- 5e. the allow-list cannot widen itself ---------------- */
+      console.log('\n--- 曲库文件夹白名单 ---')
+      // `libraryFolders` decides which files the app may read at all, and the
+      // settings channel used to add and scan every folder a patch named — the
+      // wider of the two doors, since it never went near the picker. The key is
+      // now dropped, so the property to assert is not "the call fails" (a caller
+      // writing the other settings in one go must still succeed) but "the
+      // allow-list did not move", checked both live and on disk.
+      // Deliberately does NOT call library.addFolder(): it now opens a modal
+      // picker, which would block this run.
+      const widened = await evaluate(
+        cdp,
+        `(async () => {
+           const before = await window.jj.library.folders()
+           const originalVolume = (await window.jj.settings.get()).volume
+           try { await window.jj.settings.update({ libraryFolders: [...before, 'C:\\\\'], volume: 0.37 }) }
+           catch (error) { return { threw: String(error?.message ?? error) } }
+           const after = await window.jj.library.folders()
+           const persisted = (await window.jj.settings.get()).libraryFolders
+           const volume = (await window.jj.settings.get()).volume
+           await window.jj.settings.update({ volume: originalVolume })
+           return {
+             foldersUnchanged: JSON.stringify(before) === JSON.stringify(after),
+             persistedUnchanged: JSON.stringify(before) === JSON.stringify(persisted),
+             otherFieldApplied: volume === 0.37,
+             count: after.length
+           }
+         })()`
+      )
+      check('经设置通道扩大白名单无效', widened.foldersUnchanged === true && widened.persistedUnchanged === true,
+        JSON.stringify(widened))
+      check('同一次写入的其它设置仍然生效', widened.otherFieldApplied === true, `volume=${widened.otherFieldApplied}`)
+      console.log(`  伪造写入 → ${widened.threw ? '被拒：' + widened.threw : `列表 ${widened.count} 个，未变动`}`)
     }
   }
 

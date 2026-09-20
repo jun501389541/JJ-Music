@@ -199,7 +199,12 @@ const api = {
     importFiles: () => invoke<number>(IPC.libraryImportFiles),
     reveal: (path: string) => invoke<void>(IPC.fileReveal, path),
     folders: () => invoke<string[]>(IPC.libraryFolders),
-    addFolder: (folder: string) => invoke<string[]>(IPC.libraryAddFolder, folder),
+    /**
+     * Pick a music folder and add it. Takes no path: the main process opens the
+     * picker itself, because this list is what decides which files the app may
+     * read. `null` means the user cancelled.
+     */
+    addFolder: () => invoke<string[] | null>(IPC.libraryAddFolder),
     removeFolder: (folder: string) => invoke<string[]>(IPC.libraryRemoveFolder, folder),
     scan: () => invoke<void>(IPC.libraryScan),
     tracks: () => invoke<LocalMusicInfo[]>(IPC.libraryTracks),

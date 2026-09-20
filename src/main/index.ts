@@ -485,6 +485,27 @@ function allowedMediaPath(path: string, extra: string[] = []): Promise<string> {
 }
 
 /**
+ * The authoritative record for a local track, taken from the index by id.
+ *
+ * Channels that touch a song's files used to accept the whole `LocalMusicInfo`
+ * from the renderer, so its `path` and `lyricPath` were only claims about a file.
+ * That was enough to read anything the user could read (see the `lyricResolve`
+ * entry in the changelog). An id is not a claim: it selects a record this process
+ * produced, and only a scan of a user-chosen folder or a file picked in a dialog
+ * ever puts one in the index.
+ *
+ * This deliberately offers no fallback to a renderer-supplied path. Any path worth
+ * accepting is already reachable through `allowedMediaPath`, so a fallback would
+ * reopen exactly the hole this closes.
+ */
+function indexedTrack(id: unknown): LocalMusicInfo {
+  if (typeof id !== 'string' || !id) throw new Error('缺少曲目 id')
+  const track = requireServices().library.get(id)
+  if (!track) throw new Error('曲目不在曲库索引中')
+  return track
+}
+
+/**
  * Serve a local file over `jjmedia://` with range support.
  *
  * Chromium's media stack issues range requests for seeking; honouring them is
@@ -1163,13 +1184,15 @@ function registerIpc(): void {
   // through remote content could read anything the user could.
   handle(IPC.lyricReadFile, async (path: string) => readLyricFile(await allowedMediaPath(path)))
 
-  // Priority order lives in the service: sidecar → embedded tag → online.
-  handle(IPC.lyricResolve, (track: LocalMusicInfo, allowOnline?: boolean) =>
-    resolveLocalLyric(track, { allowOnline: allowOnline !== false })
+  // Priority order lives in the service: sidecar → embedded tag → online. The
+  // track itself comes from the index, so no path in the resolution is one the
+  // renderer chose.
+  handle(IPC.lyricResolve, (trackId: string, allowOnline?: boolean) =>
+    resolveLocalLyric(indexedTrack(trackId), { allowOnline: allowOnline !== false })
   )
 
   // Force a fresh lookup, bypassing the cache.
-  handle(IPC.lyricSearchOnline, (track: LocalMusicInfo) => searchLyricOnline(track))
+  handle(IPC.lyricSearchOnline, (trackId: string) => searchLyricOnline(indexedTrack(trackId)))
 
   /**
    * Every credible online lyric match, so the user can pick.
@@ -1177,7 +1200,7 @@ function registerIpc(): void {
    * Returns candidates without applying any of them: the caller chooses, and
    * `lyricApplyCandidate` writes the choice.
    */
-  handle(IPC.lyricCandidates, (track: LocalMusicInfo) => lyricCandidates(track))
+  handle(IPC.lyricCandidates, (trackId: string) => lyricCandidates(indexedTrack(trackId)))
 
   /**
    * Save a chosen candidate as the track's sidecar.

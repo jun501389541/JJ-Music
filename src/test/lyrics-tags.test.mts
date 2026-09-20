@@ -9,7 +9,7 @@
  *
  * Usage: node out/test/lyrics-tags.test.mjs [folder]
  */
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -166,6 +166,19 @@ if (!existsSync(folder)) {
 
     const restored = await resolveLocalLyric(target, { force: true, allowOnline: false })
     check('falls back to embedded after sidecar removal', restored.source === 'embedded', restored.source)
+
+    // A "sidecar" that is megabytes of noise is not a sidecar. The read is capped,
+    // so whatever else guards the path, resolving lyrics cannot be talked into
+    // pulling an arbitrarily large file into memory.
+    writeFileSync(sidecarPathFor(target.path), 'x'.repeat(5 * 1024 * 1024))
+    const withHuge = await resolveLocalLyric(target, { force: true, allowOnline: false })
+    console.log(`  超大侧车: 5MB -> source=${withHuge.source}`)
+    check('oversized sidecar is ignored rather than read', withHuge.source === 'embedded', withHuge.source)
+    try {
+      unlinkSync(sidecarPathFor(target.path))
+    } catch {
+      /* best effort */
+    }
   }
 
   /* ---------------- 3. Online lyric lookup ---------------- */

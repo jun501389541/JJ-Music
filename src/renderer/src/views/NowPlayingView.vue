@@ -84,7 +84,7 @@ async function onPickLyricSource(): Promise<void> {
   pickingLyric.value = true
   lyricChoices.value = []
   try {
-    const found = await window.jj.lyric.candidates(track)
+    const found = await window.jj.lyric.candidates(track.id)
     if (found.length === 0) {
       toast.error('没有匹配到在线歌词')
       return

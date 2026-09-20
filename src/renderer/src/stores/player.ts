@@ -871,8 +871,7 @@ export const usePlayerStore = defineStore('player', () => {
       let result: ResolvedLyric
 
       if (isLocalTrack(track)) {
-        const payload = toIpcPayload(track)
-        result = await window.jj.lyric.resolve(payload, true)
+        result = await window.jj.lyric.resolve(track.id, true)
       } else {
         // Online tracks: one call resolves lyrics *and* cover art together.
         //
@@ -973,7 +972,7 @@ export const usePlayerStore = defineStore('player', () => {
     lyricLoading.value = true
     lyricError.value = null
     try {
-      const result = await window.jj.lyric.searchOnline(toIpcPayload(track))
+      const result = await window.jj.lyric.searchOnline(track.id)
       if (!isCurrent()) return false
       if (!result.lyric.trim()) {
         lyricError.value = result.note ?? '在线未匹配到歌词'

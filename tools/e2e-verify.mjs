@@ -632,6 +632,51 @@ try {
       )
       check('a path the index never held is refused', forged.accepted === false, forged.message ?? '')
       console.log(`  索引外路径: ${outside} -> ${forged.accepted ? '竟然被接受' : forged.message}`)
+
+      // The lyric channels used to take a whole track object from the renderer,
+      // which turned `track.lyricPath` into an arbitrary-file-read primitive: a
+      // forged object returned the text of any file the user could read (this was
+      // reproduced before the fix, so it is a regression guard, not a hypothesis).
+      // Two properties have to hold now: an id the index never held is refused, and
+      // the old object-shaped call is refused outright rather than coerced.
+      const forgedLyric = await evaluate(
+        cdp,
+        `(async () => {
+           const read = async (arg) => {
+             try {
+               const r = await window.jj.lyric.resolve(arg, false)
+               return { accepted: true, text: String(r?.lyric ?? '').slice(0, 24) }
+             } catch (error) { return { accepted: false, message: String(error?.message ?? error) } }
+           }
+           return {
+             unknownId: await read('e2e-no-such-track'),
+             objectShape: await read({ id: 'e2e-forged', path: ${JSON.stringify(outside)}, lyricPath: ${JSON.stringify(outside)} })
+           }
+         })()`
+      )
+      check('lyric resolve refuses an id the index never held', forgedLyric.unknownId.accepted === false, forgedLyric.unknownId.message ?? '')
+      check('lyric resolve no longer accepts a renderer-built track object', forgedLyric.objectShape.accepted === false, forgedLyric.objectShape.message ?? '')
+      console.log(`  伪造 id: ${forgedLyric.unknownId.accepted ? '竟然被接受' : forgedLyric.unknownId.message}`)
+      console.log(`  旧对象调用: ${forgedLyric.objectShape.accepted ? `竟然被接受，还读回了 ${JSON.stringify(forgedLyric.objectShape.text)}` : forgedLyric.objectShape.message}`)
+
+      // Tightening the authority must not cost the feature itself.
+      const realLyric = await evaluate(
+        cdp,
+        `(async () => {
+           const local = (await window.jj.library.tracks()).find(t => t.path)
+           if (!local) return { error: 'no local track' }
+           try {
+             const r = await window.jj.lyric.resolve(local.id, true)
+             return { ok: true, source: r?.source, length: String(r?.lyric ?? '').length }
+           } catch (error) { return { ok: false, message: String(error?.message ?? error) } }
+         })()`
+      )
+      if (realLyric.error) console.log(`  SKIP: ${realLyric.error}`)
+      check(
+        'a real indexed track still resolves lyrics',
+        realLyric.ok === true && realLyric.length > 0,
+        `${realLyric.source ?? ''} ${realLyric.length ?? 0} 字 ${realLyric.message ?? ''}`
+      )
     }
   }
 

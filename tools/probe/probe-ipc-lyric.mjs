@@ -125,13 +125,13 @@ try {
     ['lyric.resolve (local)', `(async () => {
         const t = (await window.jj.library.tracks()).find(x => x.name && x.singer)
         if (!t) return 'no track'
-        const r = await window.jj.lyric.resolve(t, true)
+        const r = await window.jj.lyric.resolve(t.id, true)
         return 'ok source=' + r.source + ' len=' + r.lyric.length
       })()`],
     ['lyric.searchOnline', `(async () => {
         const t = (await window.jj.library.tracks()).find(x => x.name && x.singer)
         if (!t) return 'no track'
-        const r = await window.jj.lyric.searchOnline(t)
+        const r = await window.jj.lyric.searchOnline(t.id)
         return 'ok source=' + r.source + ' len=' + r.lyric.length
       })()`],
     ['music.lyric (online)', `(async () => {

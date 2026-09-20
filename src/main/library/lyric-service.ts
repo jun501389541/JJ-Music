@@ -15,8 +15,7 @@
  * Manual edits are stored as a sidecar, which then wins by rule 1. That gives
  * the user a way to override any source without a separate "pinned" concept.
  */
-import { existsSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
 import type { LyricResult, LocalMusicInfo, OnlineMusicInfo } from '@shared/types'
 import type { ResolvedLyric, LyricCandidate } from '@shared/library-types'
@@ -49,10 +48,18 @@ function looksSynchronized(text: string): boolean {
   return /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(text)
 }
 
+/**
+ * Sidecars are small hand-maintained text files. `readFile` has no limit of its
+ * own, so bound the read: whatever else is guarding this path, a lyric file that
+ * claims to be hundreds of megabytes is not a lyric file.
+ */
+const SIDECAR_MAX_BYTES = 4 * 1024 * 1024
+
 /** Read a sidecar `.lrc`, tolerating the encodings these files actually use. */
 async function readSidecar(path: string): Promise<string | null> {
-  if (!existsSync(path)) return null
   try {
+    const { size } = await stat(path)
+    if (size === 0 || size > SIDECAR_MAX_BYTES) return null
     const buffer = await readFile(path)
     const utf8 = buffer.toString('utf8')
     if (!utf8.includes('\uFFFD')) return stripBom(utf8)
@@ -74,6 +81,12 @@ export function sidecarPathFor(audioPath: string): string {
  *
  * Never throws: a track with no lyrics anywhere is a normal result, reported as
  * an empty lyric plus an explanatory note.
+ *
+ * `track` must be a record this process produced — an index entry, not an object
+ * assembled from IPC. Step 1b reads `track.lyricPath` straight off disk, and the
+ * scanner is the only writer of that field; hand a renderer-built object to this
+ * function and that becomes an arbitrary file read. The IPC layer enforces this
+ * through `indexedTrack()`.
  */
 export async function resolveLocalLyric(
   track: LocalMusicInfo,

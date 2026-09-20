@@ -231,20 +231,25 @@ const api = {
     /**
      * Resolve the lyric shown for a track. The main process picks the source:
      * sidecar `.lrc` → embedded tag → online match.
+     *
+     * These three take an id rather than a track object on purpose. A track sent
+     * over the bridge carries a `path`, and the main process would then be reading
+     * a file the renderer named; an id makes it look the record up in its own
+     * index instead.
      */
-    resolve: (track: LocalMusicInfo, allowOnline = true) =>
-      invoke<ResolvedLyric>(IPC.lyricResolve, track, allowOnline),
+    resolve: (trackId: string, allowOnline = true) =>
+      invoke<ResolvedLyric>(IPC.lyricResolve, trackId, allowOnline),
     /** Look lyrics up online by the track's tags, bypassing the cache. */
-    searchOnline: (track: LocalMusicInfo) =>
-      invoke<ResolvedLyric>(IPC.lyricSearchOnline, track),
+    searchOnline: (trackId: string) =>
+      invoke<ResolvedLyric>(IPC.lyricSearchOnline, trackId),
     /**
      * Every credible online lyric match, best first.
      *
      * A metadata match is a guess, so the UI offers the alternatives rather
      * than silently committing to the highest score.
      */
-    candidates: (track: LocalMusicInfo) =>
-      invoke<LyricCandidate[]>(IPC.lyricCandidates, track),
+    candidates: (trackId: string) =>
+      invoke<LyricCandidate[]>(IPC.lyricCandidates, trackId),
     /** Save a chosen candidate as the track's sidecar `.lrc`. */
     applyCandidate: (audioPath: string, lyric: string) =>
       invoke<string>(IPC.lyricApplyCandidate, audioPath, lyric),

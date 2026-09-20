@@ -793,7 +793,10 @@ export const usePlayerStore = defineStore('player', () => {
     }
     sessionDirty = false
     const library = useLibraryStore()
-    void library.updateSettings({ lastSession: undefined }).catch(() => undefined)
+    // `null` rather than an absent key: the writer snapshots every patch through
+    // JSON, which drops undefined, so `{ lastSession: undefined }` would merge
+    // into the same batch as the snapshot `stop()` just wrote and lose to it.
+    void library.updateSettings({ lastSession: null }).catch(() => undefined)
   }
 
   /**
@@ -807,7 +810,7 @@ export const usePlayerStore = defineStore('player', () => {
    * Returns false when there is nothing usable to resume, so the caller can
    * stay quiet instead of announcing a resume that did not happen.
    */
-  async function restoreSession(session: LastSession | undefined): Promise<boolean> {
+  async function restoreSession(session: LastSession | null | undefined): Promise<boolean> {
     if (!session?.track) return false
     if (!Array.isArray(session.queue) || session.queue.length === 0) return false
 

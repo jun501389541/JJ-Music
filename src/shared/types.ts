@@ -334,8 +334,12 @@ export interface AppSettings extends UiPreferences {
    * resume point: the track, how far in, and the queue it belonged to. Merging
    * the two would mean either losing the queue or storing a position for every
    * history entry.
+   *
+   * `null` is an explicit "there is none", which is what clearing the queue
+   * writes; it has to be a value rather than an absent key because the settings
+   * writer snapshots patches through JSON, which drops undefined.
    */
-  lastSession?: LastSession
+  lastSession?: LastSession | null
   /** Preferred online quality; the engine falls back when unavailable. */
   playQuality: Quality
   /** Music library folders. */

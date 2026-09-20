@@ -380,3 +380,59 @@ test('concurrent library initialization shares reads and installs listeners only
  assert.equal(listeners,2)
  assert.equal(library.ready,true)
 })
+
+test('raising the volume is the way out of mute, which the fader cannot show', () => {
+  const player = setup()
+  player.setVolume(0.5)
+  player.toggleMute()
+  assert.equal(player.muted, true)
+  assert.equal(player.volume, 0.5, 'muting keeps the level it returns to')
+  // The toolbar draws this control as `muted ? 0 : volume`, so while muted the
+  // handle sits at zero and a drag up has to be heard as "give me sound back" —
+  // it used to set the volume, stay muted, and spring back to zero.
+  player.setVolume(0.62)
+  assert.equal(player.muted, false)
+  assert.equal(player.volume, 0.62)
+  // Dragging to silence is not a request for sound.
+  player.toggleMute()
+  player.setVolume(0)
+  assert.equal(player.muted, true)
+})
+
+test('clearing the queue discards its resume point and its sleep timer', async () => {
+  const player = setup()
+  const library = useLibraryStore()
+  const patches = []
+  window.jj.settings = {
+    get: async () => library.settings,
+    update: async patch => {
+      patches.push(JSON.parse(JSON.stringify({ ...patch, hadKey: 'lastSession' in patch })))
+      return Object.assign(library.settings, patch)
+    }
+  }
+  // Nothing in this path should be waiting on a real timer, and a 30 minute one
+  // left armed would hold the suite open, so they are recorded rather than run.
+  const realSetTimeout = globalThis.setTimeout, realClearTimeout = globalThis.clearTimeout
+  const armed = new Map()
+  let timerId = 0
+  globalThis.setTimeout = (fn, ms) => { armed.set(++timerId, ms); return timerId }
+  globalThis.clearTimeout = id => { armed.delete(id) }
+  try {
+    await player.playQueue([local('a'), local('b')])
+    player.setSleepMinutes(30)
+    assert.ok(player.sleepAt, 'the countdown label the settings row shows')
+    assert.ok([...armed.values()].includes(30 * 60_000), 'a 30 minute timer is what arms it')
+    player.clearQueue()
+    await flush()
+    assert.equal(player.sleepAt, null)
+    assert.ok(![...armed.values()].includes(30 * 60_000), 'the timer is disarmed, not just the label')
+    // `stop()` snapshots the session before anything is cleared, so what decides
+    // the next launch is the last write: it has to carry no resume point.
+    const last = patches[patches.length - 1]
+    assert.equal(last.hadKey, true, 'the patch names lastSession')
+    assert.equal(last.lastSession, null)
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+})

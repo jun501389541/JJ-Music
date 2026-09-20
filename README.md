@@ -2,19 +2,19 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.1.6** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.1.7** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.6/JJ-Music-0.1.6-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.6/JJ-Music-0.1.6-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.6/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.7/JJ-Music-0.1.7-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.7/JJ-Music-0.1.7-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.7/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。更新前请先退出旧版；安装版和免安装版默认共用当前用户的配置。
 
-0.1.1 至 0.1.5 的 Windows 包在部分电脑上无法启动音源（在线播放随之失效），请使用 0.1.6。
+0.1.1 至 0.1.5 的 Windows 包在部分电脑上无法启动音源（在线播放随之失效），请使用 0.1.6 及以后版本。
 
 ## 功能
 
@@ -24,6 +24,7 @@
 | 发现音乐 | 最近播放、曲库概览 |
 | 全局搜索 | 本地结果优先，支持 QQ、网易云、酷狗、酷我、咪咕在线搜索 |
 | 播放界面 | 封面、歌词、频谱、播放列表、EQ、播放速度、睡眠定时 |
+| 桌面歌词 | 应用之外的置顶悬浮窗显示当前歌词行，可拖动、锁定穿透、四档字号 |
 | 音源管理 | 导入 LX Music 自定义音源协议兼容脚本；自动抽测平台状态 |
 | 在线下载 | 选择音源支持的音质、批量下载、进度、取消、失败重试、同名文件保护 |
 | 歌词与标签 | LRC 保存，MP3 / FLAC 嵌入歌词及封面，包含平台提供的翻译和罗马音 |
@@ -59,9 +60,9 @@
 打包输出：
 
     release/
-      JJ-Music-0.1.6-Setup-x64.exe
-      JJ-Music-0.1.6-Portable-x64.zip
-      SHA256SUMS.txt
+      JJ-Music-0.1.7-Setup-x64.exe
+      JJ-Music-0.1.7-Portable-x64.zip
+      SHA256SUMS.txt          # 由 npm run dist 生成，只列本次版本的两个文件
       win-unpacked/
 
 npm 缓存放在 `.cache`。Electron 与打包工具的二进制镜像改为通过环境变量配置（`ELECTRON_MIRROR`、`ELECTRON_BUILDER_BINARIES_MIRROR`），不再写入 `.npmrc`，因此默认从 GitHub Releases 获取；下载不通时按上面的变量指定镜像即可。打包脚本会先重新构建源码，并清除测试环境开关。

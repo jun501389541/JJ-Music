@@ -6,8 +6,8 @@ import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
 import { useViewState } from '../composables/view-state'
-import AppIcon from '../components/AppIcon.vue'
 import TrackList from '../components/TrackList.vue'
+import LocatePlaying from '../components/LocatePlaying.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
 
 const library = useLibraryStore()
@@ -149,16 +149,6 @@ async function playAll(): Promise<void> {
         </p>
       </div>
       <div class="actions">
-        <button
-          class="btn"
-          type="button"
-          :disabled="!player.currentTrack"
-          title="定位到正在播放的曲目"
-          @click="locateCurrent"
-        >
-          <AppIcon name="play" :size="15" />
-          <span>当前播放</span>
-        </button>
         <button class="btn" type="button" @click="library.importFiles()">导入文件</button>
         <button class="btn" type="button" @click="$router.push('/music-library')"><span>管理音乐库</span></button>
         <button class="btn" type="button" :disabled="library.scanning" @click="scan">
@@ -218,6 +208,8 @@ async function playAll(): Promise<void> {
       @play="(_track, index) => playAt(index)"
       @match="openMatch"
     />
+
+    <LocatePlaying v-if="player.currentTrack" @locate="locateCurrent" />
 
     <TagMatchDialog
       v-if="matching"

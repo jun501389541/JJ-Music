@@ -7,11 +7,12 @@
  * already lived, so the folder branch was removed rather than left as dead code
  * behind a route that no longer exists.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import TrackList from '../components/TrackList.vue'
+import LocatePlaying from '../components/LocatePlaying.vue'
 import AppIcon from '../components/AppIcon.vue'
 const route = useRoute(), router = useRouter(), library = useLibraryStore(), player = usePlayerStore()
 const selected = computed(() => typeof route.query.q === 'string' ? route.query.q : '')
@@ -25,15 +26,26 @@ const groups = computed(() => {
 })
 const tracks = computed(() => library.tracks.filter(track => (track.genre || '未知流派') === selected.value))
 function open(q: string) { void router.push({ path: route.path, query: q ? { q } : {} }) }
+
+const trackList = ref<{ reveal: (index: number) => void } | null>(null)
+const playingIndex = computed(() => {
+  const current = player.currentTrack
+  return current && selected.value ? tracks.value.findIndex(track => track.id === current.id) : -1
+})
+function revealPlaying(): void {
+  if (playingIndex.value >= 0) trackList.value?.reveal(playingIndex.value)
+}
 </script>
 <template>
   <div class="view collection-view">
-    <header class="view__header"><div><h1 class="view__title">流派</h1><p class="view__subtitle">{{ selected || `${groups.length} 个流派` }}</p></div><button v-if="selected" class="btn" @click="open('')">返回全部</button></header>
+    <header class="view__header"><div><h1 class="view__title">流派</h1><p class="view__subtitle">{{ selected || `${groups.length} 个流派` }}</p></div><div v-if="selected" class="header-actions"><button class="btn btn--primary" type="button" :disabled="tracks.length === 0" @click="player.playQueue(tracks, 0)">播放全部</button><button class="btn" type="button" @click="open('')">返回全部</button></div></header>
     <div v-if="!selected" class="collection-grid"><button v-for="group in groups" :key="group.key" class="collection-card" @click="open(group.key)"><span><AppIcon name="genre" :size="32" /></span><strong>{{ group.name }}</strong><small>{{ group.count }} 首歌曲</small></button></div>
-    <TrackList v-if="selected" :tracks="tracks" @play="(_, index) => player.playQueue(tracks, index)" />
+    <TrackList v-if="selected" ref="trackList" :tracks="tracks" @play="(_, index) => player.playQueue(tracks, index)" />
     <div v-if="!groups.length && !selected" class="empty"><span class="empty__title">还没有音乐</span><button class="btn" @click="router.push('/music-library')">添加音乐文件夹</button></div>
+    <LocatePlaying v-if="playingIndex >= 0" @locate="revealPlaying" />
   </div>
 </template>
 <style scoped>
+.header-actions{display:flex;gap:8px;align-items:center}
 .collection-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:16px;margin:22px 0}.collection-card{display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:22px;background:var(--bg-panel);color:var(--text-primary);border:1px solid var(--border-subtle);border-radius:8px;text-align:left;font:inherit;cursor:pointer;min-width:0}.collection-card:hover{background:var(--bg-hover)}.collection-card>span{color:var(--accent);margin-bottom:20px}.collection-card strong{font-weight:500;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.collection-card small{font-size:11px;color:var(--text-secondary)}
 </style>

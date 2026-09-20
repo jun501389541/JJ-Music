@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /** Artist list built from local tags. */
 import { toMediaUrl } from '@shared/media-url'
+import type { LocalMusicInfo, PlayableTrack } from '@shared/types'
+import TrackList from '../components/TrackList.vue'
+import LocatePlaying from '../components/LocatePlaying.vue'
 import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
 import { computed, ref } from 'vue'
-import type { LocalMusicInfo } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
-import TrackList from '../components/TrackList.vue'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
@@ -31,10 +32,21 @@ function coverOf(tracks: LocalMusicInfo[]): string | null {
   return encoded
 }
 
-async function playArtist(index: number): Promise<void> {
-  const artist = artists.value[index]
-  if (!artist) return
-  await player.playQueue(artist.tracks, 0)
+async function playArtist(tracks: PlayableTrack[]): Promise<void> {
+  await player.playQueue(tracks, 0)
+}
+
+const trackList = ref<{ reveal: (index: number) => void } | null>(null)
+
+/* Only offer to locate a track that is actually in this artist's list. */
+const playingIndex = computed(() => {
+  const current = player.currentTrack
+  if (!current || !selectedArtist.value) return -1
+  return selectedArtist.value.tracks.findIndex((track) => track.id === current.id)
+})
+
+function revealPlaying(): void {
+  if (playingIndex.value >= 0) trackList.value?.reveal(playingIndex.value)
 }
 </script>
 
@@ -45,7 +57,12 @@ async function playArtist(index: number): Promise<void> {
         <h1 class="view__title">{{ selectedArtist?.name || '艺术家' }}</h1>
         <p class="view__subtitle">{{ selectedArtist ? `${selectedArtist.tracks.length} 首歌曲` : `${artists.length} 位艺术家` }}</p>
       </div>
-      <button v-if="selectedArtist" class="btn" @click="selected = null">返回艺术家</button>
+      <div v-if="selectedArtist" class="header-actions">
+        <button class="btn btn--primary" type="button" :disabled="selectedArtist.tracks.length === 0" @click="playArtist(selectedArtist.tracks)">
+          播放全部
+        </button>
+        <button class="btn" type="button" @click="selected = null">返回艺术家</button>
+      </div>
       <input v-else v-model="filter" class="input" type="search" placeholder="筛选艺术家…" />
     </header>
 
@@ -58,6 +75,7 @@ async function playArtist(index: number): Promise<void> {
     -->
     <TrackList
       v-if="selectedArtist"
+      ref="trackList"
       :tracks="selectedArtist.tracks"
       :show-album="true"
       @play="(_track, index) => player.playQueue(selectedArtist!.tracks, index)"
@@ -69,12 +87,11 @@ async function playArtist(index: number): Promise<void> {
 
     <div v-else class="grid-cards">
       <button
-        v-for="(artist, index) in artists"
+        v-for="artist in artists"
         :key="artist.name"
         class="artist"
         type="button"
         @click="selected = artist.name"
-        @dblclick="playArtist(index)"
       >
         <div class="artist__art">
           <img v-if="coverOf(artist.tracks)" :src="coverOf(artist.tracks)!" alt="" loading="lazy" />
@@ -92,10 +109,18 @@ async function playArtist(index: number): Promise<void> {
         <span class="artist__count tnum">{{ artist.tracks.length }} 首</span>
       </button>
     </div>
+
+    <LocatePlaying v-if="playingIndex >= 0" @locate="revealPlaying" />
   </div>
 </template>
 
 <style scoped>
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .artist {
   display: flex;
   flex-direction: column;

@@ -58,8 +58,6 @@ class FakeAudioContext {
 }
 globalThis.Audio = FakeAudio
 globalThis.MediaError = { MEDIA_ERR_ABORTED: 1, MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 }
-globalThis.requestAnimationFrame = () => 1
-globalThis.cancelAnimationFrame = () => {}
 
 let store
 function setup() {
@@ -67,6 +65,11 @@ function setup() {
   FakeAudio.instances = []
   globalThis.window = {
     AudioContext: FakeAudioContext,
+    // The engine samples playback position on a timer. Kept inert: no test
+    // asserts on the progress loop, and letting it tick for real would emit
+    // 'progress' after the test body has finished.
+    setInterval: () => 1,
+    clearInterval: () => {},
     jj: {
       music: { url: async () => ({ url: 'https://test/audio', quality: '320k' }), enrich: async track => track },
       lyric: { resolve: async () => emptyLyric, searchOnline: async () => emptyLyric, importFile: async () => null },

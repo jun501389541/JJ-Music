@@ -26,6 +26,9 @@ import {
   type LoadOptions
 } from '@shared/audio-engine'
 
+/** How often the position loop samples the element. See `startProgressLoop`. */
+const PROGRESS_INTERVAL_MS = 200
+
 export class WebAudioEngine implements AudioEngine {
   readonly capabilities: AudioEngineCapabilities = {
     id: 'webaudio',
@@ -56,7 +59,7 @@ export class WebAudioEngine implements AudioEngine {
     volumeChange: new Set()
   }
 
-  private rafId: number | null = null
+  private progressTimer: number | null = null
   private volume = 0.8
   private muted = false
   private equalizerGains = new Array(EQUALIZER_BANDS.length).fill(0)
@@ -424,19 +427,25 @@ export class WebAudioEngine implements AudioEngine {
    * Progress loop
    * ------------------------------------------------------------ */
 
+  /**
+   * This loop used to ride `requestAnimationFrame`, and Chromium stops handing
+   * frames to a hidden window. Closing the player to the tray therefore froze the
+   * progress bar and the derived lyric index while the audio kept playing — which
+   * is precisely the case the desktop lyric strip exists for. A timer survives
+   * that (throttled to roughly 1 Hz in a background window, which is more than
+   * enough for a position readout that is only ever shown on the overlay).
+   */
   private startProgressLoop(): void {
-    if (this.rafId !== null) return
-    const tick = (): void => {
+    if (this.progressTimer !== null) return
+    this.progressTimer = window.setInterval(() => {
       this.emit('progress', this.getCurrentTime(), this.getDuration())
-      this.rafId = requestAnimationFrame(tick)
-    }
-    this.rafId = requestAnimationFrame(tick)
+    }, PROGRESS_INTERVAL_MS)
   }
 
   private stopProgressLoop(): void {
-    if (this.rafId === null) return
-    cancelAnimationFrame(this.rafId)
-    this.rafId = null
+    if (this.progressTimer === null) return
+    clearInterval(this.progressTimer)
+    this.progressTimer = null
   }
 
   destroy(): void {

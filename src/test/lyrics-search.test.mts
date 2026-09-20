@@ -9,7 +9,7 @@
 const { parseLyrics, activeLineIndex, stripTimestamps } = await import(
   './renderer/audio/lyrics.js'
 )
-const { searchOnline, searchProviders, hasSearchProvider, miguSongToInfo } = await import(
+const { searchOnline, searchProviders, hasSearchProvider, miguSongToInfo, parseObjectLiteral } = await import(
   './online/search.js'
 )
 
@@ -117,6 +117,42 @@ check('lyric with no timestamps yields no lines', parseLyrics('just text').lines
 check('stripping timestamps removes tags', !stripTimestamps(basic).includes('['))
 check('stripping keeps the text', stripTimestamps(basic).includes('故事的小黄花'))
 check('metadata-only lyric yields no lines', parseLyrics('[ti:x]\n[ar:y]').lines.length === 0)
+
+/* ------------------------------------------------------------------ *
+ * 5b. Object-literal parser sandbox
+ *
+ * `parseObjectLiteral` evaluates text that came back from a third-party
+ * endpoint. The only thing standing between that payload and the main process
+ * is the shape of the sandbox object, so this is the one place a regression can
+ * be caught: change `Object.create(null)` to `{}` and the escape check goes
+ * red with a real pid in the message.
+ * ------------------------------------------------------------------ */
+
+console.log('\n--- kuwo literal parser (offline) ---')
+const literal = parseObjectLiteral("{'a':1,'b':'x'}")
+check('parses a single-quoted JS literal', literal.a === 1 && literal.b === 'x', JSON.stringify(literal))
+const nested = parseObjectLiteral("{'a':{'b':[1,2]}}")
+check('parses nested literals', nested.a.b.length === 2, JSON.stringify(nested))
+
+/*
+ * The real chain: `(function(){return this})()` yields the context's global
+ * proxy, `.constructor` is `Object`, and `Object.constructor` is `Function`.
+ * Those last two resolve through the *sandbox object's* prototype, so a plain
+ * `{}` hands back the main process's own realm and the compiled body can read
+ * `process`. `Object.create(null)` has no such chain — the lookup throws.
+ */
+const ESCAPE_ATTEMPT = "({ pid: (function () { return this })().constructor.constructor('return process.pid')() })"
+let leaked
+try {
+  leaked = parseObjectLiteral(ESCAPE_ATTEMPT).pid
+} catch {
+  leaked = null
+}
+check(
+  'a response body cannot reach the host process',
+  leaked === null || leaked === undefined,
+  `sandbox leaked process.pid = ${leaked}`
+)
 
 /* ------------------------------------------------------------------ *
  * 6. Search providers

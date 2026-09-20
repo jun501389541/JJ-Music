@@ -74,8 +74,14 @@ async function httpGet(url: string, options: FetchOptions = {}): Promise<string>
  * JSON. Evaluating it in an empty `vm` context with a short timeout parses it
  * without exposing any globals to the payload, which a bare `new Function`
  * would.
+ *
+ * The sandbox must stay a null-prototype object. A plain `{}` is contextified
+ * over the *host* realm's `Object.prototype`, so `this.constructor.constructor`
+ * becomes the main process's own `Function` and the response text — which is
+ * someone else's bytes — could read `process`. Exported so the offline suite
+ * pins that; see `lyrics-search.test.mts`.
  */
-function parseObjectLiteral(text: string): unknown {
+export function parseObjectLiteral(text: string): unknown {
   const sandbox = Object.create(null) as Record<string, unknown>
   return vm.runInNewContext(`(${text})`, sandbox, { timeout: 1000 })
 }

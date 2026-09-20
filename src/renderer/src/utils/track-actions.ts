@@ -1,4 +1,5 @@
 import { isLocalTrack, LX_QUALITIES, QUALITY_LABELS, type OnlineMusicInfo, type PlayableTrack } from '@shared/types'
+import { DESKTOP_LYRIC_FONTS } from '@shared/desktop-lyric'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -43,11 +44,23 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
 }
 
 export function playbackActions(): MenuItem[] {
-  const player = usePlayerStore(), ui = useUiStore()
+  const player = usePlayerStore(), ui = useUiStore(), library = useLibraryStore()
+  const settings = library.settings
   return [
     { label: '播放模式', icon: 'list', children: (['list', 'repeat', 'single', 'random'] as const).map((mode, index) => ({ label: ['顺序播放', '列表循环', '单曲循环', '随机播放'][index], checked: player.playMode === mode, action: () => player.setPlayMode(mode) })) },
     { label: '播放速度', icon: 'audio', children: [0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => ({ label: `${rate} ×`, checked: player.rate === rate, action: () => player.setRate(rate) })) },
     { label: '睡眠定时', icon: 'clock', children: [0, 15, 30, 45, 60, 90].map(minutes => ({ label: minutes ? `${minutes} 分钟后停止` : '关闭定时', checked: !minutes && !player.sleepAt, action: () => player.setSleepMinutes(minutes) })) },
+    /*
+     * The overlay's own right-click menu carries these too, but only while it is
+     * unlocked — a locked strip ignores the mouse, so without a copy in the app
+     * there would be no way back from 锁定位置 except turning the feature off.
+     */
+    { label: '桌面歌词', icon: 'lyrics', children: [
+      { label: '显示桌面歌词', checked: settings.desktopLyric, action: () => void library.updateSettings({ desktopLyric: !settings.desktopLyric }) },
+      { label: '锁定位置', disabled: !settings.desktopLyric, checked: settings.desktopLyricLocked, action: () => void library.updateSettings({ desktopLyricLocked: !settings.desktopLyricLocked }) },
+      { label: '显示翻译', checked: settings.lyricTranslation, action: () => void library.updateSettings({ lyricTranslation: !settings.lyricTranslation }) },
+      { label: '字号', children: DESKTOP_LYRIC_FONTS.map(font => ({ label: font.label, checked: settings.desktopLyricFontSize === font.size, action: () => void library.updateSettings({ desktopLyricFontSize: font.size }) })) }
+    ] },
     { label: '', separator: true },
     { label: 'EQ 均衡器', icon: 'audio', action: () => { ui.nowPlaying = true; ui.playbackPanel = 'eq' } },
     { label: '播放列表', icon: 'list', action: () => { ui.nowPlaying = true; ui.playbackPanel = 'queue' } },

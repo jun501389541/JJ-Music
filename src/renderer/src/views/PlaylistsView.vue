@@ -65,7 +65,7 @@ async function remove(id: string, name: string): Promise<void> {
 
     <div class="grid-cards">
       <div
-        v-for="list in library.playlists"
+        v-for="list in library.orderedPlaylists"
         :key="list.id"
         class="plcard"
         @dblclick="router.push(`/playlist/${list.id}`)"

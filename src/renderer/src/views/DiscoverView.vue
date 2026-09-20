@@ -4,14 +4,10 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
-import TrackList from '../components/TrackList.vue'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
 const router = useRouter()
-
-/** Resolve local history against the current index to keep tags and paths current. */
-const recent = computed(() => library.recentPlayed.map(track => 'path' in track ? library.tracksById.get(track.id) : track).filter((track): track is NonNullable<typeof track> => !!track).slice(0, 50))
 
 const totalDuration = computed(() => {
   const seconds = library.tracks.reduce((sum, track) => sum + (track.duration ?? 0), 0)
@@ -118,17 +114,6 @@ async function shuffleAll(): Promise<void> {
           </div>
         </li>
       </ol>
-    </section>
-
-    <section class="recent">
-      <h2 class="section__title">最近播放</h2>
-      <p v-if="!recent.length" class="view__subtitle">还没有播放记录，播放一首喜欢的音乐后会显示在这里。</p>
-      <TrackList v-else
-        :tracks="recent"
-        :show-album="false"
-        :show-spec="true"
-        @play="(_track, index) => player.playQueue(recent, index)"
-      />
     </section>
   </div>
 </template>

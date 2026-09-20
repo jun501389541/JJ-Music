@@ -1,0 +1,89 @@
+/**
+ * The desktop-lyric strip.
+ *
+ * The window is transparent and frameless, so everything here has to survive
+ * being drawn over an arbitrary desktop: a light wallpaper behind white text is
+ * the failure case, which is why the legibility comes from a dark stroke that
+ * travels with the font size rather than from a background panel.
+ */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Segoe UI Variable', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: grab;
+}
+
+/* A locked window ignores the mouse entirely, so the cursor never reaches it —
+   this only covers the frame between locking and the setting taking effect. */
+body.is-locked {
+  cursor: default;
+}
+
+.lyric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  padding: 0 10px;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.lyric.is-grabbing {
+  cursor: grabbing;
+}
+
+.lyric__line {
+  font-size: var(--lyric-size, 28px);
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: .01em;
+  color: var(--lyric-accent, #ffd166);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  /*
+   * A stroke rather than a shadow: `paint-order: stroke` puts the outline behind
+   * the fill, so the glyph edges stay crisp on both a black wallpaper and a
+   * white one. A drop shadow alone disappears on a light desktop.
+   */
+  -webkit-text-stroke: 1px rgba(0, 0, 0, .72);
+  paint-order: stroke fill;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
+}
+
+/* The title/artist placeholder stands in until the first lyric timestamp, and
+   must not be mistaken for a lyric line. */
+.lyric__line.is-fallback {
+  color: #fff;
+  opacity: .72;
+  font-weight: 600;
+  font-size: calc(var(--lyric-size, 28px) * .62);
+}
+
+.lyric__sub {
+  font-size: calc(var(--lyric-size, 28px) * .56);
+  line-height: 1.2;
+  font-weight: 500;
+  color: #fff;
+  opacity: .82;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  -webkit-text-stroke: 1px rgba(0, 0, 0, .6);
+  paint-order: stroke fill;
+}

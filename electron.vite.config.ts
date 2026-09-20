@@ -81,7 +81,14 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve('src/renderer/index.html') }
+        input: {
+          index: resolve('src/renderer/index.html'),
+          // The desktop-lyric strip is a second entry rather than a route in the
+          // Vue app: mounting the app would mount the player store, the session
+          // restore and the settings watchers into a window that only draws one
+          // line of text.
+          'desktop-lyrics': resolve('src/renderer/desktop-lyrics.html')
+        }
       }
     },
     plugins: [vue()]

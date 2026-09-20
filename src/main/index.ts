@@ -42,6 +42,8 @@ import {
 } from './library/lyric-service'
 import { matchMetadata, lyricsForMatch } from './library/metadata-match'
 import { writeTags, canWriteTags, type TagPatch } from './library/tag-writer'
+import { DesktopLyrics } from './desktop-lyrics'
+import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 
 const __dirname_ = dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged
@@ -105,6 +107,8 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 let mainWindow: BrowserWindow | null = null
+/** The desktop-lyric overlay; created once IPC is registered. */
+let desktopLyrics: DesktopLyrics | undefined
 let tray: Tray | null = null
 /**
  * Set while the app is genuinely quitting, so the window's `close` handler
@@ -524,13 +528,23 @@ function registerMediaProtocol(): void {
  * IPC
  * ------------------------------------------------------------------ */
 
+/**
+ * True when `event` came from the main window's own top-level frame.
+ *
+ * Shared by the invoke wrapper and the overlay's send-only channels so there is
+ * one definition of "the app's renderer" rather than a copy per channel.
+ */
+function fromMainWindow(event: { sender: Electron.WebContents; senderFrame: Electron.WebFrameMain | null }): boolean {
+  return !!mainWindow
+    && event.sender === mainWindow.webContents
+    && event.senderFrame === mainWindow.webContents.mainFrame
+}
+
 /** Wrap a handler so every rejection becomes a typed `IpcResult`. */
 function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): void {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
-      if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
-        throw new Error('不允许的 IPC 来源')
-      }
+      if (!fromMainWindow(event)) throw new Error('不允许的 IPC 来源')
       return ok(await fn(...(args as never[])))
     } catch (error) {
       return fail(error)
@@ -587,6 +601,30 @@ function relaxCorsForMedia(): void {
 }
 
 function registerIpc(): void {
+  /* ---------------- desktop lyrics ---------------- */
+  /*
+   * The overlay is the one window that is not the app: it draws a line of text
+   * over whatever else is on screen. It therefore gets three send-only channels
+   * of its own rather than access to `handle()`, whose gate would reject it, and
+   * it never reads settings or touches the library — the lyric line arrives
+   * pushed from the main window, and its menu's choices go back to that same
+   * window to be written as ordinary preferences.
+   */
+  desktopLyrics = new DesktopLyrics({
+    mainWindow: () => mainWindow,
+    settings: () => requireServices().settings.get(),
+    forward: (command: DesktopLyricCommand) => {
+      mainWindow?.webContents.send(IPC.desktopLyricCommand, command)
+    },
+    isDev
+  })
+
+  ipcMain.on(IPC.desktopLyricState, (event, payload: DesktopLyricPayload) => {
+    if (fromMainWindow(event)) desktopLyrics?.push(payload)
+  })
+  ipcMain.on(IPC.desktopLyricMenu, event => desktopLyrics?.openMenu(event))
+  ipcMain.on(IPC.desktopLyricDrag, (event, position: unknown) => desktopLyrics?.dragTo(event, position))
+
   /* ---------------- window controls ---------------- */
   handle(IPC.windowMinimize, () => mainWindow?.minimize())
   handle(IPC.windowMaximize, () => {
@@ -732,6 +770,17 @@ function registerIpc(): void {
     if (patch.minimizeToTray !== undefined) {
       if (after.minimizeToTray) ensureTray()
       else destroyTray()
+    }
+
+    /*
+     * The lyric overlay's whole existence is derived from these four, so this is
+     * the one place that opens and closes it — which is what lets the toolbar's
+     * 词 button, the 更多 menu and the overlay's own menu all just write a
+     * preference instead of each managing a window.
+     */
+    if (patch.desktopLyric !== undefined || patch.desktopLyricLocked !== undefined
+      || patch.desktopLyricFontSize !== undefined || patch.desktopLyricPosition !== undefined) {
+      desktopLyrics?.sync()
     }
 
     // Apply library folder changes immediately so the UI stays consistent.
@@ -1333,6 +1382,8 @@ if (!app.requestSingleInstanceLock()) {
 
     // Restore the tray if the user had it enabled in a previous session.
     if (services.settings.get().minimizeToTray) ensureTray()
+    // Likewise the lyric overlay, if it was left on.
+    desktopLyrics?.sync()
 
     // Sources are started after the window exists so init errors can be shown.
     void services.sourceEngine.startAll()

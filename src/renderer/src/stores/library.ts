@@ -71,25 +71,56 @@ export const useLibraryStore = defineStore('library', () => {
   const searchTracks = (query: string) => searchIndex.value(query)
 
   /** Local tracks grouped by album, for the albums grid. */
+  /*
+   * Grouped on the album title alone. Keying on title plus artist split one
+   * record into several cards, because a track's `singer` field credits whoever
+   * sings that track: 天外来物 came out as four albums (薛之谦, 薛之谦/郁可唯,
+   * 薛之谦/郭聪明, 薛之谦/韩红) and a soundtrack like 天台爱情 as eleven. The
+   * cost of grouping by title is that two artists who happen to share an album
+   * name land in one card — rarer, and still reachable from the artist page.
+   */
+  const FEATURED = /[/、,，;&＆()（）]/
+  const primaryArtist = (singer: string): string => (singer.split(FEATURED)[0] ?? '').trim()
+
+  /** The credit that names the album: whoever sings most of it. */
+  function dominantCredit(tracks: LocalMusicInfo[]): string {
+    const tally = new Map<string, number>()
+    for (const track of tracks) {
+      const credit = primaryArtist(track.singer) || '未知艺术家'
+      tally.set(credit, (tally.get(credit) ?? 0) + 1)
+    }
+    let best = '未知艺术家'
+    let most = 0
+    for (const [credit, count] of tally) {
+      if (count > most) {
+        best = credit
+        most = count
+      }
+    }
+    return best
+  }
+
   const albums = computed(() => {
-    const map = new Map<
-      string,
-      { name: string; singer: string; coverPath?: string; tracks: LocalMusicInfo[] }
-    >()
+    const grouped = new Map<string, { name: string; coverPath?: string; tracks: LocalMusicInfo[] }>()
     for (const track of tracks.value) {
-      const key = `${track.albumName ?? '未知专辑'}::${track.singer}`
-      const entry = map.get(key)
-      if (entry) entry.tracks.push(track)
-      else {
-        map.set(key, {
-          name: track.albumName ?? '未知专辑',
-          singer: track.singer,
+      const name = track.albumName || '未知专辑'
+      const entry = grouped.get(name)
+      if (entry) {
+        entry.tracks.push(track)
+        // The first track of an album is often a promo without embedded art, so
+        // take the cover from whichever track has one.
+        if (!entry.coverPath && track.coverPath) entry.coverPath = track.coverPath
+      } else {
+        grouped.set(name, {
+          name,
           ...(track.coverPath ? { coverPath: track.coverPath } : {}),
           tracks: [track]
         })
       }
     }
-    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    return [...grouped.values()]
+      .map(album => ({ ...album, singer: dominantCredit(album.tracks) }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
   })
 
   /** Local tracks grouped by artist. */
@@ -176,6 +207,32 @@ export const useLibraryStore = defineStore('library', () => {
     playlists.value = await window.jj.playlists.list()
     favorites.value = await window.jj.playlists.items('favorites')
   }
+
+  /**
+   * The two built-in lists. They always lead the playlist block and are never
+   * draggable, which is what keeps a reordered list from pushing 默认列表 down
+   * into the user playlists.
+   */
+  const PINNED_PLAYLISTS = ['favorites', 'default']
+
+  /**
+   * Playlists in sidebar order: the built-in pair, then the user's own lists
+   * following `settings.playlistOrder`.
+   *
+   * Ids absent from that array sort last rather than being dropped, so a newly
+   * created playlist still shows up even though nothing has ordered it yet.
+   * `Array.prototype.sort` is stable, so several unordered playlists keep the
+   * order the playlist store gave them.
+   */
+  const orderedPlaylists = computed<Playlist[]>(() => {
+    const rank = (list: Playlist): number => {
+      const pinned = PINNED_PLAYLISTS.indexOf(list.id)
+      if (pinned >= 0) return pinned
+      const index = settings.value.playlistOrder.indexOf(list.id)
+      return PINNED_PLAYLISTS.length + (index < 0 ? Number.MAX_SAFE_INTEGER : index)
+    }
+    return playlists.value.slice().sort((a, b) => rank(a) - rank(b))
+  })
 
   function recordPlayed(track: PlayableTrack): void {
     const snapshot = JSON.parse(JSON.stringify(track)) as PlayableTrack
@@ -310,6 +367,8 @@ export const useLibraryStore = defineStore('library', () => {
     tracksById,
     searchTracks,
     playlists,
+    orderedPlaylists,
+    pinnedPlaylistIds: PINNED_PLAYLISTS,
     favorites,
     recentPlayed,
     recordPlayed,

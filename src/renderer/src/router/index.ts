@@ -23,6 +23,12 @@ export const router = createRouter({
       meta: { title: '搜索' }
     },
     {
+      path: '/recent',
+      name: 'recent',
+      component: () => import('../views/RecentView.vue'),
+      meta: { title: '最近播放' }
+    },
+    {
       path: '/library',
       name: 'library',
       component: () => import('../views/LibraryView.vue'),

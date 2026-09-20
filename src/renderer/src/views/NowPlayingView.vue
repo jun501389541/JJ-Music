@@ -5,23 +5,22 @@
  * blurred cover backdrop and the accent tint that follows the artwork.
  */
 import { useRouter } from 'vue-router'
-import { useUiStore } from '../stores/ui'
-import { playbackActions, trackActions } from '../utils/track-actions'
+import { useUiStore, type MenuItem } from '../stores/ui'
+import { trackActions } from '../utils/track-actions'
 import AppIcon from '../components/AppIcon.vue'
 import EqualizerPanel from '../components/EqualizerPanel.vue'
+import PlayerBar from '../components/PlayerBar.vue'
+import WindowControls from '../components/WindowControls.vue'
 import TrackList from '../components/TrackList.vue'
 import { toMediaUrl } from '@shared/media-url'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { isLocalTrack } from '@shared/types'
 import type { LyricCandidate } from '@shared/library-types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
-import { formatAudioSpec, formatTime } from '../utils/format'
-import SliderBar from '../components/SliderBar.vue'
+import { formatAudioSpec } from '../utils/format'
 import SpectrumVisualizer from '../components/SpectrumVisualizer.vue'
-import TransportIcon from '../components/TransportIcon.vue'
-import TransportControls from '../components/TransportControls.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
 import LyricEditor from '../components/LyricEditor.vue'
 
@@ -32,21 +31,35 @@ const library = useLibraryStore()
 const toast = useToastStore()
 
 const ui = useUiStore(), router = useRouter()
-const jj = window.jj
 const showTranslation = computed({ get: () => library.settings.lyricTranslation, set: value => { void library.updateSettings({ lyricTranslation: value }) } })
-function togglePanel(panel: 'eq' | 'queue'): void { ui.playbackPanel = ui.playbackPanel === panel ? null : panel }
-function lyricMenu(event: MouseEvent) { ui.openMenu(event, [
-  { label: '歌词', icon: 'lyrics', children: [
-    { label: '显示翻译', checked: showTranslation.value, action: () => { showTranslation.value = !showTranslation.value } },
-    { label: '导入歌词', disabled: !canEditLyric.value, action: onImportLyric },
-    { label: '编辑歌词', disabled: !canEditLyric.value, action: () => { showLyricEditor.value = true } },
-    { label: '在线搜索歌词', disabled: !canEditLyric.value, action: onSearchLyric },
+/*
+ * Every lyric operation lives in this one list, reachable two ways: right-click
+ * over the lyric column, and the 更多 button at the top right of the page.
+ *
+ * The page used to carry a second copy of these commands as a row of icon
+ * buttons above the lyrics, plus a 翻译 checkbox. Same five actions, drawn
+ * twice, in a strip that cost the lyric column a header's worth of height — so
+ * the icons went away and the menu is now the single source.
+ */
+function lyricMenuItems(): MenuItem[] {
+  return [
+    { label: '显示翻译', icon: 'lyrics', disabled: !hasTranslation.value, checked: showTranslation.value, action: () => { showTranslation.value = !showTranslation.value } },
+    { label: '导入歌词', icon: 'download', disabled: !canEditLyric.value, action: onImportLyric },
+    { label: '编辑歌词', icon: 'edit', disabled: !canEditLyric.value, action: () => { showLyricEditor.value = true } },
+    { label: '在线搜索歌词', icon: 'search', disabled: !canEditLyric.value, action: onSearchLyric },
     // A metadata match is a guess; when several platforms match, let the user
     // pick rather than silently trusting the top score.
-    { label: '从多个来源选择…', disabled: !canEditLyric.value, action: onPickLyricSource }
-  ] },
-  { label: '歌词设置', icon: 'settings', action: () => { ui.nowPlaying = false; return router.push('/settings/appearance/lyrics') } }
-]) }
+    { label: '从多个来源选择…', icon: 'library', disabled: !canEditLyric.value, action: onPickLyricSource },
+    { label: '标签匹配', icon: 'info', disabled: !canEditLyric.value, action: () => { showTagMatch.value = true } },
+    { label: '', separator: true },
+    { label: '歌词设置', icon: 'settings', action: () => { ui.nowPlaying = false; return router.push('/settings/appearance/lyrics') } }
+  ]
+}
+function lyricMenu(event: MouseEvent): void { ui.openMenu(event, [{ label: '歌词', icon: 'lyrics', children: lyricMenuItems() }]) }
+/** The 歌词 group, appended to the bottom bar's one 更多 menu. */
+function lyricMenuGroup(): MenuItem[] {
+  return [{ label: '', separator: true }, { label: '歌词', icon: 'lyrics', children: lyricMenuItems() }]
+}
 
 /* ---------------------------------------------------------------- *
  * Multi-source lyric picker
@@ -182,6 +195,12 @@ const spec = computed(() => {
   return `${track.source.toUpperCase()} · ${player.quality}`
 })
 
+/** The bar's info line reads "艺术家 · 专辑 · 规格", so the album is optional. */
+const albumName = computed(() => {
+  const track = player.currentTrack
+  return track && 'albumName' in track ? track.albumName ?? '' : ''
+})
+
 const lines = computed(() => player.lyrics?.lines ?? [])
 
 /**
@@ -237,71 +256,13 @@ onMounted(async () => {
   requestAnimationFrame(() => centerActiveLine(false))
 })
 
-function onSeek(ratio: number): void {
-  player.seekRatio(ratio)
-}
-
-function onVolume(value: number): void {
-  player.setVolume(value)
-  void library.updateSettings({ volume: value })
-}
-
-/**
- * Volume panel: hover to open, click to pin, wheel to nudge.
- *
- * Mirrors the toolbar's volume group in PlayerBar so the two surfaces behave
- * identically — the same gesture in either place does the same thing.
+/*
+ * Scrubbing, volume and the EQ/queue panels are no longer this view's problem:
+ * the bottom bar is the shared PlayerBar, which carries the hairline scrubber,
+ * the horizontal fader and the 更多 menu that opens those panels. The vertical
+ * volume popover that used to live here went away with it.
  */
-const volumeOpen = ref(false)
-const volumeAnchor = ref<HTMLElement | null>(null)
-const volumePinned = ref(false)
-let volumeCloseTimer: ReturnType<typeof setTimeout> | undefined
-
-function cancelCloseVolume(): void {
-  if (volumeCloseTimer) {
-    clearTimeout(volumeCloseTimer)
-    volumeCloseTimer = undefined
-  }
-}
-
-function openVolume(): void {
-  cancelCloseVolume()
-  volumeOpen.value = true
-}
-
-function scheduleCloseVolume(): void {
-  if (volumePinned.value) return
-  cancelCloseVolume()
-  volumeCloseTimer = setTimeout(() => {
-    volumeCloseTimer = undefined
-    volumeOpen.value = false
-  }, 220)
-}
-
-function toggleVolumePanel(): void {
-  cancelCloseVolume()
-  const next = !volumeOpen.value
-  volumeOpen.value = next
-  volumePinned.value = next
-}
-
-function bumpVolume(event: WheelEvent): void {
-  const step = event.deltaY < 0 ? 0.03 : -0.03
-  const next = Math.min(1, Math.max(0, player.volume + step))
-  onVolume(next)
-}
-
-/** Lyrics can be long; the wheel over them should still scroll, not adjust. */
-function onDocumentPointerDown(event: PointerEvent): void {
-  if (!volumeOpen.value) return
-  if (volumeAnchor.value?.contains(event.target as Node)) return
-  volumeOpen.value = false
-  volumePinned.value = false
-}
-
 onMounted(() => {
-  document.addEventListener('pointerdown', onDocumentPointerDown)
-  document.addEventListener('keydown', onVolumeKeydown)
   /*
    * Wait for the overlay's own slide-up to settle before flying the cover:
    * `getBoundingClientRect()` during the slide reports a position that is still
@@ -309,17 +270,6 @@ onMounted(() => {
    */
   window.setTimeout(playArtworkFlight, 60)
 })
-onBeforeUnmount(() => {
-  cancelCloseVolume()
-  document.removeEventListener('pointerdown', onDocumentPointerDown)
-  document.removeEventListener('keydown', onVolumeKeydown)
-})
-
-function onVolumeKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || !volumeOpen.value) return
-  volumeOpen.value = false
-  volumePinned.value = false
-}
 
 /** Clicking a lyric line jumps to that point, as in Salt Player. */
 function seekToLine(index: number): void {
@@ -413,13 +363,22 @@ function playArtworkFlight(): void {
       same window controls the title bar does — otherwise the only way to
       minimise or close is to leave this view first. "收起" (the chevron at the
       top left) returns to the library; these buttons act on the window itself.
+
+      There is deliberately no 更多 button up here: the bottom bar owns the one
+      menu, and a second button of the same kind on the same surface would open
+      a different list.
     -->
-    <div class="np__window-actions">
-      <button class="icon-btn np__more" title="更多播放选项" aria-label="更多播放选项" @click="ui.openMenu($event, playbackActions())"><AppIcon name="more" :size="17" /></button>
-      <button class="win-btn" title="最小化" aria-label="最小化" @click="jj.window.minimize()"><svg width="12" height="12"><path d="M1 6h10" stroke="currentColor"/></svg></button>
-      <button class="win-btn" title="最大化 / 还原" aria-label="最大化" @click="jj.window.maximize()"><svg width="12" height="12"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor"/></svg></button>
-      <button class="win-btn close" title="关闭" aria-label="关闭" @click="jj.window.close()"><AppIcon name="close" :size="15"/></button>
-    </div>
+    <!--
+      The now-playing view takes over the whole window, so it must carry the
+      same window controls the title bar does — otherwise the only way to
+      minimise or close is to leave this view first. "收起" (the chevron at the
+      top left) returns to the library; these buttons act on the window itself.
+
+      There is deliberately no 更多 button up here: the bottom bar owns the one
+      menu, and a second button of the same kind on the same surface would open
+      a different list.
+    -->
+    <div class="np__window-actions"><WindowControls /></div>
     <div class="np__body">
       <!-- left: artwork only -->
       <section class="np__left">
@@ -446,78 +405,17 @@ function playArtworkFlight(): void {
         <SpectrumVisualizer v-if="library.settings.showSpectrum" class="np__spectrum" />
       </section>
 
-      <!-- right: lyrics -->
+      <!--
+        right: lyrics.
+
+        This column used to open with a header row: the 歌词 title, the
+        provenance badge, a 翻译 checkbox and four icon buttons. The badge now
+        rides at the end of the bar's info line (it is a fact about what is
+        playing, next to the other facts), and the five commands are the
+        right-click menu below — so the column starts at the first lyric line
+        instead of at a toolbar.
+      -->
       <section class="np__right" @contextmenu="lyricMenu">
-        <div class="np__lyric-head">
-          <span class="np__lyric-title">
-            歌词
-            <!-- Provenance matters: the user needs to know whether they are
-                 looking at the file's own tag, a sidecar they added, or a
-                 guess matched from the internet. -->
-            <span v-if="lyricSourceLabel" class="np__lyric-source" :class="`is-${player.lyricSource}`">
-              {{ lyricSourceLabel }}
-            </span>
-          </span>
-
-          <div class="np__lyric-actions">
-            <label v-if="hasTranslation" class="toggle">
-              <input v-model="showTranslation" type="checkbox" />
-              <span>翻译</span>
-            </label>
-            <button
-              v-if="canEditLyric"
-              class="icon-btn"
-              type="button"
-              title="导入 .lrc 歌词文件"
-              :disabled="player.lyricLoading"
-              @click="onImportLyric"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M12 16V4M7 9l5-5 5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
-                <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button
-              v-if="canEditLyric"
-              class="icon-btn"
-              type="button"
-              title="在线搜索匹配歌词"
-              :disabled="player.lyricLoading"
-              @click="onSearchLyric"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.7" />
-                <path d="m16 16 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button
-              v-if="canEditLyric"
-              class="icon-btn"
-              type="button"
-              title="编辑歌词（保存为 .lrc）"
-              @click="showLyricEditor = true"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
-                <path d="M14.5 6.5 17.5 9.5" stroke="currentColor" stroke-width="1.7" />
-              </svg>
-            </button>
-            <button
-              v-if="canEditLyric"
-              class="icon-btn"
-              type="button"
-              title="标签匹配"
-              @click="showTagMatch = true"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M4 7h16M4 12h10M4 17h7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-                <circle cx="17.5" cy="16" r="3" stroke="currentColor" stroke-width="1.7" />
-                <path d="m20 18.5 2 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
         <div v-if="player.lyricLoading" class="np__lyric-state">
           <span class="spinner" /> 正在加载歌词…
         </div>
@@ -525,8 +423,8 @@ function playArtworkFlight(): void {
         <div v-else-if="lines.length === 0" class="np__lyric-state">
           <p class="np__lyric-empty">{{ player.lyricError ?? '没有找到歌词' }}</p>
           <p v-if="canEditLyric" class="np__lyric-hint">
-            可以手动导入 <code>.lrc</code> 文件，或使用上方的
-            <strong>在线搜索</strong> 按曲名与艺术家自动匹配。
+            右键此处打开<strong>歌词</strong>菜单：可导入 <code>.lrc</code> 文件、
+            在线按曲名与艺术家匹配，或直接编辑。
           </p>
         </div>
 
@@ -553,99 +451,32 @@ function playArtworkFlight(): void {
     </div>
 
     <!--
-      Bottom control bar.
+      Bottom control bar: the shared PlayerBar, bare.
 
-      The transport, progress and track identity live here rather than stacked
-      under the artwork. Two reasons: the controls sit on one horizontal axis at
-      a predictable place instead of moving with the artwork's height, and the
-      artwork column is left to be just artwork — which is what makes the
-      left/right split read as a player rather than a page with a form under it.
+      The page used to run its own copy of a control bar — a wide scrubber with
+      times above it, a larger transport cluster, an EQ button, a playlist
+      button and a hover popover for the volume. Two bars that looked alike but
+      were separate code drifted apart every time either was touched, which is
+      why TransportControls exists. This finishes that: one bar, and `bare` is
+      the only difference — no cover (the artwork is already the page above) and
+      the info line carries the full fact list instead of just the artist.
 
-      Three columns with equal outer flex basis, so the transport cluster is
-      centred in the *window*, not in whatever space the track name left over.
+      EQ and 播放列表 are not lost: the bar's 更多 menu opens both panels.
     -->
-    <footer class="np__bar">
-      <div class="np__bar-side np__bar-side--left">
-        <span class="np__bar-title">{{ player.currentTrack?.name ?? '未在播放' }}</span>
+    <PlayerBar bare :extra-menu="lyricMenuGroup">
+      <template #meta>
+        <span class="np__meta-text">{{ player.currentTrack?.singer ?? '选择一首歌曲，开始聆听' }}<template v-if="albumName"> · {{ albumName }}</template><template v-if="spec"> · {{ spec }}</template></span>
         <!--
-          Secondary facts sit beside the title, deliberately low-contrast: they
-          are useful when looked for and should not compete with the song name.
+          Provenance belongs here rather than above the lyrics: the user needs
+          to know whether the line they are reading is the file's own tag, a
+          sidecar they added, or a guess matched from the internet, and the info
+          line is where this bar already states facts about the track.
         -->
-        <span class="np__bar-meta">
-          {{ player.currentTrack?.singer ?? '—' }}
-          <template v-if="player.currentTrack && 'albumName' in player.currentTrack && player.currentTrack.albumName">
-            · {{ player.currentTrack.albumName }}
-          </template>
-          <template v-if="spec"> · {{ spec }}</template>
+        <span v-if="lyricSourceLabel" class="np__lyric-source" :class="`is-${player.lyricSource}`">
+          {{ lyricSourceLabel }}
         </span>
-      </div>
-
-      <div class="np__bar-center">
-        <div class="np__times">
-          <span class="tnum">{{ formatTime(player.currentTime) }}</span>
-          <span class="tnum">{{ formatTime(player.duration) }}</span>
-        </div>
-
-        <div class="np__scrub">
-          <SliderBar :value="player.progress" aria-label="播放进度" @update:value="onSeek" />
-        </div>
-
-        <!--
-          Same cluster, same order, same buttons as the toolbar's — the two
-          bottom bars are one component with a different scale. The favourite
-          and queue buttons live inside it too, so neither bar can scatter them
-          to its own edges again.
-        -->
-        <TransportControls size="lg" show-favorite show-queue />
-      </div>
-
-      <div class="np__bar-side np__bar-side--right">
-        <button class="icon-btn" :aria-expanded="ui.playbackPanel === 'eq'" title="EQ 均衡器" aria-label="EQ 均衡器" @click="togglePanel('eq')">
-          <AppIcon name="audio" :size="18" />
-        </button>
-        <button class="icon-btn" :aria-expanded="ui.playbackPanel === 'queue'" title="播放列表" aria-label="播放列表" @click="togglePanel('queue')">
-          <AppIcon name="list" :size="18" />
-        </button>
-
-        <div
-          ref="volumeAnchor"
-          class="np__volume-group"
-          @mouseenter="openVolume"
-          @mouseleave="scheduleCloseVolume"
-          @wheel.prevent="bumpVolume"
-        >
-          <button
-            class="icon-btn"
-            type="button"
-            :title="player.muted ? '取消静音' : '音量'"
-            :aria-expanded="volumeOpen"
-            @click="toggleVolumePanel"
-          >
-            <TransportIcon :name="player.muted ? 'volume-mute' : 'volume'" :size="18" />
-          </button>
-          <div
-            v-if="volumeOpen"
-            class="np__volume-pop"
-            role="dialog"
-            aria-label="音量调节"
-            @mouseenter="cancelCloseVolume"
-            @mouseleave="scheduleCloseVolume"
-          >
-            <SliderBar
-              variant="vertical"
-              :value="player.muted ? 0 : player.volume"
-              aria-label="音量"
-              @update:value="onVolume"
-            />
-            <small class="np__volume-value">{{ player.muted ? '静音' : `${Math.round(player.volume * 100)}%` }}</small>
-          </div>
-        </div>
-
-        <button class="icon-btn" title="更多播放选项" aria-label="更多播放选项" @click="ui.openMenu($event, playbackActions())">
-          <AppIcon name="more" :size="18" />
-        </button>
-      </div>
-    </footer>
+      </template>
+    </PlayerBar>
 
     <div v-if="ui.playbackPanel" class="np-panel-layer" @click.self="ui.playbackPanel = null" @keydown.esc.stop="ui.playbackPanel = null">
       <aside class="np-panel" :aria-label="ui.playbackPanel === 'eq' ? 'EQ 均衡器' : '当前播放列表'">
@@ -792,81 +623,17 @@ function playArtworkFlight(): void {
  * lyric pane scrolls underneath it, and with a transparent bar the lyrics
  * showed through the controls.
  */
-.np__bar {
-  position: relative;
-  z-index: 3;
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 14px 28px 20px;
-  background: var(--bg-elevated);
-  border-top: 1px solid var(--divider);
-}
-
-.np__bar-side {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.np__bar-side--right {
-  justify-content: flex-end;
-}
 
 /* The identity block stacks name over metadata, and truncates rather than
    pushing the transport cluster off-centre. */
-.np__bar-side--left {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-}
-
-.np__bar-title {
-  max-width: 100%;
-  font-size: var(--text-md);
-  font-weight: 550;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 /*
  * Secondary facts (artist / album / format) sit next to the title at low
  * contrast: available when looked for, never competing with the song name.
  */
-.np__bar-meta {
-  max-width: 100%;
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.np__bar-center {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  flex: 0 1 auto;
-  width: min(520px, 46vw);
-}
 
 /* Times flank the scrubber on one line, as a compact readout rather than two
    labels pushed to the far edges of a wide row. */
-.np__bar-center .np__times {
-  justify-content: space-between;
-  width: 100%;
-  gap: 12px;
-}
-
-.np__bar-center .np__scrub {
-  width: 100%;
-}
 
 /*
  * ---------------- left ----------------
@@ -923,52 +690,13 @@ function playArtworkFlight(): void {
 
 /* ---------------- transport ---------------- */
 
-.np__times {
-  display: flex;
-  justify-content: space-between;
-  font-size: var(--text-sm);
-  color: var(--text-tertiary);
-}
 
 /* Scrubber wrapper; kept as a block so the slider can be sized independently. */
-.np__scrub {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
 
 /* The speaker icon anchors the popover; the button itself is unchanged. */
-.np__volume-group {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
 
 /* Tall rounded panel holding a vertical fader and the percentage beneath it,
    matching the reference design. */
-.np__volume-pop {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 16px 14px 12px;
-  background: var(--bg-glass);
-  backdrop-filter: blur(28px);
-  border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  box-shadow: 0 12px 40px #0004;
-  z-index: 1200;
-}
-
-.np__volume-value {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
 
 /* ---------------- lyrics ---------------- */
 
@@ -978,23 +706,6 @@ function playArtworkFlight(): void {
   min-height: 0;
 }
 
-.np__lyric-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-  flex: none;
-}
-
-.np__lyric-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--text-sm);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-tertiary);
-}
 
 /* Provenance badge: embedded tag vs. sidecar file vs. internet match. */
 .np__lyric-source {
@@ -1024,11 +735,6 @@ function playArtworkFlight(): void {
   color: var(--warning);
 }
 
-.np__lyric-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
 
 .np__lyric-empty {
   margin: 0;
@@ -1047,19 +753,6 @@ function playArtworkFlight(): void {
   color: var(--text-secondary);
 }
 
-.toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.toggle input {
-  accent-color: var(--accent);
-  cursor: pointer;
-}
 
 .np__lyric-state {
   display: flex;
@@ -1178,12 +871,19 @@ code {
     display: none;
   }
 }
+/*
+  The bar’s info line, which this view supplies through PlayerBar’s slot.
+  Slot nodes carry this component’s scope, so the truncation has to be styled
+  here rather than in the bar.
+*/
+.np__meta-text{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.np__lyric-source{flex:none}
 .np{--bg-base:#191b23;--bg-panel:#252832;--text-primary:#f5f5f7;--text-secondary:#b2b4c0;--text-tertiary:#777a89;color:var(--text-primary)}
-.np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 230px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:0;top:0;z-index:3;display:flex;height:var(--titlebar-height);-webkit-app-region:no-drag}.np__window-actions .win-btn{width:46px;display:grid;place-items:center;color:var(--text-secondary);background:none;border:0;cursor:pointer}.np__window-actions .win-btn:hover{background:var(--bg-hover)}.np__window-actions .win-btn.close:hover{background:#c42b1c;color:white}.np__window-actions .np__more{width:38px;height:var(--titlebar-height);display:grid;place-items:center;border-radius:0;color:var(--text-secondary)}.np__window-actions .np__more:hover{background:var(--bg-hover)}
+.np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 280px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:0;top:0;z-index:3;display:flex;height:var(--titlebar-height);-webkit-app-region:no-drag}
 .np__body{grid-template-columns:minmax(280px, 4fr) minmax(320px, 5fr);grid-template-rows:minmax(0, 1fr);padding:52px 56px 24px;gap:48px}
-.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:min(100%,420px,46vh);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;line-height:var(--lyric-line-height);padding:calc(var(--lyric-size) * (var(--lyric-line-height) - 1) / 2) 4px;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative}.np__lyric-actions{gap:6px}.np__lyric-actions .btn{padding:5px 8px;font-size:10px}
-.np__bar{display:flex;align-items:center;gap:20px;padding:14px 28px 20px;flex:none;background:var(--bg-elevated);border-top:1px solid var(--divider)}.np__bar-side{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0}.np__bar-side--left{flex-direction:column;align-items:flex-start;gap:3px}.np__bar-side--right{justify-content:flex-end}.np__bar-title{font-size:var(--text-md);font-weight:550;color:var(--text-primary);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np__bar-meta{font-size:var(--text-xs);color:var(--text-tertiary);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np__bar-center{display:flex;flex-direction:column;align-items:center;gap:4px;flex:0 1 auto;width:min(520px,46vw)}.np__bar-center .np__times{width:100%;justify-content:space-between;gap:12px}.np__bar-center .np__scrub{width:100%}
-@media(max-height:700px){.np__body{padding:44px 40px 16px;gap:34px}.np__art{width:min(100%,300px,38vh)}.np__bar{padding:10px 22px 14px;gap:14px}}
+.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:min(100%,420px,46vh);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;line-height:var(--lyric-line-height);padding:calc(var(--lyric-size) * (var(--lyric-line-height) - 1) / 2) 4px;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative}
+
+@media(max-height:700px){.np__body{padding:44px 40px 16px;gap:34px}.np__art{width:min(100%,300px,38vh)}}
 .np{color-scheme:dark;--bg-hover:#303340;--bg-active:#353947;--border-subtle:#ffffff10;--border-strong:#ffffff20;--bg-input:#191b23}
 /* Multi-source lyric picker. Sits above the panels so a choice is never
    obscured by the EQ/queue layer that may already be open. */

@@ -21,10 +21,12 @@
  * component can read directly for the same reason it reads playback state.
  *
  * Sizes are expressed as tokens so a surface can scale the cluster without
- * forking it: the toolbar renders `md`, the now-playing view `lg`.
+ * forking it. Both bars render `md`: the now-playing view's bottom bar is the
+ * shared PlayerBar now, so there is no second scale in use.
  */
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import type { PlayMode } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import AppIcon from './AppIcon.vue'
@@ -39,27 +41,60 @@ const props = withDefaults(defineProps<{
   showFavorite?: boolean
   /** Show the queue button inside the cluster, right of next. */
   showQueue?: boolean
-}>(), { size: 'md', hideMode: false, showFavorite: false, showQueue: false })
+  /** Show the desktop-lyric toggle inside the cluster, right of the queue. */
+  showDesktopLyric?: boolean
+}>(), { size: 'md', hideMode: false, showFavorite: false, showQueue: false, showDesktopLyric: false })
 
 const player = usePlayerStore()
 const library = useLibraryStore()
+
+function toggleDesktopLyric(): void {
+  void library.updateSettings({ desktopLyric: !library.settings.desktopLyric })
+}
 
 const dims = computed(() => props.size === 'lg'
   ? { side: 22, play: 24, button: 44, small: 18 }
   : { side: 21, play: 23, button: 40, small: 17 })
 
-const modeIcon = computed(() =>
-  player.playMode === 'single' ? 'single-loop'
-  : player.playMode === 'random' ? 'shuffle'
-  : player.playMode === 'repeat' ? 'list-loop'
-  : 'list-loop')
+/**
+ * One row per mode, in the order a click steps through them.
+ *
+ * The glyph is what separates 顺序播放 from 列表循环 — until recently both drew
+ * the same loop arrows, so the button looked unchanged while cycling.
+ */
+const PLAY_MODES: Array<{ value: PlayMode; label: string; icon: 'sequential' | 'list-loop' | 'single-loop' | 'shuffle' }> = [
+  { value: 'list', label: '顺序播放', icon: 'sequential' },
+  { value: 'repeat', label: '列表循环', icon: 'list-loop' },
+  { value: 'single', label: '单曲循环', icon: 'single-loop' },
+  { value: 'random', label: '随机播放', icon: 'shuffle' }
+]
 
-const modeLabel = computed(() => ({
-  list: '顺序播放',
-  repeat: '列表循环',
-  single: '单曲循环',
-  random: '随机播放'
-}[player.playMode] ?? '顺序播放'))
+const currentMode = computed(() => PLAY_MODES.find((mode) => mode.value === player.playMode) ?? PLAY_MODES[0])
+const modeIcon = computed(() => currentMode.value.icon)
+const modeLabel = computed(() => currentMode.value.label)
+
+/**
+ * Click steps to the next mode and names it in a bubble above the button.
+ *
+ * A menu was tried first and rejected: choosing from a list is one more click
+ * than the cycle ever needs, since the four modes are walked in a fixed order.
+ * What cycling genuinely lacked was feedback — four glyphs, and no way to tell
+ * which one you just landed on without reading the icon. The label answers
+ * that, and fades on its own so it never occupies the bar.
+ */
+const modeHint = ref('')
+let hintTimer: ReturnType<typeof setTimeout> | undefined
+
+function cycleMode(): void {
+  const index = PLAY_MODES.findIndex((mode) => mode.value === player.playMode)
+  const next = PLAY_MODES[(index + 1) % PLAY_MODES.length]
+  player.setPlayMode(next.value)
+  modeHint.value = next.label
+  clearTimeout(hintTimer)
+  hintTimer = setTimeout(() => { modeHint.value = '' }, 1500)
+}
+
+onBeforeUnmount(() => clearTimeout(hintTimer))
 
 /** Whether the playing track is in the favourites playlist. */
 const favorite = computed(() =>
@@ -91,16 +126,18 @@ function toggleFavorite(): void {
       <AppIcon name="heart" :size="dims.small" />
     </button>
 
-    <button
-      v-if="!hideMode"
-      class="icon-btn"
-      type="button"
-      :title="modeLabel"
-      :aria-label="modeLabel"
-      @click="player.cyclePlayMode()"
-    >
-      <TransportIcon :name="modeIcon" :size="dims.side - 3" />
-    </button>
+    <span v-if="!hideMode" class="transport__mode">
+      <button
+        class="icon-btn"
+        type="button"
+        :title="modeLabel"
+        :aria-label="`播放模式：${modeLabel}`"
+        @click="cycleMode"
+      >
+        <TransportIcon :name="modeIcon" :size="dims.side - 3" />
+      </button>
+      <span v-if="modeHint" class="transport__hint" role="status">{{ modeHint }}</span>
+    </span>
 
     <button
       class="icon-btn"
@@ -158,6 +195,26 @@ function toggleFavorite(): void {
         </a>
       </RouterLink>
     </slot>
+
+    <!--
+      Desktop lyrics sits right of the queue, in the same box, so the group
+      reads as one row of equal controls. Only the preference is wired here:
+      the always-on-top overlay that should read it does not exist yet.
+    -->
+    <button
+      v-if="showDesktopLyric"
+      class="icon-btn"
+      type="button"
+      :class="{ 'transport__on': library.settings.desktopLyric }"
+      :title="library.settings.desktopLyric ? '关闭桌面歌词' : '桌面歌词'"
+      :aria-label="library.settings.desktopLyric ? '关闭桌面歌词' : '桌面歌词'"
+      :aria-pressed="library.settings.desktopLyric"
+      @click="toggleDesktopLyric"
+    >
+      <!-- A glyph rather than an icon: it has to read as "桌面歌词" at 32 px,
+           and the icon set's alternatives all looked like a playlist. -->
+      <span class="transport__glyph">词</span>
+    </button>
   </div>
 </template>
 
@@ -168,6 +225,22 @@ function toggleFavorite(): void {
   gap: 6px;
 }
 
+/*
+  In the compact toolbar the buttons are given one shared box and a wide gap,
+  and the group carries no panel of its own — it sits directly on the bar, like
+  the reference. Previously the favourite, mode and queue icons were width-less
+  buttons around a 40 px play disc, so the row read as five different heights.
+*/
+.transport--md {
+  gap: 9px;
+}
+
+.transport--md .icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
 .transport--lg {
   gap: 10px;
 }
@@ -176,6 +249,58 @@ function toggleFavorite(): void {
    state reads identically in both bars. */
 .liked {
   color: #ee8c9a;
+}
+
+/* An engaged toggle in the cluster takes the accent, so on/off reads without a
+   second label. */
+.transport__on {
+  color: var(--accent);
+}
+
+/*
+ * The mode name, in a bubble over the button. Anchored to the button rather
+ * than the bar so it stays centred on the glyph at either scale, and
+ * `pointer-events: none` so a fading label can never eat a click meant for the
+ * next cycle.
+ */
+.transport__mode {
+  position: relative;
+  display: inline-flex;
+}
+
+.transport__hint {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  padding: 5px 11px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-glass);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 10px 30px #0005;
+  color: var(--text-primary);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: transport-hint-in var(--dur-fast) var(--ease-out);
+}
+
+@keyframes transport-hint-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.transport__glyph {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
 }
 
 .transport__play {

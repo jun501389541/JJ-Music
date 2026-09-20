@@ -25,6 +25,7 @@ import type {
   UserApiMeta
 } from '@shared/types'
 import type { LyricCandidate, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
+import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 
 /** Unwrap the `{ ok, data, error }` envelope, throwing on failure. */
@@ -52,6 +53,27 @@ const api = {
     close: () => invoke<void>(IPC.windowClose),
     isMaximized: () => invoke<boolean>(IPC.windowIsMaximized),
     fullscreen: () => invoke<boolean>(IPC.windowFullscreen)
+  },
+
+  /**
+   * Desktop lyrics.
+   *
+   * The overlay window owns no state: the renderer pushes the line it is
+   * already showing, and the overlay's menu choices come back as commands for
+   * the renderer to write into settings like any other preference. That round
+   * trip is what keeps the 词 button, the 更多 menu and the overlay from
+   * disagreeing about whether lyrics are on.
+   */
+  desktopLyric: {
+    push: (state: DesktopLyricPayload) => {
+      ipcRenderer.send(IPC.desktopLyricState, state)
+    },
+    /** Subscribe to the overlay's menu and drag results; returns an unsubscribe. */
+    onCommand: (handler: (command: DesktopLyricCommand) => void) => {
+      const listener = (_event: unknown, command: DesktopLyricCommand): void => handler(command)
+      ipcRenderer.on(IPC.desktopLyricCommand, listener)
+      return () => ipcRenderer.removeListener(IPC.desktopLyricCommand, listener)
+    }
   },
 
   /**
@@ -267,4 +289,38 @@ const api = {
 
 export type JjApi = typeof api
 
-contextBridge.exposeInMainWorld('jj', api)
+/* ------------------------------------------------------------------ *
+ * Which bridge this page gets
+ *
+ * One preload file serves both windows because a second rollup entry would
+ * hoist the shared channel table into a chunk, and a sandboxed preload can only
+ * `require` Electron and a handful of built-ins — `./chunks/ipc-*.cjs` throws,
+ * and the app window silently comes up with no `window.jj` at all.
+ *
+ * So the overlay is identified by a launch argument instead, and gets three
+ * methods: it can be told what to draw, nudged, and asked for its menu. It gets
+ * no `jj`, because a strip of text sitting over other people's applications has
+ * no business reaching the library, the filesystem or the network.
+ * ------------------------------------------------------------------ */
+const lyricBridge = {
+  onState: (listener: (state: DesktopLyricPayload) => void): (() => void) => {
+    const wrapped = (_event: unknown, state: DesktopLyricPayload): void => listener(state)
+    ipcRenderer.on(IPC.desktopLyricState, wrapped)
+    return () => ipcRenderer.removeListener(IPC.desktopLyricState, wrapped)
+  },
+  /**
+   * Move the window so its top-left lands on these screen coordinates.
+   *
+   * Dragging is done by the page rather than `-webkit-app-region: drag` because
+   * a drag region swallows the right-click that opens the overlay's menu, and a
+   * lyric strip has no other chrome to hang a handle on.
+   */
+  dragTo: (x: number, y: number): void => ipcRenderer.send(IPC.desktopLyricDrag, { x, y }),
+  openMenu: (): void => ipcRenderer.send(IPC.desktopLyricMenu)
+}
+
+if (process.argv.includes('--jj-desktop-lyric')) {
+  contextBridge.exposeInMainWorld('desktopLyric', lyricBridge)
+} else {
+  contextBridge.exposeInMainWorld('jj', api)
+}

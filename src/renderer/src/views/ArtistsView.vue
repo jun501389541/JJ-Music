@@ -21,10 +21,7 @@ const artists = computed(() => {
   return library.artists.filter((artist) => artist.name.toLowerCase().includes(needle))
 })
 
-const selectedTracks = computed<LocalMusicInfo[]>(() => {
-  if (!selected.value) return []
-  return library.artists.find((artist) => artist.name === selected.value)?.tracks ?? []
-})
+const selectedArtist = computed(() => artists.value.find(artist => artist.name === selected.value) ?? null)
 
 function coverOf(tracks: LocalMusicInfo[]): string | null {
   const withCover = tracks.find((track) => track.coverPath)
@@ -44,13 +41,27 @@ async function playArtist(index: number): Promise<void> {
   <div class="view">
     <header class="view__header">
       <div>
-        <h1 class="view__title">艺术家</h1>
-        <p class="view__subtitle">{{ artists.length }} 位艺术家</p>
+        <h1 class="view__title">{{ selectedArtist?.name || '艺术家' }}</h1>
+        <p class="view__subtitle">{{ selectedArtist ? `${selectedArtist.tracks.length} 首歌曲` : `${artists.length} 位艺术家` }}</p>
       </div>
-      <input v-model="filter" class="input" type="search" placeholder="筛选艺术家…" />
+      <button v-if="selectedArtist" class="btn" @click="selected = null">返回艺术家</button>
+      <input v-else v-model="filter" class="input" type="search" placeholder="筛选艺术家…" />
     </header>
 
-    <div v-if="artists.length === 0" class="empty">
+    <!--
+      A selected artist replaces the grid rather than appending a list below it.
+      The list used to render underneath, which with 470-odd artists meant the
+      panel landed thousands of pixels below the fold: clicking a card appeared
+      to do nothing at all. This is also how the album grid behaves, so the two
+      pages answer a click the same way.
+    -->
+    <TrackList
+      v-if="selectedArtist"
+      :tracks="selectedArtist.tracks"
+      :show-album="true"
+      @play="(_track, index) => player.playQueue(selectedArtist!.tracks, index)"
+    />
+    <div v-else-if="artists.length === 0" class="empty">
       <span class="empty__title">还没有艺术家</span>
       <span class="empty__hint">艺术家信息来自音频文件的标签。</span>
     </div>
@@ -61,7 +72,7 @@ async function playArtist(index: number): Promise<void> {
         :key="artist.name"
         class="artist"
         type="button"
-        @click="selected = selected === artist.name ? null : artist.name"
+        @click="selected = artist.name"
         @dblclick="playArtist(index)"
       >
         <div class="artist__art">
@@ -80,15 +91,6 @@ async function playArtist(index: number): Promise<void> {
         <span class="artist__count tnum">{{ artist.tracks.length }} 首</span>
       </button>
     </div>
-
-    <section v-if="selected && selectedTracks.length > 0" class="detail">
-      <h2 class="detail__title">{{ selected }}</h2>
-      <TrackList
-        :tracks="selectedTracks"
-        :show-album="true"
-        @play="(_track, index) => player.playQueue(selectedTracks, index)"
-      />
-    </section>
   </div>
 </template>
 
@@ -108,7 +110,9 @@ async function playArtist(index: number): Promise<void> {
 .artist__art {
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 50%;
+  /* Square, like the album grid: the cover art behind these is square, and a
+     circle cropped its corners away. */
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--bg-panel);
   color: var(--text-tertiary);
@@ -143,15 +147,5 @@ async function playArtist(index: number): Promise<void> {
 .artist__count {
   font-size: var(--text-sm);
   color: var(--text-tertiary);
-}
-
-.detail {
-  margin-top: 32px;
-}
-
-.detail__title {
-  margin: 0 0 12px;
-  font-size: var(--text-lg);
-  font-weight: 650;
 }
 </style>

@@ -497,8 +497,7 @@ try {
         await sleep(400)
       }
 
-      const lyricState = await evaluate(
-        cdp,
+      const lyricExpression =
         `(() => {
            const m = window.__jj_player
            const lines = m.lyrics ? m.lyrics.lines : []
@@ -512,8 +511,22 @@ try {
              error: m.lyricError
            }
          })()`
-      )
-      console.log(`  source=${lyricState.source} 行数=${lyricState.lineCount} 有时间的行=${lyricState.timedLines}`)
+      // The online lyric endpoint answers empty occasionally (measured: 1 of 3
+      // runs today), which failed three checks that had nothing to do with the
+      // app. Re-request once after a pause before believing an empty result.
+      let lyricState = await evaluate(cdp, lyricExpression)
+      let lyricAttempt = 1
+      while (lyricState.lineCount === 0 && lyricAttempt < 3) {
+        lyricAttempt += 1
+        await sleep(2000)
+        await evaluate(cdp, 'window.__jj_player.loadLyrics(window.__jj_player.currentTrack)')
+        for (let wait = 0; wait < 12; wait += 1) {
+          if (!(await evaluate(cdp, 'window.__jj_player.lyricLoading'))) break
+          await sleep(400)
+        }
+        lyricState = await evaluate(cdp, lyricExpression)
+      }
+      console.log(`  source=${lyricState.source} 行数=${lyricState.lineCount} 有时间的行=${lyricState.timedLines}${lyricAttempt > 1 ? `（第 ${lyricAttempt} 次请求）` : ''}`)
       if (lyricState.firstText) console.log(`  首行: ${JSON.stringify(lyricState.firstText)}`)
       if (lyricState.midTime) console.log(`  中行时间: ${lyricState.midTime}ms`)
       if (lyricState.error) console.log(`  note: ${lyricState.error}`)

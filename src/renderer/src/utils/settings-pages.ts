@@ -15,6 +15,7 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
     link('音频引擎', 'audio', 'audio', '音效、均衡器与格式支持'),
     link('播放', 'playback', 'play', '播放模式、速度与睡眠定时'),
     link('音乐库', '/music-library', 'library', '管理文件夹与本地音乐'),
+    link('音源管理', '/sources', 'cloud', '导入、启用与校验 LX 音源脚本'),
     link('在线音乐', 'online', 'cloud', '音源、在线音质与本地优先'),
     link('下载', 'downloads', 'folder', '保存目录、歌词、翻译、罗马音与封面'),
     link('键盘快捷键', 'shortcuts', 'keyboard', '通过键盘控制播放'),
@@ -57,7 +58,7 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
   'audio/formats': { title: '格式支持', icon: 'music', items: [
     { label: 'FLAC · MP3 · WAV', kind: 'info', description: '支持播放与音频分析' }, { label: 'AAC · M4A · OGG · OPUS · WEBM', kind: 'info', description: '由 Chromium 解码，具体支持取决于封装与编码' }, { label: 'APE · DSF · DFF · WMA · AIFF', kind: 'info', description: '可读取本地标签；当前播放引擎不支持解码' }, { label: '标签写入', kind: 'info', description: 'MP3、FLAC；写入前预览差异并备份文件' }
   ] },
-  playback: { title: '播放', icon: 'play', items: [select('播放模式', 'playMode', [['顺序播放', 'list'], ['列表循环', 'repeat'], ['单曲循环', 'single'], ['随机播放', 'random']]), select('播放速度', 'playbackRate', [['0.5 ×', .5], ['0.75 ×', .75], ['1 ×', 1], ['1.25 ×', 1.25], ['1.5 ×', 1.5], ['2 ×', 2]]), toggle('关闭窗口时最小化到托盘', 'minimizeToTray', '关闭主窗口后继续播放，可从托盘图标恢复窗口或退出')] },
+  playback: { title: '播放', icon: 'play', items: [select('播放模式', 'playMode', [['顺序播放', 'list'], ['列表循环', 'repeat'], ['单曲循环', 'single'], ['随机播放', 'random']]), select('播放速度', 'playbackRate', [['0.5 ×', .5], ['0.75 ×', .75], ['1 ×', 1], ['1.25 ×', 1.25], ['1.5 ×', 1.5], ['2 ×', 2]]), toggle('桌面歌词', 'desktopLyric', '在窗口之外置顶显示当前歌词，拖动它可改位置'), toggle('锁定桌面歌词位置', 'desktopLyricLocked', '锁定后鼠标点击穿透到下面的窗口，需要解锁才能再拖动'), select('桌面歌词字号', 'desktopLyricFontSize', [['小', 22], ['中', 28], ['大', 36], ['特大', 46]]), toggle('关闭窗口时最小化到托盘', 'minimizeToTray', '关闭主窗口后继续播放，可从托盘图标恢复窗口或退出')] },
   online: { title: '在线音乐', icon: 'cloud', description: '兼容 LX Music 自定义音源协议', items: [link('音源管理', '/sources', 'cloud', '导入、启用与诊断音源脚本'), select('在线音质', 'playQuality', [['标准 · 128K', '128k'], ['高品质 · 320K', '320k'], ['无损 · FLAC', 'flac'], ['高解析 · FLAC 24bit', 'flac24bit']]), toggle('优先播放本地文件', 'preferLocal', '同名、同艺术家且时长接近时，优先使用曲库中的文件'), { label: '自动降级与备用平台', kind: 'info', description: '优先请求选定音质，失败后降级；跨平台只匹配同一录音版本。' }] },
   shortcuts: { title: '键盘快捷键', icon: 'keyboard', items: [
     { label: '播放 / 暂停', description: 'Space', kind: 'info' }, { label: '上一首 / 下一首', description: 'Ctrl + ← / →', kind: 'info' }, { label: '后退 / 前进 5 秒', description: '← / →', kind: 'info' }, { label: '音量', description: 'Ctrl + ↑ / ↓', kind: 'info' }, { label: '全局搜索', description: 'Ctrl + F', kind: 'info' }, { label: '全屏', description: 'F11', kind: 'info' }, { label: '静音 / 收起播放界面', description: 'M / Esc', kind: 'info' }, { label: '歌曲列表多选', description: 'Ctrl + 单击 / Shift + 单击 / Ctrl + A', kind: 'info' }, { label: '快捷键生效范围', description: '应用窗口获得焦点时生效；输入框内保留正常输入行为。', kind: 'info' }

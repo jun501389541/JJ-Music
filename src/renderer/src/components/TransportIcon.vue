@@ -12,6 +12,7 @@ withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 17 })
 export type IconName =
   | 'list-loop'
   | 'single-loop'
+  | 'sequential'
   | 'shuffle'
   | 'volume'
   | 'volume-mute'
@@ -20,12 +21,22 @@ export type IconName =
   | 'chevron-down'
 
 const PATHS: Record<string, string> = {
-  // Two arrows chasing each other in a loop.
+  /*
+   * The four play modes, drawn as one family: a loop for the modes that repeat,
+   * straight strokes for the ones that don't, and a numeral where "one" matters.
+   * Previously 顺序播放 and 列表循环 shared the same chasing-arrows glyph, so the
+   * button looked unchanged as the mode cycled.
+   */
+  // Two parallel arrows: play through, in order.
+  sequential:
+    'M3.5 8h13M13 4.8 16.5 8 13 11.2M3.5 16h13M13 12.8 16.5 16 13 19.2',
+  // Most of a circle, opening to the right, ending in an arrowhead: back to the
+  // start when the list runs out.
   'list-loop':
-    'M4 8a4 4 0 0 1 4-4h7M18 8a4 4 0 0 1-4 4H7M15.5 1.5 18 4l-2.5 2.5M8.5 14.5 6 17l2.5 2.5',
-  // Loop with a "1" badge.
+    'M18.9 13.2A7 7 0 1 1 14.6 5.4M14.6 5.4l3.6 1.2-1.2 3.6',
+  // Same loop with a 1 in the middle.
   'single-loop':
-    'M4 8a4 4 0 0 1 4-4h7M18 8a4 4 0 0 1-4 4H7M15.5 1.5 18 4l-2.5 2.5M8.5 14.5 6 17l2.5 2.5M11 7.6l1-.6v4',
+    'M18.9 13.2A7 7 0 1 1 14.6 5.4M14.6 5.4l3.6 1.2-1.2 3.6M11.4 9.9l1.3-.8v5.3',
   shuffle: 'M3 5h3.5l8 10H18M3 15h3.5l2-2.5M14 5h4M15.5 3 18 5l-2.5 2M18 15l-2 2 2 2',
   volume: 'M4 9h3l4-3v12l-4-3H4zM14.5 8.5a5 5 0 0 1 0 7M17 6a8.5 8.5 0 0 1 0 12',
   'volume-mute': 'M4 9h3l4-3v12l-4-3H4zM14.5 9.5l5 5M19.5 9.5l-5 5',

@@ -597,11 +597,6 @@ export const usePlayerStore = defineStore('player', () => {
     playMode.value = mode
   }
 
-  function cyclePlayMode(): void {
-    const order: PlayMode[] = ['list', 'repeat', 'single', 'random']
-    playMode.value = order[(order.indexOf(playMode.value) + 1) % order.length]
-  }
-
   function setRate(value: number): void {
     if (!Number.isFinite(value)) return
     rate.value = Math.min(4, Math.max(0.25, value))
@@ -1041,7 +1036,6 @@ export const usePlayerStore = defineStore('player', () => {
     setVolume,
     toggleMute,
     setPlayMode,
-    cyclePlayMode,
     setRate,
     setQuality,
     setEqualizer,

@@ -30,7 +30,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   downloadRomanization: true,
   downloadEmbedCover: true,
   minimizeToTray: false,
-  outputDeviceId: ''
+  outputDeviceId: '',
+  desktopLyric: false,
+  desktopLyricLocked: false,
+  desktopLyricFontSize: 28,
+  desktopLyricPosition: null,
+  playlistOrder: []
 }
 
 export class SettingsStore {

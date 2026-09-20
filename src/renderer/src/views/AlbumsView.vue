@@ -12,8 +12,9 @@ const library = useLibraryStore()
 const player = usePlayerStore()
 
 const route = useRoute()
+// Albums are unique by title (see library.albums), so the title is the key.
 const selected = ref<string | null>(null)
-const selectedAlbum = computed(() => albums.value.find(album => `${album.name}::${album.singer}` === selected.value))
+const selectedAlbum = computed(() => albums.value.find(album => album.name === selected.value))
 const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
 
 const albums = computed(() => {
@@ -69,11 +70,11 @@ async function playAlbum(index: number): Promise<void> {
     <div v-else class="grid-cards">
       <button
         v-for="(album, index) in albums"
-        :key="`${album.name}-${album.singer}`"
+        :key="album.name"
         class="album"
         type="button"
         @dblclick="playAlbum(index)"
-        @click="selected = `${album.name}::${album.singer}`"
+        @click="selected = album.name"
       >
         <div class="album__art">
           <img

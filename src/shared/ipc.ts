@@ -96,6 +96,22 @@ export const IPC = {
   /** Look up lyrics online for a local track (by its tags). */
   lyricSearchOnline: 'lyric:search-online',
 
+  /**
+   * Desktop-lyric overlay.
+   *
+   * Two channels, both directions, because the overlay owns no state: the main
+   * window pushes what to draw, and the overlay's right-click menu pushes
+   * commands back. Those commands become settings writes by the main window, so
+   * `AppSettings` stays the single source of truth and the main process never
+   * edits a preference behind the renderer's back.
+   */
+  desktopLyricState: 'desktop-lyric:state',
+  desktopLyricCommand: 'desktop-lyric:command',
+  /** The overlay asks for its right-click menu, which only main can build. */
+  desktopLyricMenu: 'desktop-lyric:menu',
+  /** The overlay drags itself: pointer moves, main calls `setPosition`. */
+  desktopLyricDrag: 'desktop-lyric:drag',
+
   // Metadata matching (标签匹配)
   matchMetadata: 'match:metadata',
   matchApply: 'match:apply',

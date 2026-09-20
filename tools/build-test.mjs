@@ -72,8 +72,15 @@ await build({
 
 await build({
   ...shared,
-  entryPoints: [join(repoRoot, 'src', 'shared', 'media-url.ts')],
-  outfile: join(outDir, 'shared', 'media-url.js')
+  entryPoints: [
+        join(repoRoot, 'src', 'shared', 'media-url.ts'),
+        // The overlay's geometry maths is the part of the feature that can fail
+        // silently, so the suites import it the same way the app does.
+        join(repoRoot, 'src', 'shared', 'desktop-lyric.ts')
+      ],
+  // `outfile` cannot take two entry points, so mirror the source layout instead.
+  outbase: join(repoRoot, 'src', 'shared'),
+  outdir: join(outDir, 'shared')
 })
 
 // Share the production audio class across the store and engine regression

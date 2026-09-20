@@ -1,19 +1,105 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { usePlayerStore } from '../stores/player'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { useUiStore } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
 const route = useRoute(), router = useRouter(), library = useLibraryStore(), ui = useUiStore()
-const player = usePlayerStore()
+
+/**
+ * Overlay-style rail scrollbar: the thumb appears only while the list is
+ * actually moving and fades out ~0.9 s after the last scroll event. A
+ * hover-driven rule was tried first and read as broken — scrolling with the
+ * wheel does not hover the 10 px gutter, so the thumb never showed, and once
+ * woken it stayed put while the pointer lingered in the rail.
+ */
+const navEl = ref<HTMLElement | null>(null)
+let scrollTimer: ReturnType<typeof setTimeout> | undefined
+function onNavScroll(): void {
+  navEl.value?.classList.add('is-scrolling')
+  clearTimeout(scrollTimer)
+  scrollTimer = setTimeout(() => navEl.value?.classList.remove('is-scrolling'), 900)
+}
+onBeforeUnmount(() => clearTimeout(scrollTimer))
 const counts = computed<Record<string, number>>(() => {
-  return { '/library': library.tracks.length, '/genres': new Set(library.tracks.map(t => t.genre || '未知流派')).size, '/albums': library.albums.length, '/artists': library.artists.length, '/music-library': library.folders.length, '/sources': library.userApis.length }
+  return { '/library': library.tracks.length, '/genres': new Set(library.tracks.map(t => t.genre || '未知流派')).size, '/albums': library.albums.length, '/artists': library.artists.length }
 })
 defineEmits<{ openNowPlaying: [] }>()
-const browse = [{ to: '/discover', label: '发现音乐', icon: 'cloud' }, { to: '/search', label: '全局搜索', icon: 'search' }, { to: '/library', label: '歌曲', icon: 'music' }, { to: '/genres', label: '曲风', icon: 'genre' }, { to: '/albums', label: '专辑', icon: 'album' }, { to: '/artists', label: '艺术家', icon: 'artist' }]
-const online = [ { to: '/sources', label: '音源管理', icon: 'cloud' }, {to:'/downloads',label:'下载管理',icon:'folder'}, {to:'/playlist-import',label:'导入歌单',icon:'list'}]
-const system = [{ to: '/music-library', label: '音乐库', icon: 'library' }, { to: '/settings', label: '设置', icon: 'settings' }]
+const browse = [{ to: '/discover', label: '发现音乐', icon: 'cloud' }, { to: '/search', label: '全局搜索', icon: 'search' }, { to: '/recent', label: '最近播放', icon: 'clock' }, { to: '/library', label: '歌曲', icon: 'music' }, { to: '/genres', label: '曲风', icon: 'genre' }, { to: '/albums', label: '专辑', icon: 'album' }, { to: '/artists', label: '艺术家', icon: 'artist' }]
+/*
+ * 我喜欢的 and 默认列表 are the two built-in lists, and library.orderedPlaylists
+ * always leads the block with them, so dragging is confined to the rows below:
+ * a user playlist can be put in any order relative to its peers but can never
+ * cross 默认列表.
+ */
+const pinnedLists = library.pinnedPlaylistIds
+const orderedPlaylists = computed(() => library.orderedPlaylists)
+
+/** Row currently picked up, and the row/edge the drop indicator sits on. */
+const draggingId = ref('')
+const dropId = ref('')
+const dropAfter = ref(false)
+
+function onDragStart(event: DragEvent, id: string): void {
+  draggingId.value = id
+  const transfer = event.dataTransfer
+  if (transfer) { transfer.effectAllowed = 'move'; transfer.setData('text/plain', id) }
+}
+
+function onDragOver(event: DragEvent, id: string): void {
+  const source = draggingId.value
+  if (!source || source === id || pinnedLists.includes(id)) {
+    // Clearing here matters: `dragover` fires continuously, so a row the
+    // pointer has moved off — onto a built-in list, say — loses its indicator
+    // on the next tick instead of leaving the line stranded.
+    dropId.value = ''
+    return
+  }
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const box = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  dropId.value = id
+  dropAfter.value = event.clientY > box.top + box.height / 2
+}
+
+/**
+ * Commit the drop, but only on a row that would have accepted the dragover.
+ * The browser's own gate is the cancel on `dragover` above; this is the same
+ * rule stated where the order actually changes, so a drop that lands on a
+ * built-in list can never be read as "move to the end".
+ */
+function onDrop(event: DragEvent, id: string): void {
+  if (!draggingId.value || pinnedLists.includes(id) || dropId.value !== id) return
+  event.preventDefault()
+  commitDrop()
+}
+
+function commitDrop(): void {
+  const source = draggingId.value
+  const target = dropId.value
+  const after = dropAfter.value
+  draggingId.value = ''
+  dropId.value = ''
+  if (!source || !target) return
+  const current = orderedPlaylists.value.map(list => list.id).filter(id => !pinnedLists.includes(id))
+  // The dragged row is lifted out first, so every remaining row is a legal
+  // neighbour and none of them is one of the pinned pair.
+  const rest = current.filter(id => id !== source)
+  const neighbour = rest.indexOf(target)
+  if (neighbour < 0) return
+  rest.splice(neighbour + (after ? 1 : 0), 0, source)
+  if (rest.join('\n') !== current.join('\n')) void library.updateSettings({ playlistOrder: rest })
+}
+
+function onDragEnd(): void {
+  draggingId.value = ''
+  dropId.value = ''
+}
+
+// 下载管理 stays pinned above 设置 at the bottom of the rail; 导入歌单 belongs to
+// the playlist block it was separated from.
+const pinned = [{ to: '/downloads', label: '下载管理', icon: 'folder' }]
+const playlistTools = [{ to: '/playlist-import', label: '导入歌单', icon: 'list' }]
 async function createPlaylist(): Promise<void> { const name = await ui.prompt('新建歌单'); if (!name?.trim()) return; const list = await library.createPlaylist(name.trim()); await router.push('/playlist/' + list.id) }
 function playlistMenu(event: MouseEvent, id: string, name: string): void {
   ui.openMenu(event, [
@@ -24,12 +110,27 @@ function playlistMenu(event: MouseEvent, id: string, name: string): void {
 }
 </script>
 <template><aside class="sidebar" aria-label="主导航">
-  <nav><div class="nav-group"><RouterLink v-for="item in browse" :key="item.to" :to="item.to" class="nav-item"><AppIcon :name="item.icon"/><span>{{ item.label }}</span><small v-if="counts[item.to] !== undefined">{{ counts[item.to] }}</small></RouterLink></div>
-  <div class="nav-group"><RouterLink v-for="item in system" :key="item.to" :to="item.to" class="nav-item" :class="{ 'router-link-active': item.to === '/settings' && route.path.startsWith('/settings') }"><AppIcon :name="item.icon"/><span>{{ item.label }}</span><small v-if="counts[item.to] !== undefined">{{ counts[item.to] }}</small></RouterLink></div>
-  <div class="nav-group online-nav"><span class="nav-caption">在线音乐</span><RouterLink v-for="item in online" :key="item.to" :to="item.to" class="nav-item"><AppIcon :name="item.icon"/><span>{{ item.label }}</span><small>{{ counts[item.to] }}</small><i v-if="item.to === '/sources' && Object.values(library.platformHealth).some(result => result.status === 'available')" class="status-dot"/></RouterLink></div>
-  <div class="nav-group"><button class="nav-item create-playlist" @click="createPlaylist"><AppIcon name="add"/><span>新建歌单</span></button><RouterLink v-for="list in library.playlists" :key="list.id" :to="'/playlist/' + list.id" class="nav-item playlist-link" @contextmenu="playlistMenu($event, list.id, list.name)"><AppIcon :name="list.id === 'favorites' ? 'heart' : 'list'" :size="18"/><span>{{ list.name }}</span><small>{{ list.trackCount ?? 0 }}</small></RouterLink></div></nav>
-  <button class="sidebar-bottom" @click="router.push('/queue')"><AppIcon name="list" :size="17"/><span>播放队列</span><small>{{ player.queue.length }}</small><AppIcon name="next" :size="13"/></button>
+  <!--
+    Only the user's playlists are drag sources. A plain `<a>` is draggable by
+    default in Chromium, so without opting out, long-pressing 歌曲 or 下载管理
+    picked the link up and let you drop its hash URL anywhere in the window —
+    which reads as a broken version of the playlist reordering right below.
+  -->
+  <nav ref="navEl" @scroll.passive="onNavScroll"><div class="nav-group"><RouterLink v-for="item in browse" :key="item.to" :to="item.to" class="nav-item" :draggable="false"><AppIcon :name="item.icon"/><span>{{ item.label }}</span><small v-if="counts[item.to] !== undefined">{{ counts[item.to] }}</small></RouterLink></div>
+  <div class="nav-group"><div class="nav-row"><RouterLink to="/playlists" class="nav-item nav-playlists" :draggable="false"><AppIcon name="library"/><span>歌单管理</span></RouterLink><button class="nav-add" title="新建歌单" aria-label="新建歌单" @click="createPlaylist"><AppIcon name="add" :size="15"/></button></div><RouterLink v-for="tool in playlistTools" :key="tool.to" :to="tool.to" class="nav-item" :draggable="false"><AppIcon :name="tool.icon"/><span>{{ tool.label }}</span></RouterLink><RouterLink v-for="list in orderedPlaylists" :key="list.id" :to="'/playlist/' + list.id" class="nav-item playlist-link" :class="{ 'is-dragging': draggingId === list.id, 'is-over-top': dropId === list.id && !dropAfter, 'is-over-bottom': dropId === list.id && dropAfter }" :draggable="!pinnedLists.includes(list.id)" @dragstart="onDragStart($event, list.id)" @dragover="onDragOver($event, list.id)" @drop="onDrop($event, list.id)" @dragend="onDragEnd" @contextmenu="playlistMenu($event, list.id, list.name)"><AppIcon :name="list.id === 'favorites' ? 'heart' : 'list'" :size="18"/><span>{{ list.name }}</span><small>{{ list.trackCount ?? 0 }}</small></RouterLink></div></nav>
+  <div class="sidebar-pin">
+    <RouterLink v-for="item in pinned" :key="item.to" :to="item.to" class="sidebar-bottom" :draggable="false"><AppIcon :name="item.icon" :size="17"/><span>{{ item.label }}</span></RouterLink>
+    <button class="sidebar-bottom" :class="{ active: route.path.startsWith('/settings') }" @click="router.push('/settings')"><AppIcon name="settings" :size="17"/><span>设置</span></button>
+  </div>
 </aside></template>
 <style scoped>
-.sidebar{width:var(--sidebar-width);flex:none;padding:12px 12px 10px 14px;display:flex;flex-direction:column;background:var(--bg-elevated)}nav{flex:1;overflow:auto;scrollbar-width:thin}.nav-group{padding:4px 0 14px}.nav-item{position:relative;display:flex;align-items:center;gap:15px;min-height:43px;margin:2px 0;padding:9px 14px;width:100%;color:var(--text-primary);text-decoration:none;background:none;border:0;border-radius:6px;font:inherit;font-size:14px;text-align:left;cursor:pointer}.nav-item span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.nav-item small{font-size:11px;opacity:.45}.nav-item:hover{background:var(--bg-hover)}.nav-item.router-link-active{background:var(--bg-hover)}.nav-item.router-link-active:before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:3px;background:var(--accent);border-radius:4px}.nav-caption{display:block;font-size:10px;letter-spacing:.14em;color:var(--text-tertiary);margin:0 14px 7px}.status-dot{width:5px;height:5px;border-radius:50%;background:var(--accent)}.playlist-link{color:var(--text-secondary);font-size:13px;min-height:39px}.create-playlist{margin-bottom:6px}.sidebar-bottom{display:flex;align-items:center;gap:14px;padding:14px;color:var(--text-secondary);background:none;border:0;font:inherit;text-align:left;cursor:pointer}.sidebar-bottom span{flex:1}
+.sidebar{width:var(--sidebar-width);flex:none;padding:12px 12px 10px 14px;display:flex;flex-direction:column;background:var(--bg-elevated)}/* No `scrollbar-width` here: the global ::-webkit-scrollbar rule is the one the content pane uses, and opting this column into the browser's thin variant made the two scrollbars look different side by side. */nav{flex:1;overflow:auto}/* Overlay behaviour for the rail only: invisible at rest, drawn while the list moves (see onNavScroll), and still visible when grabbed directly. */nav::-webkit-scrollbar-thumb{background-color:transparent}nav.is-scrolling::-webkit-scrollbar-thumb,nav::-webkit-scrollbar-thumb:hover{background-color:var(--border-strong);background-clip:content-box}.nav-group{padding:4px 0 14px}.nav-item{position:relative;display:flex;align-items:center;gap:15px;min-height:43px;margin:2px 0;padding:9px 14px;width:100%;color:var(--text-primary);text-decoration:none;background:none;border:0;border-radius:6px;font:inherit;font-size:14px;text-align:left;cursor:pointer}.nav-item span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.nav-item small{font-size:11px;opacity:.45}.nav-item:hover{background:var(--bg-hover)}.nav-item.router-link-active{background:var(--bg-hover)}.nav-item.router-link-active:before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:3px;background:var(--accent);border-radius:4px}/* 歌单管理 is a row like any other; 新建歌单 rides at its right edge and only
+   appears while the row is hovered (or the button has keyboard focus), so at
+   rest the two playlist entries read as one list. */
+.nav-row{position:relative}.nav-add{position:absolute;right:10px;top:50%;transform:translateY(-50%);width:26px;height:26px;display:grid;place-items:center;opacity:0;color:var(--text-secondary);background:none;border:0;border-radius:var(--radius-sm);cursor:pointer;transition:opacity var(--dur-fast) var(--ease-out),background-color var(--dur-fast) var(--ease-out)}.nav-row:hover .nav-add,.nav-add:focus-visible{opacity:1}.nav-add:hover{color:var(--text-primary);background:var(--bg-hover)}.playlist-link{color:var(--text-secondary);font-size:13px;min-height:39px}/* Only the user lists carry `draggable`; the built-in pair keeps the normal
+   pointer so it reads as fixed. The line is an inset shadow rather than a
+   border so a row never jumps while being pointed at. */
+.playlist-link[draggable="true"]{cursor:grab}.playlist-link[draggable="true"]:active{cursor:grabbing}.playlist-link.is-dragging{opacity:.4}.playlist-link.is-over-top{box-shadow:inset 0 2px 0 var(--accent)}.playlist-link.is-over-bottom{box-shadow:inset 0 -2px 0 var(--accent)}.sidebar-pin{flex:none;padding-top:6px;border-top:1px solid var(--divider)}/* The pinned rows are nav rows: same box, radius and active bar, so selecting
+   设置 highlights exactly like selecting 歌曲 above it. */
+.sidebar-bottom{position:relative;display:flex;align-items:center;gap:15px;min-height:43px;margin:2px 0;padding:9px 14px;width:100%;color:var(--text-primary);background:none;border:0;border-radius:6px;font:inherit;font-size:14px;text-decoration:none;text-align:left;cursor:pointer}.sidebar-bottom span{flex:1}.sidebar-bottom:hover{background:var(--bg-hover)}.sidebar-bottom.active,.sidebar-bottom.router-link-active{background:var(--bg-hover)}.sidebar-bottom.active:before,.sidebar-bottom.router-link-active:before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:3px;background:var(--accent);border-radius:4px}
 </style>

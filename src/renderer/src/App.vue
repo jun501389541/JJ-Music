@@ -8,6 +8,8 @@
  * route change so the player bar never unmounts and audio is never interrupted.
  */
 import { toMediaUrl } from '@shared/media-url'
+import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
+import { activeLines } from '@shared/desktop-lyric'
 import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContextMenu from './components/ContextMenu.vue'
@@ -117,6 +119,58 @@ systemTheme.addEventListener('change', onSystemTheme)
 
 /** Tray menu and taskbar buttons drive the same transport actions. */
 let offTransportCommand: (() => void) | undefined
+/** The lyric overlay's menu and drag; unsubscribed alongside the tray's. */
+let offDesktopLyricCommand: (() => void) | undefined
+
+/* ---------------------------------------------------------------- *
+ * Desktop lyrics
+ *
+ * The overlay is a separate window with no access to the player, so the line it
+ * should show is pushed to it here — from the same state the now-playing page
+ * already renders, rather than a second copy of the lyric logic that could
+ * drift. Nothing is sent while the feature is off.
+ * ---------------------------------------------------------------- */
+const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
+  if (!library.settings.desktopLyric) return null
+  const { line, translation, romanization } = activeLines(player.lyrics?.lines ?? [], player.activeLyricIndex)
+  return {
+    line,
+    translation,
+    romanization,
+    title: player.currentTrack?.name ?? '',
+    artist: player.currentTrack?.singer ?? '',
+    fontSize: library.settings.desktopLyricFontSize,
+    showTranslation: library.settings.lyricTranslation,
+    locked: library.settings.desktopLyricLocked,
+    // Read at push time rather than tracked: the accent is applied to a CSS
+    // custom property by the theme watcher, and a strip that catches up on the
+    // next lyric line is not worth a second source of truth for the colour.
+    accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffd166'
+  }
+})
+
+watch(desktopLyricPayload, payload => {
+  if (payload) window.jj.desktopLyric.push(payload)
+}, { immediate: true })
+
+/**
+ * Apply a request from the overlay, by writing the matching preference.
+ *
+ * The overlay never changes its own window: it asks, this writes, and the main
+ * process reacts to the write. So the 词 button and the overlay's menu cannot
+ * fall out of step, and a drag that ends off-screen is persisted through the
+ * same path that clamps it back.
+ */
+function onDesktopLyricCommand(command: DesktopLyricCommand): void {
+  switch (command.type) {
+    case 'close': void library.updateSettings({ desktopLyric: false }); break
+    case 'toggle-lock': void library.updateSettings({ desktopLyricLocked: !library.settings.desktopLyricLocked }); break
+    case 'toggle-translation': void library.updateSettings({ lyricTranslation: !library.settings.lyricTranslation }); break
+    case 'set-font': void library.updateSettings({ desktopLyricFontSize: command.size }); break
+    case 'moved': void library.updateSettings({ desktopLyricPosition: { x: command.x, y: command.y } }); break
+  }
+}
+
 
 /**
  * True once a previous session's track has been loaded.
@@ -133,18 +187,31 @@ const lastSessionRestored = ref(false)
  * every time the pointer crosses into a child element, so a boolean flag
  * flickers and the overlay strobes as the user moves across the window.
  * Counting enters and leaves keeps it stable until the pointer really leaves.
+ *
+ * Everything here is gated on the drag carrying files. The sidebar reorders
+ * playlists with an internal drag, and an unconditional `@dragover.prevent`
+ * would arm this overlay for it and make every row in the window a legal drop
+ * target — including the built-in playlists the reorder must not cross.
  * ---------------------------------------------------------------- */
 const dragActive = ref(false)
 let dragDepth = 0
 
-function onDragEnter(): void {
+function isFileDrag(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types
+  return !!types && Array.from(types).includes('Files')
+}
+
+function onDragEnter(event: DragEvent): void {
+  if (!isFileDrag(event)) return
   dragDepth += 1
   dragActive.value = true
 }
 
 function onDragOver(event: DragEvent): void {
+  if (!isFileDrag(event)) return
   // Required for the drop to fire at all; also shows the "copy" cursor.
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+  event.preventDefault()
 }
 
 function onDragLeave(): void {
@@ -185,6 +252,7 @@ async function onDrop(event: DragEvent): Promise<void> {
 onUnmounted(() => {
   systemTheme.removeEventListener('change', onSystemTheme)
   offTransportCommand?.()
+  offDesktopLyricCommand?.()
 })
 
 
@@ -226,6 +294,14 @@ onMounted(async () => {
   player.setPlayMode(library.settings.playMode)
   player.setQuality(library.settings.playQuality)
 
+  /*
+   * The saved output device has to be re-applied here: the setting used to be
+   * read only by the audio settings page, so a chosen speaker worked until the
+   * next launch and then silently fell back to the system default.
+   */
+  if (library.settings.outputDeviceId) void player.setOutputDevice(library.settings.outputDeviceId)
+
+  offDesktopLyricCommand = window.jj.desktopLyric.onCommand(onDesktopLyricCommand)
   offTransportCommand = window.jj.shell?.onTransportCommand((command) => {
     if (command === 'toggle') void player.toggle()
     else if (command === 'previous') void player.previous()
@@ -358,15 +434,12 @@ const contentKey = computed(() => route.fullPath)
     :class="{ 'is-dragging': dragActive }"
     tabindex="-1"
     @keydown="onKeydown"
-    @dragenter.prevent="onDragEnter"
-    @dragover.prevent="onDragOver"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop.prevent="onDrop"
   >
-    <TitleBar
-      :show-back="route.name !== 'discover' && route.name !== undefined"
-      @toggle-now-playing="nowPlayingOpen = !nowPlayingOpen"
-    />
+    <TitleBar @toggle-now-playing="nowPlayingOpen = !nowPlayingOpen" />
 
     <div class="shell__body">
       <SideBar @open-now-playing="nowPlayingOpen = true" />

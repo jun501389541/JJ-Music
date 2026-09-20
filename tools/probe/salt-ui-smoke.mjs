@@ -125,9 +125,11 @@ try {
  check('default landing remains discovery', await evaluate('document.querySelector("h1").textContent === "发现音乐"'))
  await evaluate(`uiTestLibrary.updateSettings({theme:'dark'})`)
  await route('/library')
- check('classification and playlist counts are visible', await evaluate(`['/library','/genres','/albums','/artists','/music-library','/sources','/playlist/default','/playlist/favorites'].every(path => /^\\d+$/.test(document.querySelector('.sidebar a[href="#'+path+'"] small')?.textContent || ''))`))
+ // /music-library and /sources left the rail for the Settings page, so they are
+ // no longer expected to carry a count here.
+ check('classification and playlist counts are visible', await evaluate(`['/library','/genres','/albums','/artists','/playlist/default','/playlist/favorites'].every(path => /^\\d+$/.test(document.querySelector('.sidebar a[href="#'+path+'"] small')?.textContent || ''))`))
  check('virtualized library rows', await evaluate('uiTestLibrary.tracks.length > 0 && document.querySelectorAll(".track-row").length < 35'))
- for (const path of ['/genres','/folders','/music-library','/albums','/artists','/playlist/favorites','/search','/settings','/settings/appearance/lyrics']) {
+ for (const path of ['/genres','/folders','/music-library','/albums','/artists','/playlist/favorites','/search','/recent','/settings','/settings/appearance/lyrics']) {
    await route(path); check(`route ${path}`, await evaluate('!!document.querySelector(".view")'))
  }
  await evaluate('uiTestPlayer.playQueue(uiTestLibrary.tracks.slice(0,3),0)')
@@ -136,8 +138,11 @@ try {
  check('history records successful playback', await evaluate('uiTestLibrary.recentPlayed[0].id === uiTestPlayer.currentTrack.id'))
  check('history persists through IPC', await evaluate('(async () => (await window.jj.settings.get()).recentPlayed[0].id === uiTestPlayer.currentTrack.id)()'))
  await route('/discover')
- check('discovery shows recent playback instead of recently added', await evaluate('document.querySelector(".recent").innerText.includes("最近播放") && !document.querySelector(".recent").innerText.includes("最近添加")'))
- await screenshot('09-discovery-history')
+ check('discovery no longer carries the recent-played list', await evaluate('!document.querySelector(".recent")'))
+ await route('/recent')
+ check('recent playback has its own rail entry and list', await evaluate('document.querySelector(".sidebar")?.innerText.includes("最近播放") && !!document.querySelector(".recent-view .track-row")'))
+ check('recent page shows history, not newly added files', await evaluate('!document.body.innerText.includes("最近添加")'))
+ await screenshot('09-recent-playback')
  const query = await evaluate('uiTestPlayer.currentTrack.name')
  await route('/search')
  // Tabs must be the adapters the main process reports. They were a hand-copied
@@ -173,14 +178,19 @@ try {
  check('search query updates on same-route navigation',await evaluate('document.querySelector(".searchbar input").value === "陈奕迅" && document.querySelector(".track-row")?.innerText.includes("陈奕迅")'))
  await evaluate('uiTestUi.nowPlaying = true')
  await sleep(400)
- await click('.np__bar-side button', 'EQ 均衡器')
+ // The playback screen has no EQ / 播放列表 buttons of its own any more, and no
+ // second 更多 button at the top right either: its bottom bar is the shared
+ // PlayerBar, whose single 更多 menu opens both panels.
+ await click('.playbar--bare .mini-right > .icon-btn', '播放更多选项')
+ await click('.menu-layer .menu-panel button', 'EQ 均衡器')
  check('EQ opens inside playback screen', await evaluate('!!document.querySelector(".np .equalizer-content")'))
  await click('.eq-presets button', '摇滚')
  await sleep(500)
  check('EQ changes apply and persist', await evaluate('(async () => uiTestPlayer.equalizerPreset === "摇滚" && (await window.jj.settings.get()).equalizerName === "摇滚")()'))
  await screenshot('11-playback-equalizer')
  await click('.np-panel button[aria-label="关闭播放面板"]', '')
- await click('.np__bar-side button', '播放列表')
+ await click('.playbar--bare .mini-right > .icon-btn', '播放更多选项')
+ await click('.menu-layer .menu-panel button', '播放列表')
  check('playback list opens within player', await evaluate('!!document.querySelector(".np-panel .tracklist") && document.querySelectorAll(".np-panel .track-row").length === 3'))
  await evaluate(`document.querySelectorAll('.np-panel .track-row')[1].dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`)
  await sleep(800)
@@ -191,6 +201,51 @@ try {
  check('drawer fits minimum window size', await evaluate(`document.querySelector('.np-panel').getBoundingClientRect().right <= innerWidth && document.querySelector('.np-panel').getBoundingClientRect().bottom <= innerHeight`))
  await send('Emulation.clearDeviceMetricsOverride')
  await evaluate('uiTestUi.playbackPanel=null;uiTestUi.nowPlaying=false')
+ /*
+  * Desktop lyrics. This has shipped as a setting that did nothing twice, so the
+  * check is that a *window* appears and shows the same line the player is on —
+  * not that a boolean was stored.
+  */
+ await evaluate('uiTestLibrary.updateSettings({desktopLyric:true})')
+ let lyricTarget = null
+ for (let attempt = 0; attempt < 40 && !lyricTarget; attempt += 1) {
+  await sleep(300)
+  const pages = (await (await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/list`)).json()).filter(t => t.type === 'page')
+  lyricTarget = pages.find(t => t.url.includes('desktop-lyrics'))
+ }
+ check('desktop lyric setting opens a second window', !!lyricTarget, lyricTarget ? lyricTarget.url.split('/').pop() : 'never appeared')
+ if (lyricTarget) {
+  const lyricSend = await connect(lyricTarget.webSocketDebuggerUrl)
+  await lyricSend('Runtime.enable')
+  await lyricSend('Page.enable')
+  const lyricEval = async expression => {
+   const response = await lyricSend('Runtime.evaluate', {expression, returnByValue:true, awaitPromise:true})
+   if (response.exceptionDetails) throw Error(response.exceptionDetails.text + ': ' + response.result?.description)
+   return response.result.value
+  }
+  await sleep(1500)
+  check('the overlay window has no jj bridge, only its three methods', await lyricEval('typeof window.jj === "undefined" && typeof window.desktopLyric?.dragTo === "function"'))
+  const strip = await lyricEval(`({ line: document.querySelector('#line')?.textContent ?? null, fallback: document.querySelector('#line')?.classList.contains('is-fallback') ?? null, size: getComputedStyle(document.documentElement).getPropertyValue('--lyric-size').trim(), background: getComputedStyle(document.body).backgroundColor })`)
+  const expected = await evaluate(`(() => { const i = uiTestPlayer.activeLyricIndex; const l = i >= 0 ? (uiTestPlayer.lyrics?.lines?.[i]?.text ?? '') : ''; return l || (uiTestPlayer.currentTrack ? uiTestPlayer.currentTrack.name : '') })()`)
+  check('the strip shows the line the player is on', strip.line === expected && strip.line !== '', `悬浮窗="${strip.line}" 应有="${expected}"`)
+  check('the strip is transparent, not a grey box', strip.background === 'rgba(0, 0, 0, 0)', strip.background)
+  await evaluate('uiTestLibrary.updateSettings({desktopLyricFontSize:46})')
+  await sleep(800)
+  check('font size reaches the overlay live', (await lyricEval(`getComputedStyle(document.documentElement).getPropertyValue('--lyric-size').trim()`)) === '46px')
+  await evaluate('uiTestLibrary.updateSettings({desktopLyricFontSize:28,desktopLyricLocked:true})')
+  await sleep(800)
+  check('lock state reaches the overlay', await lyricEval(`document.body.classList.contains('is-locked')`))
+  const shot = await lyricSend('Page.captureScreenshot', {format:'png'}).catch(() => null)
+  if (shot) writeFileSync(join(screenshotDir, '14-desktop-lyrics.png'), Buffer.from(shot.data, 'base64'))
+  await evaluate('uiTestLibrary.updateSettings({desktopLyricLocked:false,desktopLyric:false})')
+  let closed = false
+  for (let attempt = 0; attempt < 25 && !closed; attempt += 1) {
+   await sleep(300)
+   closed = !(await (await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/list`)).json()).some(t => t.type === 'page' && t.url.includes('desktop-lyrics'))
+  }
+  check('turning the setting off destroys the overlay window', closed)
+  lyricSend.close?.()
+ }
  await route('/settings/audio/equalizer')
  await sleep(400)
  check('legacy EQ entry opens playback EQ', await evaluate('!!document.querySelector(".np .equalizer-content")'))

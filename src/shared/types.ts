@@ -366,6 +366,41 @@ export interface AppSettings extends UiPreferences {
   minimizeToTray: boolean
   /** Preferred audio output device id; empty means the system default. */
   outputDeviceId: string
+  /**
+   * Desktop-lyric overlay: an always-on-top strip of lyrics outside the window.
+   *
+   * The main process watches this on every settings write and creates or
+   * destroys the window, so the setting means the same thing wherever it is
+   * changed — the toolbar's 词 button, the 更多 menu, or the overlay's own
+   * right-click menu.
+   */
+  desktopLyric: boolean
+  /**
+   * Locked overlay: the window ignores the mouse, so clicks land on whatever is
+   * behind it. The price of that is that the overlay cannot be right-clicked or
+   * dragged either, so unlocking has to be reachable from the app — which is
+   * what the 桌面歌词 group in the 更多 menu is for.
+   */
+  desktopLyricLocked: boolean
+  /** Overlay text size in px, independent of the now-playing page's lyric size. */
+  desktopLyricFontSize: number
+  /**
+   * Where the user parked the overlay, as its top-left corner.
+   *
+   * Null until it has been moved once, so the first run can centre it against
+   * the work area rather than hard-coding a position that assumes one monitor.
+   */
+  desktopLyricPosition: { x: number; y: number } | null
+  /**
+   * Sidebar playlist order, by id.
+   *
+   * 我喜欢的 and 默认列表 are fixed at the top, so this only ever orders the
+   * user's own lists. Ids missing from the array keep store order at the end,
+   * and ids left over from a deleted playlist are ignored — the list is a hint,
+   * not the source of truth, which is what lets it survive renames and deletes
+   * without a migration.
+   */
+  playlistOrder: string[]
 }
 
 /* ------------------------------------------------------------------ *

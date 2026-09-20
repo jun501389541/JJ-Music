@@ -38,6 +38,7 @@ import type {
 } from '@shared/types'
 import { LX_QUALITIES, QUALITY_ORDER } from '@shared/types'
 import { toLegacyOnline } from './legacy-music-info'
+import { assertPublicHttpUrl } from '../online/url-guard'
 import type { LoadedApi, SourceStore } from './source-store'
 import { validateSourceBeforeStart, type ValidationReport } from './source-validator'
 import {
@@ -363,6 +364,10 @@ export class SourceEngine {
       this.store.setError(api.meta.id, undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // Reap the child. Disabling the source below bypasses `stop()`, so without
+      // this a script that hangs on init keeps its process — and its memory
+      // ceiling — resident until the app exits.
+      await this.teardown(runtime, new Error(message))
       // A script that terminates itself silently on startup is the signature of
       // an anti-tamper / environment-probe design — the class that includes the
       // source observed shutting a machine down. Quarantining it means the user
@@ -584,6 +589,10 @@ export class SourceEngine {
     signal: string | null,
     settle: (error?: Error) => void
   ): void {
+    // `stop()` marks the runtime dead before it kills the child, so a runtime
+    // that was already dead on entry is an intentional shutdown and must not be
+    // reported as a crash.
+    const intentional = runtime.dead
     runtime.dead = true
     // Drop this script from the routing table immediately: a crashed source
     // must not be handed further requests, and any platform it was the best
@@ -611,6 +620,17 @@ export class SourceEngine {
     if (code !== 0 || aborted) {
       settle(error)
       this.emit('scriptError', runtime.api.meta.id, reason)
+      // A source that came up and then died is no longer running, so leaving the
+      // stored flag alone made the card read 已启用 forever: `scriptError` has no
+      // subscriber in the main process and `getCrashReason()` had no caller, so
+      // the reason was computed and thrown away. Reverting the flag mirrors what
+      // the boot-failure path already does, and the user can flip it again to
+      // retry.
+      if (!intentional) {
+        this.store.setError(runtime.api.meta.id, reason)
+        this.store.setEnabled(runtime.api.meta.id, false)
+        this.emit('sourcesChanged')
+      }
     }
     // Reclaim the scratch directory once the process is gone.
     rmSync(runtime.scratchDir, { recursive: true, force: true })
@@ -745,9 +765,22 @@ export class SourceEngine {
     const runtime = this.runtimes.get(apiId)
     if (!runtime) return
     this.runtimes.delete(apiId)
+    await this.teardown(runtime, new Error('音源已停止'))
+    this.rebuildOwners()
+    this.emit('sourcesChanged')
+  }
+
+  /**
+   * Mark a runtime dead, fail its in-flight requests and reclaim its process.
+   *
+   * Deliberately does not touch `this.runtimes`: a source that never finished
+   * init is reaped through here too, and the settings page reads that record's
+   * logs and crash reason afterwards.
+   */
+  private async teardown(runtime: ScriptRuntime, reason: Error): Promise<void> {
     runtime.dead = true
-    this.fileModeRuntimes.delete(apiId)
-    this.failAllPending(runtime, new Error('音源已停止'))
+    this.fileModeRuntimes.delete(runtime.api.meta.id)
+    this.failAllPending(runtime, reason)
 
     // In file mode, removing the scratch directory is the shutdown signal: the
     // child's next heartbeat write fails and it stops beating (it no longer
@@ -768,26 +801,29 @@ export class SourceEngine {
       // In file mode this reaches only the runas wrapper; the real child was
       // handled by the tree-kill above.
       runtime.child.kill()
-      await new Promise<void>((resolveStop) => {
-        const timer = setTimeout(() => {
-          try {
-            runtime.child.kill('SIGKILL')
-          } catch {
-            /* already gone */
-          }
-          resolveStop()
-        }, 2000)
-        runtime.child.once('exit', () => {
-          clearTimeout(timer)
-          resolveStop()
+      // A child that already exited cannot fire `exit` again, so without this
+      // check the wait always ran to the 2 s SIGKILL fallback — which stalled
+      // both restarting a crashed source (`start()` awaits `stop()`) and quitting
+      // the app with one crashed (`before-quit` awaits `stopAll()`).
+      if (runtime.child.exitCode === null && runtime.child.signalCode === null) {
+        await new Promise<void>((resolveStop) => {
+          const timer = setTimeout(() => {
+            try {
+              runtime.child.kill('SIGKILL')
+            } catch {
+              /* already gone */
+            }
+            resolveStop()
+          }, 2000)
+          runtime.child.once('exit', () => {
+            clearTimeout(timer)
+            resolveStop()
+          })
         })
-      })
+      }
     } catch {
       /* already gone */
     }
-
-    this.rebuildOwners()
-    this.emit('sourcesChanged')
   }
 
   /** Why a source stopped, when it died abnormally. Shown in the UI. */
@@ -1193,7 +1229,17 @@ export function buildQualityLadder(preferred: Quality, advertised: Quality[]): Q
 
 /** LX's acceptance test for a `musicUrl` result. */
 export function isValidMusicUrl(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 2048 && /^https?:/.test(value)
+  if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return false
+  if (!/^https?:/.test(value)) return false
+  // A script decides what address comes back, so this is attacker-chosen and gets
+  // the same treatment as every other caller-supplied URL: `/^https?:/` alone
+  // accepted loopback, link-local and the cloud metadata address.
+  try {
+    assertPublicHttpUrl(value)
+  } catch {
+    return false
+  }
+  return true
 }
 
 /** Truncate to `max`, returning `undefined` for empty input. */

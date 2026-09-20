@@ -117,12 +117,7 @@ export const IPC = {
   matchMetadata: 'match:metadata',
   matchApply: 'match:apply',
   /** Cover art lookup for a track. */
-  matchCover: 'match:cover',
-
-  // Dialogs
-  dialogOpenFolder: 'dialog:open-folder',
-  dialogOpenFiles: 'dialog:open-files',
-  dialogOpenLyric: 'dialog:open-lyric'
+  matchCover: 'match:cover'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

@@ -187,6 +187,25 @@ export class DesktopLyrics {
   }
 
   /**
+   * Whether an event came from the overlay's own top frame.
+   *
+   * `sender` alone identifies the window, and a sandboxed preload is handed to
+   * every frame in it, so an embedded frame would get the same two powers the
+   * page has. `fromMainWindow` in the main process checks the frame for the same
+   * reason; these channels move an always-on-top window and open a native menu,
+   * so they are not the place to be looser.
+   */
+  private fromOverlay(event: IpcMainEvent): boolean {
+    const contents = this.window?.webContents
+    return Boolean(
+      contents &&
+      !contents.isDestroyed() &&
+      event.sender === contents &&
+      event.senderFrame === contents.mainFrame
+    )
+  }
+
+  /**
    * Move the window to the coordinates the page asked for.
    *
    * The sender check matters more here than elsewhere: this channel can move an
@@ -200,11 +219,16 @@ export class DesktopLyrics {
    * and returned to its old spot on the next launch.
    */
   dragTo(event: IpcMainEvent, position: unknown): void {
-    if (!this.window || event.sender !== this.window.webContents) return
+    if (!this.window || !this.fromOverlay(event)) return
     const point = position as { x?: unknown; y?: unknown }
     if (typeof point?.x !== 'number' || typeof point?.y !== 'number') return
     if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return
-    this.window.setPosition(Math.round(point.x), Math.round(point.y))
+    // Clamped, not just validated: the page derives the target from the pointer,
+    // so dragging to the far edge would park an 820px strip almost entirely off
+    // screen, where it cannot be grabbed again for the rest of the session.
+    const workArea = screen.getDisplayMatching(this.window.getBounds()).workArea
+    const { x, y } = clampPosition({ x: point.x, y: point.y }, { width: WIDTH, height: HEIGHT }, workArea)
+    this.window.setPosition(x, y)
     this.persistPosition(this.window)
   }
 
@@ -216,7 +240,7 @@ export class DesktopLyrics {
    * they are forwarded so the renderer can write them as ordinary settings.
    */
   openMenu(event: IpcMainEvent): void {
-    if (!this.window || event.sender !== this.window.webContents) return
+    if (!this.window || !this.fromOverlay(event)) return
     const settings = this.hooks.settings()
     const send = (command: DesktopLyricCommand) => this.hooks.forward(command)
     const menu = Menu.buildFromTemplate([

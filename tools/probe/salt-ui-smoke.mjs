@@ -101,6 +101,18 @@ for (const name of ['settings.json', 'playlists.json', 'library/index.json']) {
       ? testDataDir + value.slice(originalDataDir.length) : value)
   writeFileSync(file, JSON.stringify(data))
 }
+// The download directory is set here, in the copied profile, rather than through
+// the running app: `downloadFolder` is no longer writable over IPC (it decides
+// where the app writes files), and the only channel that sets it opens a modal
+// picker this probe cannot drive.
+{
+  const file = join(testDataDir, 'settings.json')
+  if (existsSync(file)) {
+    const data = JSON.parse(readFileSync(file, 'utf8'))
+    data.downloadFolder = join(testDataDir, 'downloaded')
+    writeFileSync(file, JSON.stringify(data))
+  }
+}
 const child = spawn(electronBin, [...(packagedApp?[]:['.']),`--user-data-dir=${testDataDir}`], { cwd: repoRoot, stdio: 'inherit', windowsHide: true, env: { ...process.env, JJ_DEBUG_PORT: String(DEBUG_PORT), JJ_TEST_USER_DATA: testDataDir, ELECTRON_RUN_AS_NODE: undefined } })
 const childExit=new Promise(resolve=>child.once('exit',code=>resolve(code)))
 const screenshotDir = join(repoRoot, 'docs', 'research', 'screenshots', 'salt-ui')
@@ -307,7 +319,10 @@ try {
    await evaluate(`document.querySelector('.track-row').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:450,clientY:220}))`)
    check('online context menu exposes quality downloads',await evaluate('uiTestUi.menu.items.some(item=>item.label==="下载歌曲" && item.children.some(child=>child.label.includes("128k")))'))
    await evaluate('uiTestUi.menu=null')
-   await evaluate(`uiTestLibrary.updateSettings({downloadFolder:${JSON.stringify(join(testDataDir,'downloaded'))}})`)
+   // Asserted rather than set: the folder comes from the copied profile above, and
+   // if this silently fell back to the real Downloads directory the probe would
+   // scatter sample files into the user's own folders while still passing.
+   check('download sample uses the isolated profile folder', await evaluate(`(async () => (await window.jj.downloads.folder()).startsWith(${JSON.stringify(testDataDir)}))()`))
    await evaluate(`(async()=>{window.downloadSample=(await window.jj.music.search('tx','晴天 周杰伦',1)).list[0];window.downloadTestId=(await window.jj.downloads.add([downloadSample],'128k'))[0]})()`)
    await route('/downloads')
    for(let i=0;i<90;i++){if(await evaluate('(async()=>["completed","failed","cancelled"].includes((await window.jj.downloads.list()).find(t=>t.id===downloadTestId).status))()'))break;await sleep(1000)}

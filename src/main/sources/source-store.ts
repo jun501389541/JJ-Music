@@ -266,6 +266,13 @@ function toMeta(api: StoredApi): UserApiMeta {
  * invalidates naturally, and identical scripts share one entry.
  */
 const riskCache = new Map<string, Pick<UserApiMeta, 'risk' | 'riskNotes'>>()
+/**
+ * The keys are whole encoded scripts — up to ~740 KB each — and every re-import
+ * of a modified script adds one, so without a ceiling this only ever grows. The
+ * cache exists to spare a page refresh from re-scanning every script, and no user
+ * has that many sources installed, so a small bound costs nothing.
+ */
+const RISK_CACHE_LIMIT = 32
 function riskFor(storedScript: string): Pick<UserApiMeta, 'risk' | 'riskNotes'> {
   const cached = riskCache.get(storedScript)
   if (cached) return cached
@@ -276,6 +283,10 @@ function riskFor(storedScript: string): Pick<UserApiMeta, 'risk' | 'riskNotes'> 
     result = { risk: report.risk, riskNotes: report.notes }
   } catch {
     result = { risk: 'medium', riskNotes: ['无法解码脚本内容，无法评估其行为'] }
+  }
+  if (riskCache.size >= RISK_CACHE_LIMIT) {
+    const oldest = riskCache.keys().next().value
+    if (oldest !== undefined) riskCache.delete(oldest)
   }
   riskCache.set(storedScript, result)
   return result

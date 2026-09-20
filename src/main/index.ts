@@ -159,7 +159,14 @@ async function createServices(): Promise<Services> {
       const result = await sourceEngine.getLyric(track.source, track).catch(() => ({lyric:''}))
       return result.lyric?.trim() ? result : fetchOnlineLyric(track)
     },
-    cover: async track => track.picUrl || sourceEngine.getPic(track.source, track)
+    cover: async track => track.picUrl || sourceEngine.getPic(track.source, track),
+    // The audio and cover URLs being fetched here were produced by an untrusted
+    // source script, so this must validate every hop like the other caller-supplied
+    // fetch paths do. Left to the default `fetch` in DownloadManager, a script
+    // could point the app at loopback or a cloud metadata address.
+    fetch: (input, init) => typeof input === 'string'
+      ? safeFetchResponse(input, { init })
+      : Promise.reject(new Error('下载不接受非字符串地址'))
   })
   await downloads.load()
   const instance: Services = { dataDir, settings, playlists, library, sourceStore, sourceEngine, downloads }
@@ -231,7 +238,15 @@ function createWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      webSecurity: true
+      webSecurity: true,
+      /*
+       * This app keeps playing when the window is hidden to the tray, and the
+       * desktop lyric strip is driven from here. Left throttled, a hidden window
+       * gets its timers cut — and after five minutes hidden, cut to roughly one a
+       * minute — which would leave the progress bar and the strip lagging behind
+       * audio that is still running correctly.
+       */
+      backgroundThrottling: false
     }
   })
 
@@ -1369,39 +1384,6 @@ function registerIpc(): void {
     }
   })
 
-  /* ---------------- dialogs ---------------- */
-  handle(IPC.dialogOpenFolder, async () => {
-    const result = await dialog.showOpenDialog({
-      title: '选择音乐文件夹',
-      properties: ['openDirectory', 'multiSelections']
-    })
-    return result.canceled ? null : (result.filePaths[0] ?? null)
-  })
-
-  handle(IPC.dialogOpenFiles, async () => {
-    const result = await dialog.showOpenDialog({
-      title: '选择音乐文件',
-      filters: [{ name: '音频文件', extensions: ['mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wav'] }],
-      properties: ['openFile', 'multiSelections']
-    })
-    if (result.canceled) return null
-    rememberPicked(result.filePaths)
-    return result.filePaths
-  })
-
-  handle(IPC.dialogOpenLyric, async () => {
-    const result = await dialog.showOpenDialog({
-      title: '选择歌词文件',
-      filters: [{ name: '歌词文件', extensions: ['lrc', 'txt'] }],
-      properties: ['openFile']
-    })
-    if (result.canceled) return null
-    // The renderer gets the path and reads it back through `lyric:readFile`,
-    // which is allow-listed — so a dialog choice has to enter the list here or
-    // the user's own pick would be rejected on its return trip.
-    rememberPicked(result.filePaths)
-    return result.filePaths[0] ?? null
-  })
 }
 
 /* ------------------------------------------------------------------ *

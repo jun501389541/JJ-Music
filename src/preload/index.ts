@@ -294,12 +294,6 @@ const api = {
     /** Fetch cover art for a candidate as a data URL. */
     cover: (music: OnlineMusicInfo) =>
       invoke<{ dataUrl: string; mime: string } | null>(IPC.matchCover, music)
-  },
-
-  dialog: {
-    openFolder: () => invoke<string | null>(IPC.dialogOpenFolder),
-    openFiles: () => invoke<string[] | null>(IPC.dialogOpenFiles),
-    openLyric: () => invoke<string | null>(IPC.dialogOpenLyric)
   }
 }
 

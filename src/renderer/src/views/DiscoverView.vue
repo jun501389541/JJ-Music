@@ -187,14 +187,14 @@ async function shuffleAll(): Promise<void> {
 .cards {
   display: grid;
   /*
-   * `minmax(170px, 1fr)` let four cards divide the whole viewport between them,
-   * so a status tile grew to 472px wide on a large window. The upper bound keeps
-   * them tiles; auto-fit collapses the unused tracks, so they stay left-aligned
-   * instead of drifting apart.
+   * Four fixed columns so the status row never wraps, capped at 4 × 260 + gaps:
+   * `minmax(170px, 1fr)` alone let the tiles divide the whole viewport between
+   * them, which grew a single status card to 472px wide on a large window.
    */
-  grid-template-columns: repeat(auto-fit, minmax(170px, 260px));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 28px;
+  max-inline-size: 1076px;
 }
 
 /* ---------------- recent ---------------- */

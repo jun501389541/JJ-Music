@@ -70,10 +70,12 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
         <div v-else-if="item.kind === 'color'" class="accent-control"><button class="btn" :class="{ 'btn--primary': library.settings.accent === 'auto' }" @click="update({ accent: 'auto' })">跟随封面</button><input type="color" :value="library.settings.accent === 'auto' ? '#4cc2ff' : library.settings.accent" aria-label="强调色" @input="update({ accent: ($event.target as HTMLInputElement).value })"/></div>
       </div>
     </template>
+    <!-- Inside `.settings-items` so it shares the group panel, width and dividers;
+         as a sibling it rendered outside the group as a detached full-width row. -->
+    <div v-if="section === 'playback'" class="setting-row"><span class="setting-label"><strong>睡眠定时</strong><small>{{ player.sleepAt ? `将在 ${new Date(player.sleepAt).toLocaleTimeString()} 停止播放` : '在指定时间后停止播放' }}</small></span><select class="input" aria-label="睡眠定时" @change="player.setSleepMinutes(Number(($event.target as HTMLSelectElement).value))"><option value="0">关闭</option><option v-for="minutes in [15,30,45,60,90]" :key="minutes" :value="minutes">{{ minutes }} 分钟</option></select></div>
   </div>
 
   <div v-if="section === 'appearance/lyrics'" class="lyric-preview" :style="{ fontSize: library.settings.lyricFontSize + 'px', textAlign: library.settings.lyricAlign }"><span>让每一个音符</span><strong>都在此刻，与你相遇</strong><small v-if="library.settings.lyricTranslation">Let the music stay with you.</small></div>
-  <div v-if="section === 'playback'" class="setting-row"><span class="setting-label"><strong>睡眠定时</strong><small>{{ player.sleepAt ? `将在 ${new Date(player.sleepAt).toLocaleTimeString()} 停止播放` : '在指定时间后停止播放' }}</small></span><select class="input" aria-label="睡眠定时" @change="player.setSleepMinutes(Number(($event.target as HTMLSelectElement).value))"><option value="0">关闭</option><option v-for="minutes in [15,30,45,60,90]" :key="minutes" :value="minutes">{{ minutes }} 分钟</option></select></div>
   <div v-if="section === 'data'" class="data-actions"><button class="btn" @click="jj.library.reveal('@data')">打开数据目录</button><button class="btn" @click="reset">恢复外观与播放设置</button></div>
   <!--
     Output device picker.

@@ -277,6 +277,25 @@ function createWindow(): BrowserWindow {
     ensureTray()
   })
 
+  /**
+   * The main window owns the process: when it is gone, nothing the user can
+   * interact with may be left behind.
+   *
+   * Both halves matter. The lyric overlay is a BrowserWindow too, so while it
+   * lives `window-all-closed` never fires — closing the main window with
+   * 最小化到托盘 off used to leave the app running as a strip on the desktop,
+   * with no window, no tray icon and no way back. And a destroyed window left
+   * in `mainWindow` throws on any property access, which is exactly what
+   * `second-instance`, `activate` and the IPC sender check do.
+   *
+   * Hiding to tray takes the other branch above, so lyrics keep running there.
+   * Only the setting is left alone: the strip returns on the next launch.
+   */
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null
+    desktopLyrics?.close()
+  })
+
   return window
 }
 
@@ -1390,10 +1409,15 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
+    // A destroyed BrowserWindow throws on any property access, so `isMinimized`
+    // here could kill the handler. Mid-shutdown there is nothing to surface.
+    if (quitting) return
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      mainWindow = createWindow()
+      return
     }
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
   })
 
   app.whenReady().then(async () => {
@@ -1412,7 +1436,9 @@ if (!app.requestSingleInstanceLock()) {
     void services.sourceEngine.startAll()
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow()
+      // Not `getAllWindows().length === 0`: the lyric overlay is a window too,
+      // so that count stayed non-zero and no window came back.
+      if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow()
     })
   }).catch(reportStartupFailure)
 

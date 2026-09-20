@@ -138,7 +138,20 @@ try {
  check('history records successful playback', await evaluate('uiTestLibrary.recentPlayed[0].id === uiTestPlayer.currentTrack.id'))
  check('history persists through IPC', await evaluate('(async () => (await window.jj.settings.get()).recentPlayed[0].id === uiTestPlayer.currentTrack.id)()'))
  await route('/discover')
- check('discovery no longer carries the recent-played list', await evaluate('!document.querySelector(".recent")'))
+ // The contract here is "the discover page must not duplicate the 最近播放 page".
+ // It used to be asserted as "no recent-played markup at all", which was written
+ // when the list was moved out to fill the whole landing page with nothing but
+ // four status cards. A compact cover rail that links to the dedicated page is
+ // not a duplicate, so the check now targets the actual thing: no history
+ // TrackList rows on landing, and the rail hands off to /recent.
+ check('discovery carries a recent rail, not the history list', await evaluate(`(() => {
+   const rail = document.querySelector('.recent')
+   return !!rail &&
+     rail.querySelectorAll('.recent__item').length > 0 &&
+     rail.querySelectorAll('.track-row').length === 0 &&
+     !document.querySelector('.view > .tracklist, .view > .track-row') &&
+     !![...document.querySelectorAll('.recent__more')].find(b => b.textContent.includes('查看全部'))
+ })()`))
  await route('/recent')
  check('recent playback has its own rail entry and list', await evaluate('document.querySelector(".sidebar")?.innerText.includes("最近播放") && !!document.querySelector(".recent-view .track-row")'))
  check('recent page shows history, not newly added files', await evaluate('!document.body.innerText.includes("最近添加")'))

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 /** Landing page: quick entry points, library status, and 音源 status. */
+import { toMediaUrl } from '@shared/media-url'
+import { isLocalTrack, type PlayableTrack } from '@shared/types'
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
@@ -15,6 +17,28 @@ const totalDuration = computed(() => {
 })
 
 const losslessCount = computed(() => library.tracks.filter((track) => track.lossless).length)
+
+/*
+ * Same re-resolution as the 最近播放 page: history stores a snapshot of each
+ * track, so local entries are looked back up in the index. A rail built from the
+ * raw snapshot would keep playing a file that has since moved or been re-tagged.
+ */
+const recent = computed(() => library.recentPlayed
+  .map(track => 'path' in track ? library.tracksById.get(track.id) : track)
+  .filter((track): track is NonNullable<typeof track> => !!track))
+
+const recentRail = computed(() => recent.value.slice(0, 12))
+
+/* History mixes local files, which carry an extracted cover on disk, with online
+ * tracks, which only have the remote art URL. */
+function coverUrl(track: PlayableTrack): string | null {
+  if (isLocalTrack(track)) return track.coverPath ? toMediaUrl(track.coverPath) : null
+  return track.picUrl ?? null
+}
+
+async function playRecent(index: number): Promise<void> {
+  await player.playQueue(recent.value, index)
+}
 
 async function shuffleAll(): Promise<void> {
   if (library.tracks.length === 0) return
@@ -85,6 +109,42 @@ async function shuffleAll(): Promise<void> {
       </button>
     </section>
 
+    <!--
+      The landing page used to be nothing but the four status cards, which left
+      most of the viewport empty once the library and 音源 were both set up (the
+      setup panel below only appears while something is still missing). Recently
+      played is the one thing that belongs on a landing page and that we already
+      have the data for.
+    -->
+    <section v-if="recentRail.length > 0" class="recent">
+      <div class="recent__head">
+        <h2 class="section__title">最近播放</h2>
+        <button class="btn btn--ghost recent__more" type="button" @click="router.push('/recent')">
+          查看全部
+        </button>
+      </div>
+      <div class="recent__grid">
+        <button
+          v-for="(track, index) in recentRail"
+          :key="`${track.id}-${index}`"
+          class="recent__item"
+          type="button"
+          :title="`${track.name} — ${track.singer}`"
+          @click="playRecent(index)"
+        >
+          <span class="recent__art">
+            <img v-if="coverUrl(track)" :src="coverUrl(track)!" alt="" loading="lazy" />
+            <svg v-else width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" />
+              <circle cx="12" cy="12" r="2.6" stroke="currentColor" stroke-width="1.4" />
+            </svg>
+          </span>
+          <span class="recent__name">{{ track.name }}</span>
+          <span class="recent__artist">{{ track.singer || '未知艺术家' }}</span>
+        </button>
+      </div>
+    </section>
+
     <!-- setup guidance when the library is empty -->
     <section
       v-if="library.tracks.length === 0 || library.playableSources.length === 0"
@@ -126,9 +186,102 @@ async function shuffleAll(): Promise<void> {
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  /*
+   * `minmax(170px, 1fr)` let four cards divide the whole viewport between them,
+   * so a status tile grew to 472px wide on a large window. The upper bound keeps
+   * them tiles; auto-fit collapses the unused tracks, so they stay left-aligned
+   * instead of drifting apart.
+   */
+  grid-template-columns: repeat(auto-fit, minmax(170px, 260px));
   gap: 12px;
   margin-bottom: 28px;
+}
+
+/* ---------------- recent ---------------- */
+
+.recent {
+  margin-bottom: 28px;
+}
+
+.recent__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.recent__head .section__title {
+  margin: 0;
+}
+
+.recent__more {
+  padding: 4px 12px;
+  font-size: var(--text-sm);
+}
+
+.recent__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 14px;
+}
+
+.recent__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent__art {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  margin-bottom: 7px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.recent__item:hover .recent__art {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+}
+
+.recent__art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.recent__name,
+.recent__artist {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.recent__name {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.recent__artist {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 
 .stat {

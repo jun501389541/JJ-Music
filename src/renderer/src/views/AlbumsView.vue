@@ -2,6 +2,7 @@
 /** Album grid built from local tags. */
 import { toMediaUrl } from '@shared/media-url'
 import TrackList from '../components/TrackList.vue'
+import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
 import { computed, ref } from 'vue'
 import { useLibraryStore } from '../stores/library'
@@ -13,7 +14,7 @@ const player = usePlayerStore()
 
 const route = useRoute()
 // Albums are unique by title (see library.albums), so the title is the key.
-const selected = ref<string | null>(null)
+const selected = useDrilldown('album')
 const selectedAlbum = computed(() => albums.value.find(album => album.name === selected.value))
 const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
 

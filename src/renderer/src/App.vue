@@ -425,7 +425,14 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-const contentKey = computed(() => route.fullPath)
+/*
+ * Keyed by path, not fullPath. `route.path` still carries concrete params, so
+ * /playlist/1 → /playlist/2 remounts as before; but a query-only change — opening
+ * an album, entering a folder — must NOT remount, or the view would lose its
+ * filter text and scroll on every drill-down and the fade would fire for what is
+ * really the same page.
+ */
+const contentKey = computed(() => route.path)
 </script>
 
 <template>

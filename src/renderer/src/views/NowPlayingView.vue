@@ -578,6 +578,10 @@ function playArtworkFlight(): void {
   top: 14px;
   left: 16px;
   z-index: 3;
+  /* The title bar underneath still owns this strip as its drag region, and
+   * `-webkit-app-region` neither inherits nor is carved out by an overlay, so
+   * without this the 收起 button never receives a real click. */
+  -webkit-app-region: no-drag;
 }
 
 /* ---------------- layout ---------------- */

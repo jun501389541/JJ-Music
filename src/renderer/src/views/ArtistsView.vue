@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** Artist list built from local tags. */
 import { toMediaUrl } from '@shared/media-url'
+import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
 import { computed, ref } from 'vue'
 import type { LocalMusicInfo } from '@shared/types'
@@ -13,7 +14,7 @@ const player = usePlayerStore()
 
 const route = useRoute()
 const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
-const selected = ref<string | null>(null)
+const selected = useDrilldown('artist')
 
 const artists = computed(() => {
   const needle = filter.value.trim().toLowerCase()

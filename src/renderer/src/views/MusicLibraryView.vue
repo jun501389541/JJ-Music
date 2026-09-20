@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
+import { useDrilldown } from '../composables/use-drilldown'
 import { useLibraryStore } from '../stores/library'
 import { useUiStore } from '../stores/ui'
 import { useToastStore } from '../stores/toast'
@@ -17,7 +18,7 @@ async function remove(folder: string) { if (await ui.confirm('移除音乐文件
  * selection over data that is present rather than a separate route with its own
  * grouping logic — which is what made the two pages look redundant.
  */
-const opened = ref<string | null>(null)
+const opened = useDrilldown('folder')
 const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '')
 
 /** Tracks whose file lives in the opened folder (recursively). */

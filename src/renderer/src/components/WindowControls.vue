@@ -77,6 +77,14 @@ onBeforeUnmount(() => {
   background: none;
   border: 0;
   cursor: pointer;
+  /*
+   * `-webkit-app-region` does not inherit, and the container's `no-drag` is not
+   * enough: on the now-playing page these buttons sat in the strip the title bar
+   * claims as its drag region and swallowed every real click. A synthetic CDP
+   * click still landed, which is why it passed every automated check while being
+   * dead for a person. Declare it on the element that must receive the click.
+   */
+  -webkit-app-region: no-drag;
 }
 
 .win-btn:hover {

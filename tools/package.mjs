@@ -15,12 +15,16 @@
  *   2. **`ELECTRON_RUN_AS_NODE`.** If inherited, the Electron binary starts as
  *      plain Node and the app cannot launch. It is cleared for the child.
  *
+ * A full `dist` also writes `release/SHA256SUMS.txt` for the version in
+ * `package.json`, and stops if that version produced no artifacts.
+ *
  * Usage:
  *   node tools/package.mjs          # NSIS installer → release/JJ Music-<v>-x64.exe
  *   node tools/package.mjs --dir    # portable folder → release/win-unpacked/JJ Music.exe
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -111,6 +115,46 @@ const report = (path, label) => {
 }
 
 report(join(releaseDir, 'win-unpacked', 'JJ Music.exe'), '免安装版（双击即用）')
+
+/*
+ * Checksums, written here rather than by hand.
+ *
+ * The README links `SHA256SUMS.txt` as a release asset, and until now it was
+ * assembled manually every time — so it could go stale silently, and a user
+ * following the link would get hashes that matched nothing they downloaded.
+ *
+ * Selection is by version, exactly like the report below: `release/` keeps every
+ * artifact ever built, and a sums file that listed the leftovers from 0.1.2
+ * beside the new files would be worse than no file at all.
+ */
+if (!wantDirOnly) {
+  const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
+  const assets = existsSync(releaseDir)
+    ? readdirSync(releaseDir)
+      .filter(name => name.includes(version) && (name.endsWith('.exe') || name.endsWith('.zip')))
+      .sort()
+    : []
+
+  // A build that produced no installer is a failed build, and the sums file is
+  // the last place that could notice before the release page is filled in.
+  if (assets.length === 0) {
+    console.error(
+      `\nERROR: no ${version} installer or ZIP in ${releaseDir} — refusing to write SHA256SUMS.txt`
+    )
+    process.exit(1)
+  }
+
+  const lines = assets.map(name => {
+    const digest = createHash('sha256').update(readFileSync(join(releaseDir, name))).digest('hex')
+    console.log(`  ${name}  ${(statSync(join(releaseDir, name)).size / 1024 / 1024).toFixed(1)} MB`)
+    return `${digest}  ${name}`
+  })
+  const sumsPath = join(releaseDir, 'SHA256SUMS.txt')
+  writeFileSync(sumsPath, `${lines.join('\n')}\n`)
+  console.log(`\n${'='.repeat(66)}`)
+  console.log(`SHA256SUMS.txt（${assets.length} 个文件）→ ${sumsPath}`)
+  console.log('校验：sha256sum -c SHA256SUMS.txt')
+}
 
 if (existsSync(releaseDir)) {
   // Select by version, not by product-name prefix. The artifact names moved

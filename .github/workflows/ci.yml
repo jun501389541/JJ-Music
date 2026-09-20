@@ -87,3 +87,27 @@ jobs:
 
       - name: Import, enable and play through the packaged build
         run: node tools/probe/clean-profile-sources.mjs --synthetic
+
+      # After the functional checks, because it is the slower target and its
+      # failure means "the release cannot be published", not "the app is broken".
+      #
+      # Nothing here used to build what a user actually downloads: `--dir` emits
+      # `win-unpacked`, while the release page carries the NSIS Setup and the
+      # Portable ZIP. A broken `nsis`/`zip` configuration, or a sums file written
+      # for files that do not exist, was therefore invisible until a person
+      # followed the README link.
+      - name: Build the shipped installer and ZIP
+        run: npm run dist
+
+      - name: Checksums match the files they name
+        shell: bash
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS.txt
+          # Listing a stale file from an earlier release would pass the check
+          # above, so pin the set to the version being built.
+          version=$(node -p "require('../package.json').version")
+          count=$(grep -c . SHA256SUMS.txt)
+          extra=$(grep -vc "JJ-Music-${version}-" SHA256SUMS.txt || true)
+          echo "SHA256SUMS.txt: ${count} line(s), ${extra} not matching ${version}"
+          test "${extra}" = "0" && test "${count}" = "2"

@@ -23,12 +23,16 @@ export const DEFAULT_SETTINGS: AppSettings = {
   volume: 0.8,
   playMode: 'list',
   preferLocal: true,
+  onlineLyricSource: 'script',
+  onlineLyricFallback: true,
   downloadFolder: '',
   downloadLyric: true,
   downloadEmbedLyric: true,
   downloadTranslation: true,
   downloadRomanization: true,
   downloadEmbedCover: true,
+  assetWriteTarget: 'embedded',
+  tagWritableFormats: ['.mp3', '.flac'],
   minimizeToTray: false,
   outputDeviceId: '',
   desktopLyric: false,
@@ -104,6 +108,12 @@ export class PlaylistStore {
       const raw = parseJsonLoose<Partial<PlaylistFile>>(await readFile(this.filePath, 'utf8'))
       if (raw) {
         this.playlists = Array.isArray(raw.playlists) ? raw.playlists : []
+        // A cover folder that was cleared leaves a reference to a file that no
+        // longer exists; the card would show a broken image instead of falling
+        // back to the note glyph.
+        for (const list of this.playlists) {
+          if (list.coverPath && !existsSync(list.coverPath)) delete list.coverPath
+        }
         for (const [id, tracks] of Object.entries(raw.items ?? {})) {
           this.items.set(id, tracks)
         }
@@ -170,6 +180,16 @@ export class PlaylistStore {
     await this.persist()
   }
 
+  /** Attach cover art by path, or clear it with null. */
+  async setCover(id: string, coverPath: string | null): Promise<void> {
+    await this.load()
+    const playlist = this.playlists.find((list) => list.id === id)
+    if (!playlist) throw new Error('歌单不存在')
+    if (coverPath === null) delete playlist.coverPath
+    else playlist.coverPath = coverPath
+    await this.persist()
+  }
+
   async getItems(id: string): Promise<PlayableTrack[]> {
     await this.load()
     return [...(this.items.get(id) ?? [])]
@@ -192,14 +212,16 @@ export class PlaylistStore {
     return added
   }
 
-  async removeTrack(id: string, trackId: string): Promise<void> {
+  /** Drop entries by track id. Returns how many actually left the list. */
+  async removeTracks(id: string, trackIds: string[]): Promise<number> {
     await this.load()
     const existing = this.items.get(id) ?? []
-    this.items.set(
-      id,
-      existing.filter((track) => track.id !== trackId)
-    )
-    await this.persist()
+    const drop = new Set(trackIds)
+    const kept = existing.filter((track) => !drop.has(track.id))
+    this.items.set(id, kept)
+    const removed = existing.length - kept.length
+    if (removed > 0) await this.persist()
+    return removed
   }
 
   /** Replace the whole ordering, used by drag-and-drop reordering. */
@@ -218,12 +240,6 @@ export class PlaylistStore {
     // Anything the caller omitted keeps its relative order at the end.
     reordered.push(...byId.values())
     this.items.set(id, reordered)
-    await this.persist()
-  }
-
-  async clear(id: string): Promise<void> {
-    await this.load()
-    this.items.set(id, [])
     await this.persist()
   }
 }

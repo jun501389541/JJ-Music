@@ -10,12 +10,16 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
 import type {
   AppSettings,
+  AssetKind,
+  AssetRef,
   DownloadTask,
   ImportedPlaylist,
   IpcResult,
   LocalMusicInfo,
   LyricResult,
+  OnlineLyricSource,
   OnlineMusicInfo,
+  PendingAsset,
   PlayableTrack,
   Playlist,
   Quality,
@@ -24,7 +28,7 @@ import type {
   PlatformProbeResult,
   UserApiMeta
 } from '@shared/types'
-import type { LyricCandidate, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
+import type { LyricCandidate, AssetExportResult, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 
@@ -51,7 +55,12 @@ const api = {
   },
   playlistImport: {
     preview: (source: SourceId, input: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input),
-    save: (token: string) => invoke<Playlist>(IPC.playlistImportSave, token)
+    /**
+     * Commit a previewed list. `ids` is the order and subset the user arranged in
+     * the preview — the tracks themselves come from the main-process cache, so
+     * the renderer can only choose, not supply.
+     */
+    save: (token: string, ids?: string[]) => invoke<Playlist & { coverFailed: boolean }>(IPC.playlistImportSave, token, ids)
   },
   window: {
     minimize: () => invoke<void>(IPC.windowMinimize),
@@ -118,11 +127,11 @@ const api = {
       }
     },
     /**
-     * Hand dropped file paths to the main process, which classifies each one
-     * (audio / lyric / source script) and routes it.
+     * Hand dropped paths to the main process, which classifies each one
+     * (audio / lyric / source script / folder) and routes it.
      */
     importDroppedFiles: (paths: string[]) =>
-      invoke<{ audio: number; lyric: number; source: number; skipped: number }>(
+      invoke<{ audio: number; lyric: number; source: number; folders: number; skipped: number; cancelled: boolean }>(
         IPC.filesDropped,
         paths
       )
@@ -133,6 +142,20 @@ const api = {
     update: (patch: Partial<AppSettings>) => invoke<AppSettings>(IPC.settingsUpdate, patch)
   },
 
+  /**
+   * The app's own data directory. Not a settings field: moving it takes over
+   * every path the app writes, so main opens the picker and does the copy.
+   */
+  data: {
+    location: () => invoke<{
+      dir: string
+      source: 'switch' | 'pointer' | 'portable' | 'appdata'
+      notice: string | null
+      relocatable: boolean
+    }>(IPC.dataDirGet),
+    moveTo: () => invoke<{ moved: boolean; dir?: string; reason?: string }>(IPC.dataDirMove)
+  },
+
   sources: {
     list: () => invoke<UserApiMeta[]>(IPC.sourcesList),
     /** Import from pasted text or a script body. */
@@ -140,6 +163,8 @@ const api = {
       invoke<UserApiMeta>(IPC.sourcesImport, payload, name),
     /** Import by picking a file, or by reading LX's own user_api.json. */
     importFile: () => invoke<UserApiMeta[] | null>(IPC.sourcesImportFile),
+    /** Fetch a script over a guarded, size-capped request; it still starts disabled. */
+    importUrl: (url: string) => invoke<UserApiMeta>(IPC.sourcesImportUrl, url),
     remove: (id: string) => invoke<void>(IPC.sourcesRemove, id),
     /**
      * Enable / disable a source.
@@ -196,9 +221,29 @@ const api = {
       invoke<LyricResult>(IPC.musicLyric, source, musicInfo),
     pic: (source: SourceId, musicInfo: OnlineMusicInfo) =>
       invoke<string>(IPC.musicPic, source, musicInfo),
-    /** Fetch lyrics and cover art for an online track in one call. */
-    enrich: (musicInfo: OnlineMusicInfo) =>
-      invoke<LyricResult & { picUrl: string }>(IPC.musicEnrich, musicInfo)
+    /**
+     * Fetch lyrics and cover art for an online track in one call.
+     *
+     * `only` names a single lyric source, which is how the now-playing menu can
+     * switch providers for this track without changing the setting. The answer
+     * carries provenance for both assets, so the UI can say where they came from
+     * instead of guessing from whichever field happened to be filled.
+     */
+    enrich: (musicInfo: OnlineMusicInfo, only?: OnlineLyricSource) =>
+      invoke<LyricResult & { picUrl: string; asset: AssetRef | null; cover: AssetRef | undefined }>(
+        IPC.musicEnrich,
+        musicInfo,
+        only
+      )
+  },
+
+  artists: {
+    /**
+     * A portrait for one artist name, as a local file path served by `jjmedia://`.
+     * `null` means no platform had one — which is remembered, so the grid does not
+     * ask again on every visit. `refresh` ignores what is already known.
+     */
+    image: (name: string, refresh = false) => invoke<string | null>(IPC.artistImage, name, refresh)
   },
 
   library: {
@@ -212,6 +257,8 @@ const api = {
      */
     addFolder: () => invoke<string[] | null>(IPC.libraryAddFolder),
     removeFolder: (folder: string) => invoke<string[]>(IPC.libraryRemoveFolder, folder),
+    /** Forget these index entries. The files stay exactly where they are. */
+    removeTracks: (ids: string[]) => invoke<number>(IPC.libraryRemoveTracks, ids),
     scan: () => invoke<void>(IPC.libraryScan),
     tracks: () => invoke<LocalMusicInfo[]>(IPC.libraryTracks),
     /** Subscribe to scan progress; returns an unsubscribe function. */
@@ -227,13 +274,15 @@ const api = {
     create: (name: string) => invoke<Playlist>(IPC.playlistCreate, name),
     remove: (id: string) => invoke<void>(IPC.playlistRemove, id),
     rename: (id: string, name: string) => invoke<void>(IPC.playlistRename, id, name),
+    /** Opens the image picker in main; returns the stored path, or null if cancelled. */
+    chooseCover: (id: string) => invoke<string | null>(IPC.playlistChooseCover, id),
+    clearCover: (id: string) => invoke<void>(IPC.playlistClearCover, id),
     items: (id: string) => invoke<PlayableTrack[]>(IPC.playlistItems, id),
     addTracks: (id: string, tracks: PlayableTrack[]) =>
       invoke<number>(IPC.playlistAddTracks, id, tracks),
-    removeTrack: (id: string, trackId: string) =>
-      invoke<void>(IPC.playlistRemoveTrack, id, trackId),
-    reorder: (id: string, trackIds: string[]) => invoke<void>(IPC.playlistReorder, id, trackIds),
-    clear: (id: string) => invoke<void>(IPC.playlistClear, id)
+    removeTracks: (id: string, trackIds: string[]) =>
+      invoke<number>(IPC.playlistRemoveTracks, id, trackIds),
+    reorder: (id: string, trackIds: string[]) => invoke<void>(IPC.playlistReorder, id, trackIds)
   },
 
   lyric: {
@@ -261,14 +310,36 @@ const api = {
      */
     candidates: (trackId: string) =>
       invoke<LyricCandidate[]>(IPC.lyricCandidates, trackId),
-    /** Save a chosen candidate as the track's sidecar `.lrc`. */
-    applyCandidate: (audioPath: string, lyric: string) =>
-      invoke<string>(IPC.lyricApplyCandidate, audioPath, lyric),
+    /**
+     * Write the lyric the user chose for one track.
+     *
+     * Id, not path: this can end up writing *into* the audio file.
+     */
+    applyCandidate: (trackId: string, lyric: string) =>
+      invoke<AssetExportResult>(IPC.lyricApplyCandidate, trackId, lyric),
     /** Pick a `.lrc` file and attach it to a local track. */
-    importFile: (audioPath: string) =>
-      invoke<{ text: string; savedTo: string } | null>(IPC.lyricImport, audioPath),
-    /** Save edited lyrics as a sidecar `.lrc`. */
-    save: (audioPath: string, text: string) => invoke<string>(IPC.lyricSave, audioPath, text)
+    importFile: (trackId: string) =>
+      invoke<{ text: string; saved: AssetExportResult } | null>(IPC.lyricImport, trackId),
+    /** Save edited lyrics for one track. */
+    save: (trackId: string, text: string) => invoke<AssetExportResult>(IPC.lyricSave, trackId, text)
+  },
+
+  /**
+   * Covers and lyrics: writing them, and the queue of what was fetched but not
+   * yet committed. Every call here names tracks by id for the same reason the
+   * lyric channels do — a write touches the user's own files.
+   */
+  assets: {
+    /** Write cover and/or lyrics for these tracks, where the settings point. */
+    export: (trackIds: string[], kinds?: AssetKind[]) =>
+      invoke<AssetExportResult[]>(IPC.assetsExport, trackIds, kinds),
+    /** What is staged and unwritten, oldest first. */
+    pending: () => invoke<PendingAsset[]>(IPC.assetsPending),
+    /** Commit the queue (or named tracks) to disk. */
+    writePending: (trackIds?: string[]) =>
+      invoke<{ written: number; notes: string[]; remaining: number }>(IPC.assetsWritePending, trackIds),
+    /** Drop staged assets without writing them. */
+    discardPending: (trackIds?: string[]) => invoke<number>(IPC.assetsDiscardPending, trackIds)
   },
 
   match: {
@@ -285,7 +356,7 @@ const api = {
       track: LocalMusicInfo,
       patch: TagPatch,
       options?: { withLyrics?: boolean; lyricFrom?: OnlineMusicInfo; dryRun?: boolean }
-    ) => invoke<{ written: boolean; note: string; backupPath?: string }>(
+    ) => invoke<AssetExportResult>(
       IPC.matchApply,
       track,
       patch,
@@ -319,13 +390,18 @@ const lyricBridge = {
     return () => ipcRenderer.removeListener(IPC.desktopLyricState, wrapped)
   },
   /**
-   * Move the window so its top-left lands on these screen coordinates.
+   * Bracket the drag; main follows the system cursor in between.
    *
-   * Dragging is done by the page rather than `-webkit-app-region: drag` because
-   * a drag region swallows the right-click that opens the overlay's menu, and a
+   * The page sends no coordinates at all. `screenX` is in the CSS pixels of
+   * whichever monitor the window is on, so a gesture crossing between monitors at
+   * different scale factors would be described in two spaces at once.
+   *
+   * Dragging is done by the page rather than `-webkit-app-region: drag` because a
+   * drag region swallows the right-click that opens the overlay's menu, and a
    * lyric strip has no other chrome to hang a handle on.
    */
-  dragTo: (x: number, y: number): void => ipcRenderer.send(IPC.desktopLyricDrag, { x, y }),
+  dragStart: (): void => ipcRenderer.send(IPC.desktopLyricDrag, { phase: 'start' }),
+  dragEnd: (): void => ipcRenderer.send(IPC.desktopLyricDrag, { phase: 'end' }),
   openMenu: (): void => ipcRenderer.send(IPC.desktopLyricMenu)
 }
 

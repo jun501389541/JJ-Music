@@ -29,6 +29,13 @@ export interface ResolvedLyric {
   matchedMusic?: OnlineMusicInfo
   /** Confidence of that match, 0..1. */
   matchScore?: number
+  /**
+   * The source that actually produced this text, as the same record the library
+   * uses for what is merely *available*. The badge reads it, and so does
+   * 「换一种来源」: `provider` carries the machine id (`script` / `platform` /
+   * `search`) when the text came from the network.
+   */
+  asset?: import('./types').AssetRef
   /** Explains an empty result, e.g. which sources were tried. */
   note?: string
 }
@@ -81,6 +88,56 @@ export interface TagWriteResult {
   /** Human-readable note about what happened, for the UI. */
   note: string
   /** Path of the backup created, when one was made. */
+  backupPath?: string
+}
+
+/**
+ * One asset write, in either destination.
+ *
+ * `patch.lyrics` / `patch.cover` are the payload; the destination decides
+ * whether they reach the audio file's tags, a sidecar beside it, or both.
+ * Metadata text fields (title, artist, …) only fit in the file — a sidecar has
+ * no place for them.
+ */
+export interface AssetExportInput {
+  /** The audio file these assets belong to, at the name it will keep. */
+  audioPath: string
+  patch: TagPatch
+  /** Where to put the payload. Defaults to the user's `assetWriteTarget`. */
+  to?: import('./types').AssetWriteTarget[]
+  /** Formats the app may modify in place; anything else goes to a sidecar. */
+  writableFormats?: string[]
+  /**
+   * Where the embedded write actually goes when the file is not at its final
+   * name yet (a download still in its staging file). Main-process only: the IPC
+   * channel drops it, so a renderer cannot point a write somewhere else.
+   */
+  stagingPath?: string
+  /** Downloads stage the file before it is the user's original. */
+  skipBackup?: boolean
+  /**
+   * Leave an existing sidecar alone instead of overwriting it. Set by the
+   * automatic passes (a download, a fetched lyric); cleared by the ones where
+   * the user is replacing the text deliberately.
+   */
+  noClobber?: boolean
+  /** Report what would happen without touching anything. */
+  dryRun?: boolean
+}
+
+/** Where an asset write actually ended up. */
+export interface AssetExportResult {
+  written: boolean
+  /** Labels of the destinations that took the payload, for the UI. */
+  landed: string[]
+  /** Files created or modified, so the caller can refresh what it caches. */
+  paths: string[]
+  /** Anything that stopped part of the write, phrased for the user. */
+  notes: string[]
+  /** One-line summary for the toast: where it landed, or why it did not. */
+  note: string
+  /** Provenance to merge into the index entry. */
+  assets?: import('./types').TrackAssets
   backupPath?: string
 }
 

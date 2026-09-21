@@ -2,12 +2,23 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useUiStore } from '../stores/ui'
 import { useLibraryStore } from '../stores/library'
-import { isLocalTrack } from '@shared/types'
+import { describeAsset, isLocalTrack, type PendingAsset } from '@shared/types'
 import { formatTime, formatAudioSpec } from '../utils/format'
 import TagMatchDialog from './TagMatchDialog.vue'
 import AppIcon from './AppIcon.vue'
 const ui = useUiStore(), library = useLibraryStore()
 const value = ref(''), input = ref<HTMLInputElement | null>(null)
+/** Assets fetched for the track being inspected but not written yet. */
+const staged = ref<PendingAsset[]>([])
+watch(() => ui.trackInfo, async (track) => {
+  staged.value = []
+  if (!track) return
+  try {
+    staged.value = (await window.jj.assets.pending()).filter((entry) => entry.trackId === track.id)
+  } catch {
+    /* the queue is a detail; a failed lookup must not blank the panel */
+  }
+})
 watch(() => ui.dialog, async dialog => { value.value = dialog?.value ?? ''; await nextTick(); input.value?.focus(); input.value?.select() })
 function trap(event: KeyboardEvent): void {
   if (event.key !== 'Tab') return
@@ -18,10 +29,13 @@ function trap(event: KeyboardEvent): void {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
 }
 watch(() => [ui.dialog, ui.trackInfo], async () => { await nextTick(); document.querySelector<HTMLElement>('.dialog-backdrop input, .dialog-backdrop button')?.focus() })
+
 const details = computed(() => {
   const track = ui.trackInfo
   if (!track) return []
-  return [['标题', track.name], ['艺术家', track.singer || '未知艺术家'], ['专辑', track.albumName || '未知专辑'], ...(isLocalTrack(track) ? [['时长', formatTime(track.duration)], ['音频格式', formatAudioSpec(track)], ['曲风', track.genre || '未知曲风'], ['年份', track.year || '—'], ['文件大小', track.size ? (track.size / 1048576).toFixed(2) + ' MB' : '—'], ['文件地址', track.path]] : [['平台', track.source.toUpperCase()], ['时长', track.interval || '—'], ['歌曲 ID', track.id]])]
+  // Provenance first: 「文件内嵌」 and 「应用缓存」 are the difference between
+  // deleting something recoverable and deleting something the user put there.
+  return [['标题', track.name], ['艺术家', track.singer || '未知艺术家'], ['专辑', track.albumName || '未知专辑'], ['封面来源', describeAsset(track.assets?.cover?.[0])], ['歌词来源', track.assets?.lyrics?.main?.length ? track.assets.lyrics.main.map(describeAsset).join(' → ') : '尚未解析'], ...(staged.value.length ? [['待写入', staged.value.map((item) => `${item.kind === 'lyric' ? '歌词' : '封面'}（${describeAsset({ origin: item.origin, ...(item.provider ? { provider: item.provider } : {}) })}）`).join('、')]] : []), ...(isLocalTrack(track) ? [['时长', formatTime(track.duration)], ['音频格式', formatAudioSpec(track)], ['曲风', track.genre || '未知曲风'], ['年份', track.year || '—'], ['文件大小', track.size ? (track.size / 1048576).toFixed(2) + ' MB' : '—'], ['文件地址', track.path]] : [['平台', track.source.toUpperCase()], ['时长', track.interval || '—'], ['歌曲 ID', track.id]])]
 })
 </script>
 <template><Teleport to="body">

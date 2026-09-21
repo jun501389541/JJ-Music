@@ -118,7 +118,7 @@ try {
   const started = await evaluate(
     `(async () => {
        const tracks = await window.jj.library.tracks()
-       const track = tracks.find(t => t.hasSyncedLyric) || tracks[0]
+       const track = tracks.find(t => t.assets?.lyrics?.main?.some(a => a.origin === 'embedded' && a.synced)) || tracks[0]
        await window.__jj_player.playTrack(track)
        return track.name
      })()`

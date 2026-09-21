@@ -64,7 +64,7 @@ const currentValues = computed<Record<string, string>>(() => ({
   year: props.track.year ? String(props.track.year) : '',
   trackNo: props.track.trackNo ? String(props.track.trackNo) : '',
   genre: props.track.genre ?? '',
-  lyrics: props.track.hasEmbeddedLyric ? '(已内嵌歌词)' : '',
+  lyrics: props.track.assets?.lyrics?.main?.some((asset) => asset.origin === 'embedded') ? '(已内嵌歌词)' : '',
   cover: props.track.coverPath ? '(已有封面)' : ''
 }))
 

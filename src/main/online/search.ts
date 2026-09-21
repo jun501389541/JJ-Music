@@ -499,7 +499,7 @@ const kugouProvider: SearchProvider = {
  *    succeeding says nothing about playback. Playback is resolved by a 音源
  *    script regardless — see the note in `lyrics.ts`.
  */
-interface MiguSong {
+export interface MiguSong {
   songId?: number | string
   contentId?: string
   copyrightId?: string

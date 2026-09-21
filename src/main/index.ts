@@ -14,17 +14,19 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, sessi
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { DownloadManager } from './downloads/download-manager'
+import { ArtistImageStore } from './library/artist-images'
 import { flushJsonWrites } from './store/json-file'
-import { importPlaylist } from './online/playlist-import'
+import { applyImportOrder, fetchImportCover, importPlaylist } from './online/playlist-import'
 import type { ImportedPlaylist } from '@shared/types'
-import { dirname, isAbsolute, join, sep } from 'node:path'
-import { existsSync, writeFileSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { cp, readFile } from 'node:fs/promises'
+import { resolveDataDir, migrationSource, pointerPath, type DataDirChoice } from './data-location'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
-import { fail, ok, type AppSettings, type LocalMusicInfo, type OnlineMusicInfo, type PlayableTrack, type Quality, type SourceId } from '@shared/types'
+import { fail, ok, type AppSettings, type AssetKind, type AssetRef, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
 import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
@@ -35,13 +37,20 @@ import { fetchOnlineLyric } from './online/lyrics'
 import {
   clearLyricCache,
   lyricCandidates,
+  primeLyricCache,
+  lyricFromOtherPlatforms,
+  lyricSourceOrder,
   readLyricFile,
   resolveLocalLyric,
-  saveSidecar,
+  resolveOnlineLyricByOrder,
   searchLyricOnline
 } from './library/lyric-service'
 import { matchMetadata, lyricsForMatch } from './library/metadata-match'
-import { writeTags, canWriteTags, type TagPatch } from './library/tag-writer'
+import { exportAssets, mergeAssets } from './library/asset-export'
+import { imageMimeFor } from './library/asset-files'
+import { PendingAssetStore } from './library/pending-assets'
+import type { TagPatch } from './library/tag-writer'
+import type { AssetExportInput, AssetExportResult, ResolvedLyric } from '@shared/library-types'
 import { DesktopLyrics } from './desktop-lyrics'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 
@@ -79,10 +88,95 @@ function unpackedPath(fileName: string): string {
  */
 const debugPort = process.env['JJ_DEBUG_PORT']
 const testDataDir = process.env['JJ_TEST_USER_DATA']
-const profileDir = app.commandLine.getSwitchValue('user-data-dir')
-if(profileDir && isAbsolute(profileDir)) app.setPath('userData',profileDir)
-if (isDev && debugPort && testDataDir && isAbsolute(testDataDir)) {
-  app.setPath('userData', testDataDir)
+
+function isWritableDir(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A previously chosen data directory, plus why it could not be read. */
+function readPointer(file: string): { dir: string | null; problem: string | null } {
+  if (!existsSync(file)) return { dir: null, problem: null }
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { dir?: unknown }
+    if (typeof raw.dir === 'string' && isAbsolute(raw.dir)) return { dir: raw.dir, problem: null }
+    return { dir: null, problem: '文件里没有有效的 dir 字段' }
+  } catch (error) {
+    return { dir: null, problem: error instanceof Error ? error.message : '无法解析' }
+  }
+}
+
+/**
+ * Settle the data directory before `app.ready`.
+ *
+ * Everything Electron derives from `userData` — Chromium's cache, the GPU cache,
+ * local storage — follows this call, so it has to happen first; asking later
+ * would move the app's own files and leave a gigabyte of browser cache on C:.
+ */
+function locateDataDir(appDataDir: string): DataDirChoice {
+  const exeDir = dirname(process.execPath)
+  const switchDir = app.commandLine.getSwitchValue('user-data-dir')
+  const pointer = readPointer(pointerPath(exeDir, appDataDir, isWritableDir))
+  return resolveDataDir({
+    switchDir: switchDir && isAbsolute(switchDir) ? switchDir : null,
+    envDir: isDev && debugPort && testDataDir && isAbsolute(testDataDir) ? testDataDir : null,
+    exeDir,
+    appDataDir,
+    packaged: app.isPackaged,
+    pointer: pointer.dir,
+    pointerProblem: pointer.problem,
+    exists: existsSync,
+    writable: isWritableDir
+  })
+}
+
+/**
+ * `%APPDATA%/jj-music`, read before anything overrides it: it is both the
+ * fallback and the place a portable first run copies from.
+ */
+const defaultDataDir = app.getPath('userData')
+const dataLocation = locateDataDir(defaultDataDir)
+app.setPath('userData', dataLocation.dir)
+
+/** Where the pointer recording a user-chosen data directory lives. */
+const dataPointerFile = pointerPath(dirname(process.execPath), defaultDataDir, isWritableDir)
+
+/**
+ * Chromium-managed subtrees that rebuild themselves. A gigabyte of shader cache
+ * is not worth several seconds of first-run stall, and it is not the user's data.
+ */
+const MIGRATE_SKIP = new Set([
+  'Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache', 'blob_storage',
+  'Session Storage', 'Local Storage', 'Network', 'logs', 'Crashpad'
+])
+
+/** True when `path` is inside one of the skipped subtrees of `root`. */
+function isSkippedForMigration(root: string, path: string): boolean {
+  return relative(root, path).split(sep).some(part => MIGRATE_SKIP.has(part))
+}
+
+/**
+ * Copy the previous location's data into the chosen one, once.
+ *
+ * Runs before any store reads from the new directory, because a half-migrated
+ * library is indistinguishable from an empty one — the user would rescan, and the
+ * index written on the other side would then be the stale copy.
+ */
+async function migrateLegacyData(): Promise<void> {
+  const legacy = migrationSource(dataLocation, defaultDataDir)
+  if (!legacy || !existsSync(join(legacy, 'settings.json'))) return
+  const target = dataLocation.dir
+  if (existsSync(join(target, 'settings.json'))) return
+  await cp(legacy, target, {
+    recursive: true,
+    errorOnExist: false,
+    force: false,
+    filter: (source) => !isSkippedForMigration(legacy, source)
+  })
 }
 if (debugPort && /^\d+$/.test(debugPort)) {
   app.commandLine.appendSwitch('remote-debugging-port', debugPort)
@@ -126,9 +220,20 @@ interface Services {
   settings: SettingsStore
   playlists: PlaylistStore
   library: MusicLibrary
+  artistImages: ArtistImageStore
+  /** Lyrics/covers fetched for local tracks and not yet written to disk. */
+  pendingAssets: PendingAssetStore
   sourceStore: SourceStore
   sourceEngine: SourceEngine
   downloads: DownloadManager
+  /**
+   * Lyrics for an online track, from the sources the user ranked in Settings.
+   *
+   * Lives on the services bag because both playback and the download dialog need
+   * it, and `only` lets the now-playing menu re-fetch from a single source
+   * without going through the order at all.
+   */
+  onlineLyric: (music: OnlineMusicInfo, only?: OnlineLyricSource) => Promise<{ lyric: LyricResult; asset: AssetRef | null }>
 }
 
 let services: Services | null = null
@@ -139,26 +244,45 @@ function requireServices(): Services {
 }
 
 async function createServices(): Promise<Services> {
+  await migrateLegacyData()
   const dataDir = app.getPath('userData')
   const settings = new SettingsStore(dataDir)
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
+  const artistImages = new ArtistImageStore(dataDir, { saveCover: (data, format) => library.saveCover(data, format) })
+  const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
   // Sources run in a forked child process, so they can be killed without
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
   const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'))
 
-  await Promise.all([settings.load(), playlists.load(), library.load()])
+  await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load()])
   sourceStore.load()
+
+  /**
+   * Lyrics for an online track, from the sources ranked in 设置·歌词.
+   *
+   * Playback, downloads and the now-playing menu's per-track switch all ask
+   * through here, so one setting moves all three and there is no second copy of
+   * the "script first, then the platform, then everything else" chain to drift.
+   */
+  const onlineLyric = (music: OnlineMusicInfo, only?: OnlineLyricSource) => {
+    const preference = settings.get()
+    return resolveOnlineLyricByOrder(
+      lyricSourceOrder(preference.onlineLyricSource, preference.onlineLyricFallback, only),
+      {
+        script: () => sourceEngine.getLyric(music.source, music),
+        platform: () => fetchOnlineLyric(music),
+        search: () => lyricFromOtherPlatforms(music)
+      }
+    )
+  }
 
   const downloads = new DownloadManager(dataDir, {
     settings: () => settings.get(), defaultFolder: join(app.getPath('downloads'), 'JJ Music'),
     resolve: (track, quality) => sourceEngine.getMusicUrl(track.source, track, quality, true),
-    lyrics: async track => {
-      const result = await sourceEngine.getLyric(track.source, track).catch(() => ({lyric:''}))
-      return result.lyric?.trim() ? result : fetchOnlineLyric(track)
-    },
+    lyrics: async (track) => (await onlineLyric(track)).lyric,
     cover: async track => track.picUrl || sourceEngine.getPic(track.source, track),
     // The audio and cover URLs being fetched here were produced by an untrusted
     // source script, so this must validate every hop like the other caller-supplied
@@ -169,7 +293,7 @@ async function createServices(): Promise<Services> {
       : Promise.reject(new Error('下载不接受非字符串地址'))
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, sourceStore, sourceEngine, downloads }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, pendingAssets, sourceStore, sourceEngine, downloads, onlineLyric }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -522,7 +646,7 @@ function allowedMediaPath(path: string, extra: string[] = []): Promise<string> {
  * The authoritative record for a local track, taken from the index by id.
  *
  * Channels that touch a song's files used to accept the whole `LocalMusicInfo`
- * from the renderer, so its `path` and `lyricPath` were only claims about a file.
+ * from the renderer, so the paths inside it were only claims about a file.
  * That was enough to read anything the user could read (see the `lyricResolve`
  * entry in the changelog). An id is not a claim: it selects a record this process
  * produced, and only a scan of a user-chosen folder or a file picked in a dialog
@@ -537,6 +661,175 @@ function indexedTrack(id: unknown): LocalMusicInfo {
   const track = requireServices().library.get(id)
   if (!track) throw new Error('曲目不在曲库索引中')
   return track
+}
+
+/**
+ * Where a user-initiated asset write goes, read from the settings at click time
+ * so changing the preference takes effect without a restart.
+ */
+function assetWriteTargets(): { to: AssetWriteTarget[]; writableFormats: string[] } {
+  const { assetWriteTarget, tagWritableFormats } = requireServices().settings.get()
+  const to: AssetWriteTarget[] = assetWriteTarget === 'both' ? ['embedded', 'sidecar'] : [assetWriteTarget]
+  return { to, writableFormats: tagWritableFormats }
+}
+
+/**
+ * Write assets for one indexed track and make the index agree with the result.
+ *
+ * Shared by 标签匹配, the per-track 「写入封面与歌词」 action and the 待写入 queue:
+ * all three have to leave the same three things behind — the file, the
+ * provenance record, and a lyric cache that no longer describes what is on disk.
+ */
+async function commitAssetWrite(
+  track: LocalMusicInfo,
+  patch: TagPatch,
+  overrides: Partial<AssetExportInput> = {}
+): Promise<AssetExportResult> {
+  const { library } = requireServices()
+  const result = await exportAssets({
+    audioPath: track.path,
+    patch,
+    ...assetWriteTargets(),
+    ...overrides
+  })
+  if (!result.written) return result
+
+  // An embedded write changed the tags themselves, so the entry has to be
+  // re-read. A sidecar changed nothing about the audio file, and re-reading it
+  // for that would mean a `music-metadata` pass over a file that never moved —
+  // so only the provenance is folded in.
+  const next = result.landed.includes('文件内嵌')
+    ? await library.readTrack(track.path)
+    : { ...track, assets: mergeAssets(track.assets, result.assets) }
+  await library.updateTrack(next)
+  clearLyricCache(track.id)
+  // Anything the queue was holding for this track is now in a file, so it stops
+  // being pending. Without this the 菜单写入 path leaves the entry behind, and
+  // 「全部写入」 would write the same lyric a second time.
+  const kinds = (['lyric', 'cover'] as const).filter((kind) =>
+    kind === 'lyric' ? Boolean(patch.lyrics?.trim()) : Boolean(patch.cover)
+  )
+  if (kinds.length) {
+    const { pendingAssets } = requireServices()
+    const staged = await pendingAssets.load()
+    await pendingAssets.removeEntries(staged.filter((entry) => entry.trackId === track.id && kinds.includes(entry.kind)))
+  }
+  return result
+}
+
+/**
+ * Park a lyric that came off the network for a local track.
+ *
+ * Playing a song is not consent to modify its file, so a fetched lyric waits in
+ * the 待写入 queue and the badge says so. Every tag editor that has faced this —
+ * Picard, Kid3, Yate — settled on the same stage-then-save shape for the same
+ * reason: the app's guess at a lyric is often right, and when it is wrong the
+ * user must be able to walk it back before it becomes their file.
+ */
+async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric): Promise<ResolvedLyric> {
+  if (resolved.source !== 'online' || !resolved.lyric.trim()) return resolved
+  const asset: AssetRef = { ...(resolved.asset ?? { origin: 'remote' }), pending: true }
+  await requireServices().pendingAssets.add({
+    trackId: track.id,
+    kind: 'lyric',
+    name: track.name,
+    singer: track.singer,
+    path: track.path,
+    lyric: resolved.lyric,
+    synced: resolved.synchronized,
+    origin: asset.origin,
+    ...(asset.provider ? { provider: asset.provider } : {}),
+    at: Date.now()
+  })
+  const decorated = { ...resolved, asset }
+  // Re-prime the resolver's cache with the decorated record. The service cached
+  // the undecorated one while resolving, so a second read of the same track —
+  // which is what playing it does — would come back without 「待写入」 and the
+  // badge would tell the truth once and then stop.
+  primeLyricCache(track.id, decorated)
+  return decorated
+}
+
+/** A result for "there is nothing here to write", so the UI can say why. */
+function nothingToWrite(note: string): AssetExportResult {
+  return { written: false, landed: [], paths: [], notes: [note], note }
+}
+
+/** Read an image this app already has (a cache copy or a sidecar) for writing. */
+function readKnownImage(path: string): { data: Uint8Array; mimeType: string } | null {
+  const mimeType = imageMimeFor(extname(path))
+  if (!mimeType) return null
+  try {
+    // Artwork, so a size cap is a sanity check rather than a policy: the FLAC
+    // picture block cannot exceed 16 MB anyway.
+    const info = statSync(path)
+    if (!info.size || info.size > 15 * 1024 * 1024) return null
+    return { data: new Uint8Array(readFileSync(path)), mimeType }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Write the assets one or more tracks have available.
+ *
+ * This is the 「写入封面与歌词」 action, the batch version of it, and what the
+ * 待写入 queue's 全部写入 runs — all three mean the same thing: take what the app
+ * is holding for this track and put it where the settings say.
+ *
+ * A destination that already holds this asset is skipped. Without that, a batch
+ * over the library would rewrite thousands of files that did not change, and
+ * `backupOnce` would leave a `.bak` beside each one.
+ */
+async function writeTrackAssets(trackIds: string[], kinds: AssetKind[]): Promise<AssetExportResult[]> {
+  const { pendingAssets } = requireServices()
+  const staged = await pendingAssets.load()
+  const out: AssetExportResult[] = []
+
+  for (const id of new Set(trackIds.filter((item) => typeof item === 'string'))) {
+    const track = requireServices().library.get(id)
+    if (!track) continue
+    const { to, writableFormats } = assetWriteTargets()
+
+    for (const kind of kinds) {
+      const entry = staged.find((item) => item.trackId === track.id && item.kind === kind)
+      const chain = kind === 'lyric' ? track.assets?.lyrics?.main : track.assets?.cover
+      const patch: TagPatch = {}
+
+      if (kind === 'lyric') {
+        // Only files the track already carries: writing what the network handed
+        // us is exactly what the queue is for, so no online lookup here.
+        const lyric = entry?.lyric ?? (await resolveLocalLyric(track, { allowOnline: false })).lyric
+        if (!lyric?.trim()) {
+          out.push(nothingToWrite('这首歌没有可写入的歌词'))
+          continue
+        }
+        patch.lyrics = lyric
+      } else {
+        const image = track.coverPath ? readKnownImage(track.coverPath) : null
+        if (!image) {
+          out.push(nothingToWrite('这首歌没有可写入的封面'))
+          continue
+        }
+        patch.cover = image
+      }
+
+      // An entry in the queue means the content is new, so both destinations are
+      // fair game; otherwise drop the places that already hold this asset.
+      const wanted = entry
+        ? [...to]
+        : to.filter((target) => !chain?.some((source) => source.origin === target))
+      if (wanted.length === 0) {
+        out.push(nothingToWrite(kind === 'lyric' ? '歌词已经在文件里，未改动' : '封面已经在文件里，未改动'))
+        continue
+      }
+
+      out.push(
+        await commitAssetWrite(track, patch, { to: wanted, writableFormats, noClobber: !entry })
+      )
+    }
+  }
+  return out
 }
 
 /**
@@ -678,7 +971,7 @@ function registerIpc(): void {
     if (fromMainWindow(event)) desktopLyrics?.push(payload)
   })
   ipcMain.on(IPC.desktopLyricMenu, event => desktopLyrics?.openMenu(event))
-  ipcMain.on(IPC.desktopLyricDrag, (event, position: unknown) => desktopLyrics?.dragTo(event, position))
+  ipcMain.on(IPC.desktopLyricDrag, (event, action: unknown) => desktopLyrics?.drag(event, action))
 
   /* ---------------- window controls ---------------- */
   handle(IPC.windowMinimize, () => mainWindow?.minimize())
@@ -720,17 +1013,25 @@ function registerIpc(): void {
    * it is playable immediately without waiting for a folder scan.
    */
   handle(IPC.filesDropped, async (paths: string[]) => {
-    const { library, sourceStore, sourceEngine } = requireServices()
+    const { library, settings } = requireServices()
     const audioExts = ['mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wav']
     const lyricExts = ['lrc']
     const scriptExts = ['js', 'json', 'txt']
 
-    const result = { audio: 0, lyric: 0, source: 0, skipped: 0 }
+    const result = { audio: 0, lyric: 0, source: 0, folders: 0, skipped: 0, cancelled: false }
     const audioPaths: string[] = []
+    const droppedFolders: string[] = []
 
     for (const filePath of paths) {
       if (typeof filePath !== 'string' || !existsSync(filePath)) {
         result.skipped += 1
+        continue
+      }
+      // A directory has no usable extension, so this check has to come before
+      // the routing below — otherwise a dropped folder fell through to
+      // `skipped`, and a whole album arriving by drag read as "没有可导入的文件".
+      if (statSync(filePath).isDirectory()) {
+        if (!droppedFolders.includes(filePath)) droppedFolders.push(filePath)
         continue
       }
       const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
@@ -755,8 +1056,9 @@ function registerIpc(): void {
         }
         try {
           const text = await readLyricFile(filePath)
-          await saveSidecar(match.path, text)
-          clearLyricCache()
+          // Same route as picking a lyric by hand, so a dropped `.lrc` and a
+          // chosen candidate leave the same provenance behind.
+          await saveChosenLyric(match.path, text)
           result.lyric += 1
         } catch {
           result.skipped += 1
@@ -767,21 +1069,12 @@ function registerIpc(): void {
       if (scriptExts.includes(ext)) {
         try {
           const content = await readFile(filePath, 'utf8')
-          const meta = sourceStore.import(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
-          // Same gate as the import dialog: a dropped script must not run
-          // before it has been validated.
-          const loaded = sourceStore.get(meta.id)
-          if (loaded) {
-            const report = sourceEngine.validate(loaded.source, meta.name)
-            if (report.blocked) {
-              const blocking = report.findings.filter((f) => f.severity === 'block')
-              sourceStore.quarantine(
-                meta.id,
-                `导入时校验未通过：${blocking.map((f) => f.title).join('；')}`
-              )
-              result.skipped += 1
-              continue
-            }
+          // Same gate as every other entry point: a dropped script is validated on
+          // the way in, before it could ever be switched on.
+          const { blocking } = importScript(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
+          if (blocking.length) {
+            result.skipped += 1
+            continue
           }
           result.source += 1
         } catch {
@@ -796,6 +1089,44 @@ function registerIpc(): void {
     if (audioPaths.length > 0) {
       rememberPicked(audioPaths)
       result.audio = await library.importFiles(audioPaths)
+    }
+
+    /*
+     * A dropped folder becomes a library root, which means `jjmedia://`, lyric
+     * reads and tag writes start accepting everything beneath it. A file drop
+     * grants one path; this grants a whole subtree, and the path arrives from the
+     * renderer, so it is confirmed by a native dialog the renderer cannot dismiss
+     * — the same "the user chose this" evidence a folder picker supplies.
+     */
+    const newFolders = droppedFolders.filter((folder) => !library.getFolders().includes(folder))
+    if (newFolders.length > 0) {
+      const listed = newFolders.slice(0, 3).join('\n')
+      const more = newFolders.length > 3 ? `\n…等 ${newFolders.length} 个文件夹` : ''
+      const { response } = await dialog.showMessageBox({
+        type: 'question',
+        buttons: ['添加到曲库', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        title: '导入音乐文件夹',
+        message: `将以下文件夹添加到曲库？\n${listed}${more}`,
+        detail: '将扫描其中的音频文件，此后该文件夹内的内容可被播放器读取。'
+      })
+      if (response === 0) {
+        for (const [index, folder] of newFolders.entries()) {
+          // One walk per drop, not one per folder: `scan()` covers every
+          // registered root, so only the last add reports progress.
+          const last = index === newFolders.length - 1
+          const progress = await library.addFolder(folder, last
+            ? { onProgress: (value) => mainWindow?.webContents.send(IPC.libraryProgress, value) }
+            : {})
+          result.audio += progress.added
+          result.folders += 1
+        }
+        await settings.update({ libraryFolders: library.getFolders() })
+      } else {
+        result.skipped += newFolders.length
+        result.cancelled = true
+      }
     }
 
     return result
@@ -855,36 +1186,96 @@ function registerIpc(): void {
     return after
   })
 
+  /* ---------------- data directory ---------------- */
+  handle(IPC.dataDirGet, () => ({
+    dir: requireServices().dataDir,
+    source: dataLocation.source,
+    notice: dataLocation.notice,
+    // A `--user-data-dir` launch is the harness's own copied profile; offering to
+    // relocate from there would write a pointer that changes the next real run.
+    relocatable: dataLocation.source !== 'switch'
+  }))
+
+  /*
+   * The picker, the copy and the pointer all run here for the same reason the
+   * library folder one does: the destination is a claim about the user's disk that
+   * is about to hold everything the app owns, so it is never accepted as a string
+   * from the renderer.
+   */
+  handle(IPC.dataDirMove, async () => {
+    const current = requireServices().dataDir
+    const picked = await dialog.showOpenDialog({
+      title: '选择数据目录',
+      defaultPath: current,
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (picked.canceled || !picked.filePaths[0]) return { moved: false, reason: 'cancelled' }
+    const target = picked.filePaths[0]
+    // Windows paths are case-insensitive and accept either separator, so a plain
+    // `resolve` compare lets the same folder through spelled differently — and then
+    // the copy would run onto itself.
+    const samePath = (a: string, b: string) => resolve(a).toLowerCase().replace(/[\\/]+$/, '') === resolve(b).toLowerCase().replace(/[\\/]+$/, '')
+    if (samePath(target, current)) return { moved: false, reason: 'same' }
+    if (!isWritableDir(target)) throw new Error('目标目录不可写')
+    const { response } = await dialog.showMessageBox({
+      type: 'question',
+      // 按钮不写「迁移并重启」：这条路径复制完、写好指针就返回了，重启仍由用户做。
+      // 承诺了没做的事，比不承诺更容易让人找不到数据。
+      buttons: ['迁移到这里', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '迁移数据目录',
+      message: `把全部应用数据迁移到\n${target}？`,
+      detail: '设置、歌单、曲库索引、封面与音源会复制过去；浏览器缓存等可再生数据不复制。原目录保留，迁移后需重启应用生效。'
+    })
+    if (response !== 0) return { moved: false, reason: 'cancelled' }
+    // Anything still buffered would be missing from the copy, and the next write
+    // after this would go to the old directory until the app restarts.
+    await flushJsonWrites()
+    await cp(current, target, {
+      recursive: true,
+      errorOnExist: false,
+      force: false,
+      filter: (source) => !isSkippedForMigration(current, source)
+    })
+    writeFileSync(dataPointerFile, JSON.stringify({ dir: target, movedAt: Date.now() }, null, 2))
+    return { moved: true, dir: target }
+  })
+
   /* ---------------- 音源 scripts ---------------- */
   handle(IPC.sourcesList, () => requireServices().sourceStore.metas())
+
+  /**
+   * Import one script and run the pre-start validation on it right away.
+   *
+   * Imported scripts start disabled, so nothing is executed here — but a dangerous
+   * script is quarantined on the way in rather than sitting in the list until the
+   * user flips its switch. Every entry point (paste, file, drag-drop, URL) goes
+   * through this, because four copies of the same gate are four chances for one of
+   * them to be narrower than the rest.
+   */
+  function importScript(content: string, name: string): { meta: UserApiMeta; blocking: { title: string; detail: string }[] } {
+    const { sourceStore, sourceEngine } = requireServices()
+    const meta = sourceStore.import(content, name)
+    const loaded = sourceStore.get(meta.id)
+    if (!loaded) return { meta, blocking: [] }
+    const report = sourceEngine.validate(loaded.source, meta.name)
+    const blocking = report.findings.filter(f => f.severity === 'block').map(f => ({ title: f.title, detail: f.detail }))
+    if (report.blocked) sourceStore.quarantine(meta.id, `导入时校验未通过：${blocking.map(f => f.title).join('；')}`)
+    return { meta, blocking: report.blocked ? blocking : [] }
+  }
 
   handle(IPC.sourcesImport, async (payload: string, name?: string) => {
     const { sourceStore, sourceEngine } = requireServices()
     if (sourceStore.metas().length >= 20) {
       throw new Error('最多只能导入 20 个音源')
     }
-    const meta = sourceStore.import(payload, name || '导入音源')
-
-    // Validate the new script before it is allowed to run.
-    //
-    // Imported scripts start disabled (see `SourceStore.upsert`), so nothing is
-    // started here — but the validation still runs so a dangerous script is
-    // quarantined immediately rather than sitting in the list waiting for the
-    // user to flip a switch. The refusal is reported, not thrown away.
-    const loaded = sourceStore.get(meta.id)
-    if (loaded) {
-      const report = sourceEngine.validate(loaded.source, meta.name)
-      if (report.blocked) {
-        const blocking = report.findings.filter(f => f.severity === 'block')
-        sourceStore.quarantine(
-          meta.id,
-          `导入时校验未通过：${blocking.map(f => f.title).join('；')}`
-        )
-        throw new Error(
-          `「${meta.name}」未通过启动前校验，已导入但保持停用：\n` +
-          blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')
-        )
-      }
+    const { meta, blocking } = importScript(payload, name || '导入音源')
+    if (blocking.length) {
+      throw new Error(
+        `「${meta.name}」未通过启动前校验，已导入但保持停用：\n` +
+        blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')
+      )
     }
 
     // Only enabled scripts start; a freshly imported one is disabled, so this
@@ -894,7 +1285,7 @@ function registerIpc(): void {
   })
 
   handle(IPC.sourcesImportFile, async () => {
-    const { sourceStore, sourceEngine } = requireServices()
+    const { sourceEngine } = requireServices()
     const result = await dialog.showOpenDialog({
       title: '选择音源脚本',
       filters: [{ name: '音源脚本', extensions: ['js', 'json', 'txt'] }],
@@ -906,22 +1297,9 @@ function registerIpc(): void {
     const refused: string[] = []
     for (const filePath of result.filePaths) {
       const content = await readFile(filePath, 'utf8')
-      const meta = sourceStore.import(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
+      const { meta, blocking } = importScript(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
       imported.push(meta)
-
-      // Same gate as the paste path: quarantine immediately rather than let a
-      // dangerous script sit in the list waiting to be switched on.
-      const loaded = sourceStore.get(meta.id)
-      if (!loaded) continue
-      const report = sourceEngine.validate(loaded.source, meta.name)
-      if (report.blocked) {
-        const blocking = report.findings.filter(f => f.severity === 'block')
-        sourceStore.quarantine(
-          meta.id,
-          `导入时校验未通过：${blocking.map(f => f.title).join('；')}`
-        )
-        refused.push(meta.name)
-      }
+      if (blocking.length) refused.push(meta.name)
     }
 
     await sourceEngine.startAll()
@@ -931,6 +1309,36 @@ function registerIpc(): void {
       )
     }
     return imported
+  })
+
+  /*
+   * Import a script from a link the user pasted.
+   *
+   * The response is code that will run in a child process, so the request goes
+   * through the same per-hop guard as everything else this app fetches: a shared
+   * script link that redirects to `127.0.0.1` or the cloud metadata address is the
+   * classic SSRF shape, and `safeFetchBytes` refuses those while bounding the body
+   * to a few megabytes (the largest real 音源 sampled here is ~740 KB). The bytes
+   * are not trusted either way — nothing executes until the validation gate below
+   * passes and the user switches the script on.
+   */
+  handle(IPC.sourcesImportUrl, async (url: string) => {
+    const { sourceStore, sourceEngine } = requireServices()
+    if (typeof url !== 'string') throw new Error('链接无效')
+    const link = url.trim()
+    if (!/^https?:\/\/\S+$/i.test(link)) throw new Error('请输入 http(s) 链接')
+    if (sourceStore.metas().length >= 20) throw new Error('最多只能导入 20 个音源')
+    const fetched = await safeFetchBytes(link)
+    const content = fetched.body.toString('utf8')
+    if (!content.trim()) throw new Error('链接没有返回内容')
+    const file = new URL(link).pathname.split('/').pop() ?? ''
+    const name = decodeURIComponent(file || '') || '在线音源'
+    const { meta, blocking } = importScript(content, name)
+    await sourceEngine.startAll()
+    if (blocking.length) {
+      throw new Error(`「${meta.name}」未通过启动前校验，已导入但保持停用：\n${blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')}`)
+    }
+    return meta
   })
 
   handle(IPC.sourcesRemove, async (id: string) => {
@@ -1096,24 +1504,21 @@ function registerIpc(): void {
    * two round-trips from the renderer, this resolves both together and returns
    * whatever it could find — a missing cover is not a failure.
    */
-  handle(IPC.musicEnrich, async (music: OnlineMusicInfo) => {
-    const { sourceEngine } = requireServices()
+  handle(IPC.musicEnrich, async (music: OnlineMusicInfo, only?: unknown) => {
+    const { sourceEngine, onlineLyric } = requireServices()
+    // The renderer may name one source (the now-playing menu's switch); anything
+    // it sends that is not one of the three is ignored rather than obeyed.
+    const picked: OnlineLyricSource | undefined =
+      only === 'script' || only === 'platform' || only === 'search' ? only : undefined
+    const { lyric, asset } = await onlineLyric(music, picked)
 
-    // The user's 音源 may implement `lyric`; if it does not (most only implement
-    // `musicUrl`), fall back to the built-in platform adapter.
-    let lyric: { lyric?: string; tlyric?: string; rlyric?: string; lxlyric?: string } = {}
-    try {
-      lyric = await sourceEngine.getLyric(music.source, music)
-    } catch {
-      lyric = {}
-    }
-    if (!lyric.lyric?.trim()) {
-      lyric = await fetchOnlineLyric(music)
-    }
-
+    let cover: AssetRef | undefined = music.assets?.cover?.[0]
     let picUrl = music.picUrl ?? ''
     if (!picUrl) {
       picUrl = await sourceEngine.getPic(music.source, music)
+      if (picUrl) cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
+    } else if (!cover) {
+      cover = { origin: 'remote', provider: '平台搜索结果', at: Date.now() }
     }
 
     return {
@@ -1121,7 +1526,9 @@ function registerIpc(): void {
       tlyric: lyric.tlyric ?? '',
       rlyric: lyric.rlyric ?? '',
       lxlyric: lyric.lxlyric ?? '',
-      picUrl
+      picUrl,
+      asset,
+      cover
     }
   })
 
@@ -1141,6 +1548,18 @@ function registerIpc(): void {
   handle(IPC.musicPic, async (source: SourceId, musicInfo: OnlineMusicInfo) => {
     const { sourceEngine } = requireServices()
     return sourceEngine.getPic(source, musicInfo)
+  })
+
+  /**
+   * An artist portrait, looked up online and saved with the rest of the cover art.
+   *
+   * Only the name crosses this line; the address it resolves to is fetched by the
+   * main process through the SSRF guard and returned as a local file, so the
+   * renderer never points an `<img>` at a string that came from a platform.
+   */
+  handle(IPC.artistImage, async (name: string, refresh?: boolean) => {
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 60) return null
+    return requireServices().artistImages.image(name, refresh === true)
   })
 
   /* ---------------- local library ---------------- */
@@ -1186,6 +1605,11 @@ function registerIpc(): void {
 
   handle(IPC.libraryTracks, () => requireServices().library.getAll())
 
+  handle(IPC.libraryRemoveTracks, (ids: string[]) => {
+    const { library } = requireServices()
+    return library.removeTracks(Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [])
+  })
+
   /* ---------------- playlists ---------------- */
   handle(IPC.downloadsList, () => requireServices().downloads.list())
   handle(IPC.downloadsAdd, (tracks: OnlineMusicInfo[], quality: Quality) => requireServices().downloads.add(tracks, quality))
@@ -1220,14 +1644,25 @@ function registerIpc(): void {
     importPreviews.set(token,preview)
     return {...preview,token}
   })
-  handle(IPC.playlistImportSave, async (token: string) => {
+  handle(IPC.playlistImportSave, async (token: string, ids: unknown) => {
     const preview=importPreviews.get(token)
     if(!preview)throw Error('预览已失效，请重新读取歌单')
+    // 渲染层只提交「要哪几首、什么顺序」；歌曲内容仍以主进程缓存的预览为准。
+    const tracks=applyImportOrder(preview,ids)
+    if(!tracks.length)throw Error('没有可导入的歌曲')
     importPreviews.delete(token)
-    const store=requireServices().playlists
-    const playlist=await store.create(preview.name,{source:preview.source,sourceListId:preview.sourceListId})
-    try { await store.addTracks(playlist.id,preview.tracks) } catch(error) {await store.remove(playlist.id);throw error}
-    return {...playlist,trackCount:preview.tracks.length}
+    const { library, playlists } = requireServices()
+    const playlist=await playlists.create(preview.name,{source:preview.source,sourceListId:preview.sourceListId})
+    try { await playlists.addTracks(playlist.id,tracks) } catch(error) {await playlists.remove(playlist.id);throw error}
+    // 封面丢了不该让整次导入失败：用户要的是那一百多首歌。
+    let coverFailed=false
+    if (preview.coverUrl) {
+      try {
+        const saved=await fetchImportCover(preview,(data,format)=>library.saveCover(data,format))
+        if(saved)await playlists.setCover(playlist.id,saved);else coverFailed=true
+      } catch { coverFailed=true }
+    }
+    return {...playlist,trackCount:tracks.length,coverFailed}
   })
   handle(IPC.playlistList, () => requireServices().playlists.list())
   handle(IPC.playlistCreate, (name: string) => requireServices().playlists.create(name))
@@ -1239,13 +1674,41 @@ function registerIpc(): void {
   handle(IPC.playlistAddTracks, (id: string, tracks: PlayableTrack[]) =>
     requireServices().playlists.addTracks(id, tracks)
   )
-  handle(IPC.playlistRemoveTrack, (id: string, trackId: string) =>
-    requireServices().playlists.removeTrack(id, trackId)
+  handle(IPC.playlistRemoveTracks, (id: string, trackIds: string[]) =>
+    requireServices().playlists.removeTracks(
+      id,
+      Array.isArray(trackIds) ? trackIds.filter((trackId) => typeof trackId === 'string') : []
+    )
   )
   handle(IPC.playlistReorder, (id: string, trackIds: string[]) =>
     requireServices().playlists.reorder(id, trackIds)
   )
-  handle(IPC.playlistClear, (id: string) => requireServices().playlists.clear(id))
+
+  /*
+   * The picker runs here and the chosen image is copied into the content-addressed
+   * cover folder the media allow-list already serves — so a playlist cover can
+   * never end up pointing at an arbitrary file the renderer named.
+   */
+  handle(IPC.playlistChooseCover, async (id: string) => {
+    const { library, playlists } = requireServices()
+    const result = await dialog.showOpenDialog({
+      title: '选择歌单封面',
+      properties: ['openFile'],
+      filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }]
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    const file = result.filePaths[0]
+    const data = await readFile(file)
+    if (data.byteLength > 8 * 1024 * 1024) throw new Error('封面图片过大（上限 8MB）')
+    const saved = await library.saveCover(new Uint8Array(data), extname(file).slice(1))
+    if (!saved) throw new Error('无法识别的图片格式')
+    await playlists.setCover(id, saved)
+    return saved
+  })
+
+  handle(IPC.playlistClearCover, async (id: string) => {
+    await requireServices().playlists.setCover(id, null)
+  })
 
   /* ---------------- lyrics ---------------- */
   // Allow-listed like the media protocol: this channel took an arbitrary
@@ -1256,12 +1719,19 @@ function registerIpc(): void {
   // Priority order lives in the service: sidecar → embedded tag → online. The
   // track itself comes from the index, so no path in the resolution is one the
   // renderer chose.
-  handle(IPC.lyricResolve, (trackId: string, allowOnline?: boolean) =>
-    resolveLocalLyric(indexedTrack(trackId), { allowOnline: allowOnline !== false })
-  )
+  handle(IPC.lyricResolve, async (trackId: string, allowOnline?: boolean) => {
+    const track = indexedTrack(trackId)
+    return stageFetchedLyric(
+      track,
+      await resolveLocalLyric(track, { allowOnline: allowOnline !== false })
+    )
+  })
 
   // Force a fresh lookup, bypassing the cache.
-  handle(IPC.lyricSearchOnline, (trackId: string) => searchLyricOnline(indexedTrack(trackId)))
+  handle(IPC.lyricSearchOnline, async (trackId: string) => {
+    const track = indexedTrack(trackId)
+    return stageFetchedLyric(track, await searchLyricOnline(track))
+  })
 
   /**
    * Every credible online lyric match, so the user can pick.
@@ -1272,27 +1742,34 @@ function registerIpc(): void {
   handle(IPC.lyricCandidates, (trackId: string) => lyricCandidates(indexedTrack(trackId)))
 
   /**
-   * Save a chosen candidate as the track's sidecar.
+   * Write a lyric the user chose themselves — a candidate from the picker, an
+   * edit, a file they pointed at.
    *
-   * Writing a sidecar (rather than remembering a preference) is what makes the
-   * choice stick: resolution prefers a sidecar over both the embedded tag and
-   * any later online lookup, so the picked lyric wins from then on without a
-   * second "pinned lyric" concept to maintain.
+   * The sidecar is always among the destinations, whatever the setting says:
+   * resolution prefers a sidecar, so a choice that only reached the tag could
+   * still be shadowed by an older `.lrc` and look like the click did nothing.
    */
-  handle(IPC.lyricApplyCandidate, async (audioPath: string, lyric: string) => {
+  async function saveChosenLyric(audioPath: string, lyric: string): Promise<AssetExportResult> {
+    const { to, writableFormats } = assetWriteTargets()
+    const targets = [...new Set<AssetWriteTarget>([...to, 'sidecar'])]
+    const track = requireServices().library.getByPath(audioPath)
+    if (track) return commitAssetWrite(track, { lyrics: lyric }, { to: targets })
+    const result = await exportAssets({ audioPath, patch: { lyrics: lyric }, to: targets, writableFormats })
+    clearLyricCache()
+    return result
+  }
+
+  // The three channels below take a track id, not a path: a chosen lyric can end
+  // up written *into* the audio file, and the renderer naming which file to
+  // modify is the one thing this layer must not allow.
+  handle(IPC.lyricApplyCandidate, async (trackId: string, lyric: string) => {
     if (typeof lyric !== 'string' || !lyric.trim()) throw new Error('歌词内容为空')
-    const target = await allowedMediaPath(audioPath)
-    const savedTo = await saveSidecar(target, lyric)
-    // The cache holds the old lyric for this track; drop it so the next read
-    // reflects the choice instead of the previous match.
-    const track = requireServices().library.getByPath(target)
-    if (track) clearLyricCache(track.id)
-    else clearLyricCache()
-    return savedTo
+    const track = indexedTrack(trackId)
+    return saveChosenLyric(track.path, lyric)
   })
 
-  handle(IPC.lyricImport, async (audioPath: string) => {
-    const target = await allowedMediaPath(audioPath)
+  handle(IPC.lyricImport, async (trackId: string) => {
+    const track = indexedTrack(trackId)
     const result = await dialog.showOpenDialog({
       title: '选择歌词文件',
       filters: [{ name: '歌词文件', extensions: ['lrc', 'txt'] }],
@@ -1304,17 +1781,85 @@ function registerIpc(): void {
     // This path never round-trips through the renderer, so it is trusted for
     // the duration of this call rather than added to the standing list.
     const text = await readLyricFile(picked)
-    // Persist next to the audio file so it becomes the authoritative lyric.
-    const savedTo = await saveSidecar(target, text)
-    clearLyricCache()
-    return { text, savedTo }
+    return { text, saved: await saveChosenLyric(track.path, text) }
   })
 
-  handle(IPC.lyricSave, async (audioPath: string, text: string) => {
-    const target = await allowedMediaPath(audioPath)
-    const savedTo = await saveSidecar(target, text)
-    clearLyricCache()
-    return savedTo
+  handle(IPC.lyricSave, async (trackId: string, text: string) => {
+    if (typeof text !== 'string') throw new Error('歌词内容为空')
+    const track = indexedTrack(trackId)
+    return saveChosenLyric(track.path, text)
+  })
+
+  /* ---------------- assets: 写入与待写入队列 ---------------- */
+
+  /**
+   * Write the cover and/or lyric a track has available, where the settings point.
+   *
+   * Takes track ids, never paths — this is the channel that modifies the user's
+   * own audio files, so the file must be one the index vouches for.
+   */
+  handle(IPC.assetsExport, (trackIds: unknown, kinds?: unknown) => {
+    const ids = Array.isArray(trackIds) ? trackIds.filter((id): id is string => typeof id === 'string') : []
+    const wanted = Array.isArray(kinds) && kinds.length
+      ? kinds.filter((kind): kind is AssetKind => kind === 'lyric' || kind === 'cover')
+      : (['lyric', 'cover'] as AssetKind[])
+    return writeTrackAssets(ids, wanted)
+  })
+
+  /** What is staged but unwritten, oldest first. */
+  handle(IPC.assetsPending, () => requireServices().pendingAssets.load())
+
+  /**
+   * Write what is waiting — the whole queue, or the named tracks.
+   *
+   * Only what actually landed leaves the list: a file on a drive that is not
+   * plugged in today stays pending instead of being quietly forgotten. An entry
+   * whose track has left the index is dropped, since nothing can write it.
+   */
+  handle(IPC.assetsWritePending, async (trackIds?: unknown) => {
+    const { pendingAssets, library } = requireServices()
+    const staged = await pendingAssets.load()
+    const wanted = Array.isArray(trackIds) && trackIds.length
+      ? staged.filter((entry) => trackIds.includes(entry.trackId))
+      : staged
+
+    let written = 0
+    const notes: string[] = []
+    const done: PendingAsset[] = []
+    for (const entry of wanted) {
+      if (!library.get(entry.trackId)) {
+        done.push(entry)
+        continue
+      }
+      const patch: TagPatch = entry.kind === 'lyric'
+        ? { lyrics: entry.lyric ?? '' }
+        : { cover: entry.image ? readKnownImage(entry.image.path) ?? undefined : undefined }
+      if (!patch.lyrics && !patch.cover) {
+        notes.push(`${entry.name}：内容已不可用`)
+        done.push(entry)
+        continue
+      }
+      const result = await commitAssetWrite(indexedTrack(entry.trackId), patch, { noClobber: false })
+      if (result.written) {
+        written += 1
+        done.push(entry)
+      } else {
+        notes.push(`${entry.name}：${result.note}`)
+      }
+    }
+    await pendingAssets.removeEntries(done)
+    return { written, notes, remaining: (await pendingAssets.load()).length }
+  })
+
+  /** Throw away staged assets without writing them. */
+  handle(IPC.assetsDiscardPending, async (trackIds?: unknown) => {
+    const { pendingAssets } = requireServices()
+    const staged = await pendingAssets.load()
+    const wanted = Array.isArray(trackIds) && trackIds.length
+      ? staged.filter((entry) => trackIds.includes(entry.trackId))
+      : staged
+    await pendingAssets.removeEntries(wanted)
+    return (await pendingAssets.load()).length
   })
 
   /* ---------------- metadata matching (标签匹配) ---------------- */
@@ -1340,15 +1885,11 @@ function registerIpc(): void {
       patch: TagPatch,
       options?: { withLyrics?: boolean; lyricFrom?: OnlineMusicInfo; dryRun?: boolean }
     ) => {
-      // `track` arrives as a renderer-built object, so its `path` is only a
-      // claim about a file. Writing tags is the one channel that mutates the
-      // user's originals, which makes it the worst place to take that on trust.
-      const target = await allowedMediaPath(track.path)
-
-      if (!canWriteTags(target)) {
-        return { written: false, note: '该格式暂不支持写入标签（目前支持 MP3 与 FLAC）' }
-      }
-
+      // `track` arrives as a renderer-built object, so nothing about its `path` is
+      // taken on trust: the id selects the index record, and that record owns the
+      // file. Writing tags is the one channel that mutates the user's originals,
+      // which makes it the worst place to accept a path as a claim.
+      const target = indexedTrack(track.id)
       const effective: TagPatch = { ...patch }
 
       // Lyrics can be pulled from the matched track at apply time, which keeps
@@ -1358,16 +1899,7 @@ function registerIpc(): void {
         if (lyric.trim()) effective.lyrics = lyric
       }
 
-      const result = await writeTags(target, effective, { dryRun: options?.dryRun === true })
-
-      if (result.written) {
-        // Refresh the cached entry so the UI reflects the new tags immediately.
-        const { library } = requireServices()
-        const refreshed = await library.readTrack(target)
-        await library.updateTrack(refreshed)
-        clearLyricCache(track.id)
-      }
-      return result
+      return commitAssetWrite(target, effective, { dryRun: options?.dryRun === true })
     }
   )
 

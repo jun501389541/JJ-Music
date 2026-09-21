@@ -95,6 +95,56 @@ export function clampPosition(
   }
 }
 
+/** The smallest box containing every given work area. */
+export function unionBox(areas: Box[]): Box {
+  if (areas.length === 0) return { x: 0, y: 0, width: 0, height: 0 }
+  const x = Math.min(...areas.map((area) => area.x))
+  const y = Math.min(...areas.map((area) => area.y))
+  const right = Math.max(...areas.map((area) => area.x + area.width))
+  const bottom = Math.max(...areas.map((area) => area.y + area.height))
+  return { x, y, width: right - x, height: bottom - y }
+}
+
+/**
+ * Clamp to the whole desktop rather than to one monitor.
+ *
+ * Held to a single display, the strip could never be dragged onto a second
+ * monitor, and on a display narrower than the window the horizontal bound
+ * collapsed to a constant, so the window refused to move at all. Across the
+ * union the strip may straddle the seam between two monitors — which is what
+ * every desktop lyric overlay does, and what lets the user centre a long line
+ * over that seam.
+ *
+ * The union is a rectangle, though, and two *offset* monitors leave L-shaped
+ * dead space inside it: on a 1920x1080 primary with a second display below and
+ * to its right, (0, 2000) is inside the union and on no screen at all. Such a
+ * strip is invisible, and because the position is persisted it stays invisible
+ * across restarts — the exact failure the clamp exists to prevent. So the centre
+ * has to land on a real display; if it does not, the nearest one wins and the
+ * dragged coordinate is given up.
+ */
+export function clampToDisplays(
+  position: { x: number; y: number },
+  size: { width: number; height: number },
+  displays: Box[]
+): { x: number; y: number } {
+  if (displays.length === 0) return position
+  const clamped = clampPosition(position, size, unionBox(displays))
+  const centre = { x: clamped.x + size.width / 2, y: clamped.y + size.height / 2 }
+  if (displays.some((display) => distanceToBox(centre, display) === 0)) return clamped
+  const nearest = displays.reduce((best, display) =>
+    distanceToBox(centre, display) < distanceToBox(centre, best) ? display : best
+  )
+  return clampPosition(clamped, size, nearest)
+}
+
+/** Zero when the point is inside the box, otherwise its distance to the nearest edge. */
+function distanceToBox(point: { x: number; y: number }, box: Box): number {
+  const dx = Math.max(box.x - point.x, 0, point.x - (box.x + box.width))
+  const dy = Math.max(box.y - point.y, 0, point.y - (box.y + box.height))
+  return Math.hypot(dx, dy)
+}
+
 /** Bottom-centre of the work area — the conventional place for the strip. */
 export function restingPosition(
   size: { width: number; height: number },

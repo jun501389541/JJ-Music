@@ -237,12 +237,16 @@ async function onDrop(event: DragEvent): Promise<void> {
 
   try {
     const result = await window.jj.shell.importDroppedFiles(paths)
+    // The folder confirmation was declined in a native dialog; the user already
+    // knows, and a "没有可导入的文件" error would read as a failure of the drop.
+    if (result.cancelled) return
     const parts: string[] = []
+    if (result.folders > 0) parts.push(`${result.folders} 个文件夹`)
     if (result.audio > 0) parts.push(`${result.audio} 首音频`)
     if (result.lyric > 0) parts.push(`${result.lyric} 个歌词`)
     if (result.source > 0) parts.push(`${result.source} 个音源`)
     if (parts.length === 0) {
-      toast.error('没有可导入的文件（支持音频、.lrc 歌词、音源脚本）')
+      toast.error('没有可导入的内容（支持音频文件与文件夹、.lrc 歌词、音源脚本）')
       return
     }
     toast.success(`已导入 ${parts.join('、')}`)
@@ -474,7 +478,7 @@ const contentKey = computed(() => route.path)
     <div v-if="dragActive" class="drop-zone">
       <div class="drop-zone__card">
         <strong>松开以导入</strong>
-        <span>音频文件加入曲库 · .lrc 匹配同名声轨 · 音源脚本导入后需手动启用</span>
+        <span>音频文件或文件夹加入曲库 · .lrc 匹配同名声轨 · 音源脚本导入后需手动启用</span>
       </div>
     </div>
 

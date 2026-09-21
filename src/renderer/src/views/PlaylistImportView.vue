@@ -1,22 +1,67 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import type { ImportedPlaylist, SourceId } from '@shared/types'
+import type { ImportedPlaylist, OnlineMusicInfo, PlayableTrack, SourceId } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
+import { useUiStore, type MenuItem } from '../stores/ui'
+import TrackList from '../components/TrackList.vue'
+
 const source=ref<SourceId>('wy'),input=ref(''),busy=ref(false),error=ref(''),preview=ref<(ImportedPlaylist & {token:string})|null>(null)
-const library=useLibraryStore(),router=useRouter(),toast=useToastStore()
-watch([source,input],()=>{preview.value=null;error.value=''})
-async function read():Promise<void>{busy.value=true;error.value='';preview.value=null;try{preview.value=await window.jj.playlistImport.preview(source.value,input.value)}catch(e){error.value=e instanceof Error?e.message:'读取失败'}finally{busy.value=false}}
-async function save():Promise<void>{if(!preview.value)return;busy.value=true;try{const list=await window.jj.playlistImport.save(preview.value.token);await library.refreshPlaylists();toast.success(`已导入 ${list.trackCount} 首歌曲`);await router.push('/playlist/'+list.id)}catch(e){error.value=e instanceof Error?e.message:'导入失败'}finally{busy.value=false}}
+/** 预览列表是可编辑副本：排序与移除只改它，导入时才按这份顺序提交。 */
+const rows=ref<OnlineMusicInfo[]>([]),removed=ref<OnlineMusicInfo[]>([])
+const library=useLibraryStore(),router=useRouter(),toast=useToastStore(),ui=useUiStore()
+watch([source,input],()=>{preview.value=null;error.value='';rows.value=[];removed.value=[]})
+const edited=computed(()=>rows.value.length!==preview.value?.tracks.length)
+async function read():Promise<void>{busy.value=true;error.value='';preview.value=null;rows.value=[];removed.value=[];try{const result=await window.jj.playlistImport.preview(source.value,input.value);preview.value=result;rows.value=[...result.tracks]}catch(e){error.value=e instanceof Error?e.message:'读取失败'}finally{busy.value=false}}
+function reorder(from:number,to:number):void{const list=[...rows.value];const[moved]=list.splice(from,1);if(!moved)return;list.splice(to,0,moved);rows.value=list}
+/** 移除只作用于这份待导入列表，不碰曲库也不碰任何文件。 */
+async function remove(selection:PlayableTrack[]):Promise<void>{
+  if(!selection.length)return
+  if(selection.length>1&&!await ui.confirm('从待导入列表移除',`移除选中的 ${selection.length} 首？这些歌曲将不会被导入，可点「恢复全部」找回。`))return
+  const ids=new Set(selection.map(track=>track.id))
+  removed.value=[...removed.value,...rows.value.filter(track=>ids.has(track.id))]
+  rows.value=rows.value.filter(track=>!ids.has(track.id))
+}
+function restore():void{rows.value=preview.value?[...preview.value.tracks]:[];removed.value=[]}
+function importActions(_track:PlayableTrack,_index:number,selection:PlayableTrack[]):MenuItem[]{
+  return [{label:selection.length>1?`从待导入列表移除 ${selection.length} 首`:'从待导入列表移除',icon:'trash',action:()=>remove(selection)}]
+}
+async function save():Promise<void>{if(!preview.value||!rows.value.length)return;busy.value=true;error.value=''
+  try{
+    const list=await window.jj.playlistImport.save(preview.value.token,rows.value.map(track=>track.id))
+    await library.refreshPlaylists()
+    toast.success(list.coverFailed?`已导入 ${list.trackCount} 首歌曲，封面获取失败`:`已导入 ${list.trackCount} 首歌曲`)
+    await router.push('/playlist/'+list.id)
+  }catch(e){error.value=e instanceof Error?e.message:'导入失败'}finally{busy.value=false}}
 </script>
 <template><div class="view import-view">
   <header class="view__header"><div><h1 class="view__title">导入其他平台歌单</h1><p class="view__subtitle">复制公开歌单的网页版链接或歌单 ID，读取后保存到本地歌单。</p></div></header>
-  <form class="import-form" @submit.prevent="read"><label>音乐平台<select v-model="source" class="input" :disabled="busy"><option value="wy">网易云音乐</option><option value="tx">QQ 音乐</option><option value="kg">酷狗音乐</option><option value="kw">酷我音乐</option></select></label><label>歌单链接或 ID<input v-model="input" class="input" :disabled="busy" placeholder="粘贴公开歌单链接或数字 ID"/></label><button class="btn btn--primary" :disabled="busy||!input.trim()">{{ busy?'处理中…':'读取歌单' }}</button></form>
+  <form class="import-form" @submit.prevent="read"><label>音乐平台<select v-model="source" class="input" :disabled="busy"><option value="wy">网易云音乐</option><option value="tx">QQ 音乐</option><option value="kg">酷狗音乐</option><option value="kw">酷我音乐</option><option value="mg">咪咕音乐</option></select></label><label>歌单链接或 ID<input v-model="input" class="input" :disabled="busy" placeholder="粘贴公开歌单链接或数字 ID"/></label><button class="btn btn--primary" :disabled="busy||!input.trim()">{{ busy?'处理中…':'读取歌单' }}</button></form>
   <p v-if="error" class="error" role="alert">{{ error }}</p>
-  <section v-if="preview" class="preview"><h2>{{ preview.name }}</h2><p>可导入 {{ preview.tracks.length }} 首 / 平台共 {{ preview.total }} 首</p><p v-for="warning in preview.warnings" :key="warning" class="warning">{{ warning }}</p><button class="btn btn--primary" :disabled="busy" @click="save">导入为新歌单</button><ol><li v-for="track in preview.tracks.slice(0,100)" :key="track.id">{{ track.name }} <small>{{ track.singer }}</small></li></ol><p v-if="preview.tracks.length>100">预览前 100 首，保存时导入全部已读取歌曲。</p></section>
+  <section v-if="preview" class="preview">
+    <div class="preview__head">
+      <span class="preview__cover"><img v-if="preview.coverUrl" :src="preview.coverUrl" alt="" referrerpolicy="no-referrer"/></span>
+      <div class="preview__title"><h2>{{ preview.name }}</h2><p>待导入 {{ rows.length }} 首 / 已读取 {{ preview.tracks.length }} 首 / 平台共 {{ preview.total }} 首</p><p v-for="warning in preview.warnings" :key="warning" class="warning">{{ warning }}</p></div>
+      <div class="preview__buttons">
+        <button v-if="removed.length" class="btn" :disabled="busy" @click="restore">恢复全部（{{ removed.length }} 首已移除）</button>
+        <button class="btn btn--primary" :disabled="busy||!rows.length" @click="save">{{ edited?'按当前列表导入':'导入为新歌单' }}</button>
+      </div>
+    </div>
+    <p class="preview__hint">拖动行可调整顺序，勾选后可批量移除；导入前请先确认列表，私密或受限歌曲可能缺失。</p>
+    <TrackList :tracks="rows" :reorderable="true" :extra-actions="importActions" :show-source="true" empty-text="待导入列表已空，点「恢复全部」找回" @reorder="reorder"/>
+  </section>
   <p class="note">导入保存歌曲信息，不会自动下载音频。播放和下载需要启用对应平台的音源；私密歌单或平台限制可能导致部分歌曲无法读取。</p>
 </div></template>
 <style scoped>
-.import-view{overflow:auto}.import-form{display:flex;gap:16px;align-items:end;flex-wrap:wrap;padding:24px;background:var(--bg-elevated);border-radius:12px}.import-form label{display:flex;flex-direction:column;gap:10px;font-size:13px}.import-form label:nth-child(2){flex:1;min-width:240px}.preview{margin-top:24px;padding:24px;background:var(--bg-elevated);border-radius:12px}.preview li{padding:9px;border-bottom:1px solid var(--border)}small{margin-left:12px;color:var(--text-secondary)}.error{color:#f18d8d}.warning{color:#eab66f}.note{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-top:24px}
+/* 列表要占满剩余高度：TrackList 自带的 `calc(100vh - 290px)` 是给整页只有它的歌单页用的，
+   这里上方还有表单和预览头，照抄会把末尾几行推到播放条底下点不到。 */
+.import-view{display:flex;flex-direction:column;overflow:hidden}
+.import-form{flex:none;display:flex;gap:16px;align-items:end;flex-wrap:wrap;padding:24px;background:var(--bg-elevated);border-radius:12px}.import-form label{display:flex;flex-direction:column;gap:10px;font-size:13px}.import-form label:nth-child(2){flex:1;min-width:240px}
+.preview{margin-top:24px;padding:24px;background:var(--bg-elevated);border-radius:12px;display:flex;flex-direction:column;gap:14px;flex:1;min-height:0}
+.preview :deep(.tracklist){flex:1;min-height:0;height:auto}
+.preview__head{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;flex:none}.preview__title{flex:1;min-width:220px}.preview__title h2{font-size:17px}.preview__title p{font-size:12px;color:var(--text-secondary);margin-top:6px}
+.preview__cover{width:84px;height:84px;border-radius:8px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden;flex:none}.preview__cover img{width:100%;height:100%;object-fit:cover}
+.preview__buttons{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.preview__hint{font-size:12px;color:var(--text-secondary);flex:none}
+.error{color:#f18d8d;flex:none}.warning{color:#eab66f}.note{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-top:24px;flex:none}
 </style>

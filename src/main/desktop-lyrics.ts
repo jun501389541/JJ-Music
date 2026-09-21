@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { IPC } from '@shared/ipc'
 import {
   DESKTOP_LYRIC_FONTS,
-  clampPosition,
+  clampToDisplays,
   restingPosition,
   type DesktopLyricCommand,
   type DesktopLyricPayload
@@ -47,6 +47,15 @@ const HEIGHT = 104
  */
 const MOVE_SETTLE_MS = 260
 
+/** How often a held drag re-reads the cursor. One step per frame at 60 Hz. */
+const DRAG_STEP_MS = 16
+
+/**
+ * The largest cursor movement a step can plausibly carry. A violent flick is
+ * around 50 DIP per frame; anything past this is a coordinate remap, not a hand.
+ */
+const DRAG_MAX_STEP = 120
+
 export interface DesktopLyricsHooks {
   /** The main window, or null while it is closed to the tray. */
   mainWindow: () => BrowserWindow | null
@@ -60,6 +69,9 @@ export class DesktopLyrics {
   private window: BrowserWindow | null = null
   private last: DesktopLyricPayload | null = null
   private moveTimer: ReturnType<typeof setTimeout> | undefined
+  /** Where the cursor was at the last drag step, in this process's coordinates. */
+  private dragPointer: { x: number; y: number } | null = null
+  private dragTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(private readonly hooks: DesktopLyricsHooks) {}
 
@@ -89,6 +101,7 @@ export class DesktopLyrics {
 
   close(): void {
     clearTimeout(this.moveTimer)
+    this.endDrag()
     this.window?.destroy()
     this.window = null
   }
@@ -160,16 +173,20 @@ export class DesktopLyrics {
   /**
    * Put the window where the user left it, or bottom-centre on first run.
    *
-   * The remembered position is clamped to the current work area rather than
-   * trusted: a strip parked on a second monitor that is no longer connected
-   * would come back at x=2560 on a 1920-wide desktop — invisible, and with no
-   * way to drag it back.
+   * The remembered position is clamped to the whole desktop rather than trusted:
+   * a strip parked on a second monitor that is no longer connected would come
+   * back at x=2560 on a 1920-wide desktop — invisible, and with no way to drag it
+   * back. The clamp is against the union of the connected displays, because
+   * pulling a monitor-2 position into monitor 1's work area reads as the drag
+   * never having been remembered — and at this point the window is still at its
+   * default centre, so its *current* display is not yet the relevant one.
    */
   private place(window: BrowserWindow, settings: AppSettings): void {
-    const workArea = screen.getDisplayMatching(window.getBounds()).workArea
     const size = { width: WIDTH, height: HEIGHT }
-    const wanted = settings.desktopLyricPosition ?? restingPosition(size, workArea)
-    const position = clampPosition(wanted, size, workArea)
+    const wanted = settings.desktopLyricPosition
+    const position = wanted
+      ? clampToDisplays(wanted, size, screen.getAllDisplays().map((display) => display.workArea))
+      : restingPosition(size, screen.getDisplayMatching(window.getBounds()).workArea)
     const current = window.getBounds()
     if (Math.abs(current.x - position.x) < 2 && Math.abs(current.y - position.y) < 2) return
     window.setPosition(position.x, position.y)
@@ -206,30 +223,88 @@ export class DesktopLyrics {
   }
 
   /**
-   * Move the window to the coordinates the page asked for.
+   * Bracket the drag the page drives: `{ phase: 'start' | 'end' }`.
    *
-   * The sender check matters more here than elsewhere: this channel can move an
-   * always-on-top window anywhere on the desktop, so only the overlay itself may
-   * use it.
+   * The page asks for nothing in between — main follows the cursor itself. It used
+   * to send `screenX - clientX` per move, which is one monitor's CSS pixels handed
+   * to `setPosition` in another's, and the page also has no way to know when its
+   * own window changes monitors.
+   *
+   * Note that `getCursorScreenPoint()` is not continuous across a mixed-DPI seam
+   * either — see `stepDrag`, which is where that is dealt with.
    *
    * Persistence is scheduled from here rather than left to the window's `moved`
    * event, because on Windows that event is not emitted for a programmatic
-   * `setPosition` — and this drag *is* programmatic, the page merely forwards
-   * pointer deltas. Listening for `moved` alone meant the strip moved happily
-   * and returned to its old spot on the next launch.
+   * `setPosition` — and this drag *is* programmatic. Listening for `moved` alone
+   * meant the strip moved happily and returned to its old spot on the next launch.
    */
-  dragTo(event: IpcMainEvent, position: unknown): void {
+  drag(event: IpcMainEvent, action: unknown): void {
     if (!this.window || !this.fromOverlay(event)) return
-    const point = position as { x?: unknown; y?: unknown }
-    if (typeof point?.x !== 'number' || typeof point?.y !== 'number') return
-    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return
-    // Clamped, not just validated: the page derives the target from the pointer,
-    // so dragging to the far edge would park an 820px strip almost entirely off
-    // screen, where it cannot be grabbed again for the rest of the session.
-    const workArea = screen.getDisplayMatching(this.window.getBounds()).workArea
-    const { x, y } = clampPosition({ x: point.x, y: point.y }, { width: WIDTH, height: HEIGHT }, workArea)
-    this.window.setPosition(x, y)
+    const message = action as { phase?: unknown }
+    // A locked strip forwards its mouse events through to whatever is behind it,
+    // so the page should never start a drag — but the setting can change under a
+    // pointer that is already held down, and this channel moves an always-on-top
+    // window, so the gate is enforced here too.
+    if (this.hooks.settings().desktopLyricLocked) {
+      this.endDrag()
+      return
+    }
+    if (message?.phase === 'start') {
+      this.dragPointer = screen.getCursorScreenPoint()
+      this.stopDragTimer()
+      // Polling rather than one IPC per pointer event also means a 1000 Hz mouse
+      // cannot queue more window moves than the screen can show.
+      this.dragTimer = setInterval(() => this.stepDrag(), DRAG_STEP_MS)
+      return
+    }
+    if (message?.phase === 'end') this.endDrag()
+  }
+
+  /**
+   * Follow the cursor one step at a time, always from where the window is now.
+   *
+   * Measured on a 200% + 100% desktop: a drag whose *cursor* crossed the seam slid
+   * the strip 544 DIP sideways while the cursor travelled straight up, and reversed
+   * its vertical motion by 22px in the same step. The cause is not the page's
+   * coordinates and not the window changing owner — `getCursorScreenPoint()` itself
+   * discontinuously remaps when the cursor moves onto a monitor with a different
+   * scale factor, because Windows defines the desktop's DIP space by the primary
+   * monitor. No coordinate source in Electron is continuous across that seam, so
+   * the drag treats a one-step jump far beyond any hand movement as the remap it
+   * is, re-baselines, and keeps going in the new space. What is left is the strip
+   * following the pointer at the new monitor's own pixel ratio, which is how every
+   * other Electron window behaves there.
+   */
+  private stepDrag(): void {
+    if (!this.window || !this.dragPointer) return
+    const pointer = screen.getCursorScreenPoint()
+    const delta = { x: pointer.x - this.dragPointer.x, y: pointer.y - this.dragPointer.y }
+    this.dragPointer = pointer
+    if (Math.abs(delta.x) > DRAG_MAX_STEP || Math.abs(delta.y) > DRAG_MAX_STEP) return
+    const bounds = this.window.getBounds()
+    if (delta.x === 0 && delta.y === 0) return
+    // Clamped, not just bounded: dragging to the far edge would otherwise park an
+    // 820px strip almost entirely off screen, where it cannot be grabbed again for
+    // the rest of the session.
+    const position = clampToDisplays(
+      { x: bounds.x + delta.x, y: bounds.y + delta.y },
+      { width: WIDTH, height: HEIGHT },
+      screen.getAllDisplays().map((display) => display.workArea)
+    )
+    if (position.x === bounds.x && position.y === bounds.y) return
+    this.window.setPosition(position.x, position.y)
     this.persistPosition(this.window)
+  }
+
+  private endDrag(): void {
+    this.stopDragTimer()
+    this.dragPointer = null
+  }
+
+  private stopDragTimer(): void {
+    if (this.dragTimer === undefined) return
+    clearInterval(this.dragTimer)
+    this.dragTimer = undefined
   }
 
   /**

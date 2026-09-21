@@ -5,6 +5,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
+import { toMediaUrl } from '@shared/media-url'
 
 const library = useLibraryStore()
 const ui = useUiStore()
@@ -72,7 +73,8 @@ async function remove(id: string, name: string): Promise<void> {
       >
         <button class="plcard__body" type="button" @click="router.push(`/playlist/${list.id}`)">
           <span class="plcard__art">
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <img v-if="list.coverPath" :src="toMediaUrl(list.coverPath)" alt="" loading="lazy" />
+            <svg v-else width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path
                 d="M4 6h16M4 12h16M4 18h10"
                 stroke="currentColor"
@@ -136,6 +138,7 @@ async function remove(id: string, name: string): Promise<void> {
   width: 100%;
   aspect-ratio: 1;
   border-radius: var(--radius-md);
+  overflow: hidden;
   background: var(--bg-panel);
   color: var(--text-tertiary);
   display: flex;

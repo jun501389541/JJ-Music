@@ -7,7 +7,9 @@ import {
   DESKTOP_LYRIC_FONTS,
   activeLines,
   clampPosition,
-  restingPosition
+  clampToDisplays,
+  restingPosition,
+  unionBox
 } from './shared/desktop-lyric.js'
 import { DEFAULT_SETTINGS, SettingsStore } from './store/settings-store.js'
 
@@ -49,6 +51,87 @@ test('an offset work area is respected, not treated as starting at zero', () => 
   const parked = restingPosition(size, left)
   assert.ok(parked.x >= left.x && parked.x + size.width <= left.x + left.width, JSON.stringify(parked))
   assert.ok(parked.y + size.height <= left.height, JSON.stringify(parked))
+})
+
+/**
+ * Clamping to the display the window is *currently* on is what stopped a drag
+ * from ever crossing to a second monitor: the target was pulled back into the
+ * monitor being left, at the exact moment the user was trying to leave it.
+ */
+test('a strip can be dragged onto a second monitor', () => {
+  const displays = [
+    { x: 0, y: 0, width: 1920, height: 1080 },
+    { x: 1920, y: 0, width: 2560, height: 1440 }
+  ]
+  const farRight = clampToDisplays({ x: 3000, y: 200 }, size, displays)
+  assert.deepEqual(farRight, { x: 3000, y: 200 }, 'monitor 2 is reachable')
+
+  // Centred over the seam between the two: part of the strip sits on each.
+  const straddled = clampToDisplays({ x: 1700, y: 60 }, size, displays)
+  assert.deepEqual(straddled, { x: 1700, y: 60 })
+})
+
+test('the whole desktop is the bound, so an off-desktop strip still comes back', () => {
+  const displays = [
+    { x: 0, y: 0, width: 1920, height: 1080 },
+    { x: 1920, y: 0, width: 2560, height: 1440 }
+  ]
+  const lost = clampToDisplays({ x: 9000, y: 9000 }, size, displays)
+  assert.ok(lost.x + size.width <= 1920 + 2560, JSON.stringify(lost))
+  assert.ok(lost.y + size.height <= 1440, JSON.stringify(lost))
+  const negative = clampToDisplays({ x: -4000, y: -4000 }, size, displays)
+  assert.deepEqual(negative, { x: 0, y: 0 })
+})
+
+test('a remembered position on a connected monitor is not pulled back to the primary', () => {
+  // The old clamp ran against the display under the freshly created window, which
+  // is still its default centre: a strip parked on monitor 2 came back to
+  // monitor 1 on the next launch and read as the drag never having been saved.
+  const displays = [
+    { x: 0, y: 0, width: 1920, height: 1080 },
+    { x: 1920, y: 0, width: 2560, height: 1440 }
+  ]
+  assert.deepEqual(unionBox(displays), { x: 0, y: 0, width: 4480, height: 1440 })
+  assert.deepEqual(clampToDisplays({ x: 2200, y: 300 }, size, displays), { x: 2200, y: 300 })
+})
+
+/**
+ * Measured on 2026-09-21 with a real second display: a 1920x1080 primary at 200%
+ * and a 2560x1600 panel below it, offset 322px to the right. The union box is a
+ * rectangle, so two *offset* monitors leave L-shaped gaps inside it that belong
+ * to no screen — and a strip parked there is invisible, and stays invisible
+ * after a restart because the position is persisted.
+ */
+const offsetDisplays = [
+  { x: 0, y: 0, width: 1920, height: 1032 },
+  { x: 322, y: 1032, width: 2560, height: 1600 }
+]
+
+test('the far corner of the second panel is where the union clamp actually puts it', () => {
+  // (2062, 2528) is not made up: that is where the strip landed on the real
+  // two-display desktop when the remembered position was pushed out of range.
+  assert.deepEqual(clampToDisplays({ x: 99999, y: 99999 }, size, offsetDisplays), { x: 2062, y: 2528 })
+  // A genuine cross-monitor park spot, centre well inside the second panel.
+  assert.deepEqual(clampToDisplays({ x: 1500, y: 2000 }, size, offsetDisplays), { x: 1500, y: 2000 })
+  // Hanging off the left edge of the lower panel is allowed: 498 of the 820px
+  // are on screen and the centred text with them.
+  assert.deepEqual(clampToDisplays({ x: 0, y: 2000 }, size, offsetDisplays), { x: 0, y: 2000 })
+})
+
+test('a strip dragged into the gap between offset monitors lands on a real screen', () => {
+  // Same shape of desktop, but with a band of y between the two panels that is
+  // on no screen: the centre lands there, so the position is given up and the
+  // nearest display wins.
+  const gapped = [
+    { x: 0, y: 0, width: 1920, height: 1080 },
+    { x: 1500, y: 1300, width: 2560, height: 1600 }
+  ]
+  const dead = clampToDisplays({ x: 600, y: 1150 }, size, gapped)
+  const centre = { x: dead.x + size.width / 2, y: dead.y + size.height / 2 }
+  const onSomeScreen = gapped.some(d =>
+    centre.x >= d.x && centre.x <= d.x + d.width && centre.y >= d.y && centre.y <= d.y + d.height)
+  assert.ok(onSomeScreen, `中心 ${JSON.stringify(centre)} 不在任何一块屏上：${JSON.stringify(dead)}`)
+  assert.deepEqual(dead, { x: 600, y: 976 }, '拉回最近那块屏的下边界')
 })
 
 test('the resting position is bottom-centred, which is where a strip is expected', () => {

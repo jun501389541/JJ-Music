@@ -14,7 +14,7 @@ import WindowControls from '../components/WindowControls.vue'
 import TrackList from '../components/TrackList.vue'
 import { toMediaUrl } from '@shared/media-url'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { isLocalTrack } from '@shared/types'
+import { describeAsset, isLocalTrack, ONLINE_LYRIC_SOURCES, ONLINE_LYRIC_SOURCE_LABELS, type OnlineLyricSource } from '@shared/types'
 import type { LyricCandidate } from '@shared/library-types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -51,9 +51,29 @@ function lyricMenuItems(): MenuItem[] {
     // pick rather than silently trusting the top score.
     { label: '从多个来源选择…', icon: 'library', disabled: !canEditLyric.value, action: onPickLyricSource },
     { label: '标签匹配', icon: 'info', disabled: !canEditLyric.value, action: () => { showTagMatch.value = true } },
+    ...(isOnlineTrack.value ? [lyricSourceItem()] : []),
     { label: '', separator: true },
     { label: '歌词设置', icon: 'settings', action: () => { ui.nowPlaying = false; return router.push('/settings/appearance/lyrics') } }
   ]
+}
+
+/**
+ * Which source an online track's lyric came from, and what to ask instead.
+ *
+ * Local tracks are not offered this: their order is sidecar → embedded tag →
+ * online, and the sidecar a manual edit writes already outranks every source.
+ */
+function lyricSourceItem(): MenuItem {
+  const active: OnlineLyricSource = player.lyricSourceChoice ?? library.settings.onlineLyricSource
+  return {
+    label: '歌词来源',
+    icon: 'lyrics',
+    children: [
+      ...ONLINE_LYRIC_SOURCES.map((id) => ({ label: ONLINE_LYRIC_SOURCE_LABELS[id], checked: active === id, action: () => player.useLyricSource(id) })),
+      { label: '', separator: true },
+      { label: '跟随设置', checked: !player.lyricSourceChoice, action: () => player.useLyricSource(null) }
+    ]
+  }
 }
 function lyricMenu(event: MouseEvent): void { ui.openMenu(event, [{ label: '歌词', icon: 'lyrics', children: lyricMenuItems() }]) }
 /** The 歌词 group, appended to the bottom bar's one 更多 menu. */
@@ -97,16 +117,20 @@ async function onPickLyricSource(): Promise<void> {
   }
 }
 
-/** Save the chosen lyric as the track's sidecar, which then wins on reload. */
+/** Write the chosen lyric where the settings point; it also becomes the sidecar, which wins on reload. */
 async function applyLyricChoice(choice: LyricCandidate): Promise<void> {
   const track = player.currentTrack
   if (!track || !isLocalTrack(track)) return
   try {
-    await window.jj.lyric.applyCandidate(track.path, choice.lyric)
+    const saved = await window.jj.lyric.applyCandidate(track.id, choice.lyric)
+    if (!saved.written) {
+      toast.error(saved.note)
+      return
+    }
     lyricChoices.value = []
     // Re-resolve so the pane shows the lyric that was just written.
     await player.reloadLyric()
-    toast.success(`已使用「${choice.title}」的歌词`)
+    toast.success(`已使用「${choice.title}」的歌词，${saved.note}`)
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '保存歌词失败')
   }
@@ -140,21 +164,31 @@ const canEditLyric = computed(
   () => player.currentTrack !== null && isLocalTrack(player.currentTrack)
 )
 
+/** The reverse: only an online track has a choice of lyric *providers* to switch. */
+const isOnlineTrack = computed(
+  () => player.currentTrack !== null && !isLocalTrack(player.currentTrack)
+)
+
 const hasTranslation = computed(() =>
   Boolean(player.lyrics?.lines.some((line) => line.translation))
 )
 
 /**
  * Where the current lyric came from, as a short badge.
- * The user should be able to tell an embedded tag from an internet guess.
+ *
+ * The asset record answers this for both kinds of track — a local file's tag, a
+ * sidecar, or one of the three online providers — so the label renders that
+ * record instead of switching on a source enum. The coarse `lyricSource` stays as
+ * the fallback for a track whose record has not been filled in yet.
  */
 const lyricSourceLabel = computed(() => {
   if (player.lyrics === null) return ''
+  if (player.lyricAsset) return describeAsset(player.lyricAsset)
   switch (player.lyricSource) {
     case 'embedded':
-      return '内嵌'
+      return '文件内嵌'
     case 'sidecar':
-      return '本地文件'
+      return '同目录文件'
     case 'online':
       return '在线匹配'
     default:
@@ -485,7 +519,7 @@ function playArtworkFlight(): void {
     <LyricEditor
       v-if="showLyricEditor && player.currentTrack && isLocalTrack(player.currentTrack)"
       :initial="rawLyric"
-      :audio-path="player.currentTrack.path"
+      :track-id="player.currentTrack.id"
       @close="showLyricEditor = false"
       @saved="onLyricSaved"
     />

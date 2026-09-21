@@ -37,6 +37,7 @@
     "electron-builder": "^26.0.12",
     "electron-vite": "^4.0.1",
     "pinia": "^3.0.3",
+    "pinyin-pro": "^3.29.4",
     "typescript": "^5.9.3",
     "vite": "^7.1.9",
     "vue": "^3.5.22",

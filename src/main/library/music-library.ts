@@ -18,9 +18,10 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import type { Dirent } from 'node:fs'
-import { extname, join, basename, dirname } from 'node:path'
+import { extname, join, basename } from 'node:path'
 import { parseFile } from 'music-metadata'
-import type { LocalMusicInfo } from '@shared/types'
+import type { LocalMusicInfo, TrackAssets } from '@shared/types'
+import { findCoverSidecar, sidecarPathFor } from './asset-files'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 
 /** Extensions we attempt to read. Mirrors what the browser can decode plus
@@ -84,8 +85,12 @@ interface LibraryIndex {
  *   1 — initial
  *   2 — added `hasEmbeddedLyric` / `hasSyncedLyric`
  *   3 — content-addressed cover cache
+ *   4 — `assets` (where each cover/lyric actually lives) replaces `lyricPath` and
+ *       the two lyric booleans
+ *   5 — a cover sidecar (`<同名>.jpg`, `cover.jpg`, …) is indexed as artwork, so
+ *       untagged files with folder art stop showing a placeholder
  */
-const INDEX_VERSION = 3
+const INDEX_VERSION = 5
 
 export interface ScanProgress {
   /** Files examined so far. */
@@ -152,7 +157,20 @@ export class MusicLibrary {
 
     this.folders = Array.isArray(raw.folders) ? raw.folders : []
     for (const track of raw.tracks ?? []) {
-      if (track?.path) this.tracks.set(track.path, track)
+      if (!track?.path) continue
+      // Cover art is a derived file living outside the index, so clearing the
+      // cover folder never changes the audio's size or mtime — and an incremental
+      // scan skips exactly those. Drop the dead reference (otherwise every row
+      // paints the browser's broken-image glyph instead of our placeholder) and
+      // mark the index for a refresh, which is what makes the startup background
+      // scan re-extract the artwork without the user doing anything.
+      if (track.coverPath && !existsSync(track.coverPath)) {
+        delete track.coverPath
+        delete track.assets?.cover
+        if (track.assets && !track.assets.cover && !track.assets.lyrics) delete track.assets
+        this.stale = true
+      }
+      this.tracks.set(track.path, track)
     }
   }
 
@@ -205,8 +223,28 @@ export class MusicLibrary {
     return this.scan(options)
   }
 
-  async removeFolder(folder: string): Promise<void> {
+  /**
+   * Drop entries from the index by track id. The file on disk is never touched.
+   *
+   * This is "keep this out of my library", not "delete my music" — so a rescan of
+   * the folder it lives in brings it back, deliberately. The alternative (an
+   * exclusion list) would need its own UI to be reversible, and would turn a
+   * routine 重新扫描 into a mystery when a song refused to reappear.
+   */
+  async removeTracks(ids: string[]): Promise<number> {
     await this.load()
+    const drop = new Set(ids)
+    let removed = 0
+    for (const [path, track] of [...this.tracks]) {
+      if (!drop.has(track.id)) continue
+      this.tracks.delete(path)
+      removed += 1
+    }
+    if (removed > 0) await this.persist()
+    return removed
+  }
+
+  async removeFolder(folder: string): Promise<void> {    await this.load()
     this.folders = this.folders.filter((item) => item !== folder)
     // Drop tracks that lived under the removed folder.
     for (const [path] of this.tracks) {
@@ -349,28 +387,68 @@ export class MusicLibrary {
       if (format.codec) track.codec = format.codec
       track.lossless = format.lossless
 
-      // Record that a lyric tag exists so the UI can show availability without
-      // re-reading every file. The text itself is fetched on demand.
+      // Record which sources exist for each asset, best first. The lyric list here
+      // *is* the resolution chain, written as data: a sidecar outranks a tag, and
+      // the resolver walks this order and actually reads each one (a `.lrc` added
+      // after the fact would not show up in this list, since the audio file did not
+      // change). The old `hasEmbeddedLyric` / `hasSyncedLyric` pair could say a
+      // lyric existed but not where, which is the question every badge asks.
+      const assets: TrackAssets = {}
       const lyricTags = common.lyrics
       if (Array.isArray(lyricTags) && lyricTags.length > 0) {
-        track.hasEmbeddedLyric = true
-        track.hasSyncedLyric = lyricTags.some(
+        const synced = lyricTags.some(
           (tag) => Array.isArray(tag.syncText) && tag.syncText.length > 0
         )
+        assets.lyrics = { main: [{ origin: 'embedded', synced }] }
       }
 
       const picture = common.picture?.[0]
       if (picture) {
         track.coverPath = await this.writeCover(picture.data, picture.format)
+        // `embedded` rather than `cache`: the asset lives in the user's file, and
+        // the cache copy is only how it gets served. Deleting the copy loses
+        // nothing, which is exactly what this field is used to promise.
+        assets.cover = [{ origin: 'embedded', provider: picture.format }]
       }
+      if (assets.cover || assets.lyrics) track.assets = assets
     } catch {
       // Unreadable tags are not fatal: we still index the file by name so the
       // user can see and play it.
     }
 
-    const sidecar = join(dirname(path), `${basename(path, extname(path))}.lrc`)
-    if (existsSync(sidecar)) track.lyricPath = sidecar
+    // Sidecar assets are probed outside the tag-parsing block on purpose. A file
+    // whose tags fail to parse should still get the artwork and lyrics sitting
+    // beside it, and a `.lrc` added after the fact does not change the audio's
+    // size or mtime, so this is the only place that can see it.
+    const sidecar = sidecarPathFor(path)
+    const sidecarCover = findCoverSidecar(path)
+    const assets: TrackAssets = track.assets ?? {}
 
+    if (existsSync(sidecar)) {
+      // First in the list because first in the resolution order.
+      assets.lyrics = {
+        ...assets.lyrics,
+        main: [{ origin: 'sidecar' }, ...(assets.lyrics?.main ?? [])]
+      }
+    }
+
+    if (sidecarCover) {
+      if (assets.cover?.length) {
+        // The file's own picture wins, which is what the ecosystem treats as
+        // authoritative for artwork (unlike lyrics, where a placed file is the
+        // user's deliberate override). The sidecar is still recorded, so the
+        // track info panel can name both.
+        assets.cover = [...assets.cover, { origin: 'sidecar', provider: sidecarCover.mimeType }]
+      } else {
+        // Nothing embedded: serve the sidecar itself. It lives inside a library
+        // folder, so `jjmedia://` already allows it and there is nothing to
+        // extract into the cache.
+        track.coverPath = sidecarCover.path
+        assets.cover = [{ origin: 'sidecar', provider: sidecarCover.mimeType }]
+      }
+    }
+
+    if (assets.cover || assets.lyrics) track.assets = assets
     return track
   }
 
@@ -385,6 +463,11 @@ export class MusicLibrary {
     await this.load()
     this.tracks.set(track.path, track)
     await this.persist()
+  }
+
+  /** Persist arbitrary artwork (a playlist cover, an imported image) and return its path. */
+  async saveCover(data: Uint8Array, format: string): Promise<string | undefined> {
+    return this.writeCover(data, format)
   }
 
   /** Persist embedded cover art next to the index, returning its path. */

@@ -1,4 +1,4 @@
-import { isLocalTrack, LX_QUALITIES, QUALITY_LABELS, type OnlineMusicInfo, type PlayableTrack } from '@shared/types'
+import { isLocalTrack, LX_QUALITIES, QUALITY_LABELS, type LocalMusicInfo, type OnlineMusicInfo, type PlayableTrack } from '@shared/types'
 import { DESKTOP_LYRIC_FONTS } from '@shared/desktop-lyric'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { usePlayerStore } from '../stores/player'
@@ -11,6 +11,7 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
   const local = isLocalTrack(track)
   const separator = { label: '', separator: true }
   const online=selection.filter((t): t is OnlineMusicInfo => !isLocalTrack(t))
+  const locals = selection.filter((t): t is LocalMusicInfo => isLocalTrack(t))
   const downloadQualities=LX_QUALITIES.filter(q => online.length && online.every(t => library.sources.some(s=>s.id===t.source && s.actions.includes('musicUrl') && s.qualitys.includes(q))))
   return [
     { label: selection.length > 1 ? `播放 ${selection.length} 首歌曲` : '播放', icon: 'play', action: () => player.playQueue(selection) },
@@ -34,11 +35,45 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
       { label: '专辑', icon: 'album', action: () => router.push({ path: '/albums', query: { q: track.albumName || '' } }) },
       { label: '在线搜索', icon: 'search', action: () => router.push({ path: '/search', query: { q: `${track.name} ${track.singer}` } }) }
     ] },
-    ...(local ? [{ label: '文件', icon: 'folder', children: [
+    ...(local ? [{ label: locals.length > 1 ? `文件（${locals.length} 首）` : '文件', icon: 'folder', children: [
       { label: '在资源管理器中打开', icon: 'folder', action: () => window.jj.library.reveal(track.path) },
       { label: '复制文件地址', icon: 'link', action: () => navigator.clipboard.writeText(track.path) },
-      { label: '在线匹配标签', icon: 'edit', action: () => { ui.matchTrack = track } }
+      { label: '在线匹配标签', icon: 'edit', action: () => { ui.matchTrack = track } },
+      separator,
+      /*
+       * The explicit commit for what 待写入 holds: a lyric found while playing is
+       * shown but not stored, and this is the moment it becomes the user's file.
+       * It says where it will go because the answer depends on a setting they
+       * can change, and 「已写入」 without a place is not information.
+       */
+      {
+        label: locals.length > 1 ? `写入封面与歌词（${locals.length} 首）` : '写入封面与歌词',
+        icon: 'download',
+        action: async () => {
+          const results = await window.jj.assets.export(locals.map((item) => item.id))
+          const done = results.filter((item) => item.written)
+          const notes = [...new Set(results.map((item) => item.note))]
+          if (done.length) await library.refreshLibrary()
+          // The note already names the destination, so the count and it are the
+          // whole message; the rest goes on a second clause rather than being dropped.
+          if (done.length) toast.success(`${done.length} 首${notes[0]}${notes.length > 1 ? `；${notes.slice(1).join('、')}` : ''}`)
+          else toast.info(notes[0] ?? '没有需要写入的内容')
+        }
+      }
     ] }] : []),
+    /*
+     * Removal is about the library, not the disk: the confirm has to say so, since
+     * every other player's 删除 means delete-the-file and the user's music is on
+     * the other side of that misunderstanding.
+     */
+    ...(locals.length ? [{ label: locals.length > 1 ? `从曲库移除 ${locals.length} 首` : '从曲库移除', icon: 'trash', danger: true, action: async () => {
+      const one = locals.length === 1
+      if (!await ui.confirm('从曲库移除', one
+        ? `把「${locals[0].name}」从曲库移除？音乐文件保留在原位置，重新扫描所在文件夹会再次收录。`
+        : `把这 ${locals.length} 首从曲库移除？音乐文件保留在原位置，重新扫描所在文件夹会再次收录。`)) return
+      const removed = await library.removeTracks(locals)
+      toast.success(`已从曲库移除 ${removed} 首，文件未删除`)
+    } }] : []),
     { label: '音轨信息', icon: 'info', action: () => { ui.trackInfo = track } }
   ]
 }

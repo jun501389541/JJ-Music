@@ -17,3 +17,27 @@ test('local search ranks exact titles first and matches terms across metadata', 
 test('local search normalizes case and full width characters', () => {
   assert.equal(searchLocalTracks([track('a', 'ＡＢＣ')], 'abc').length, 1)
 })
+
+/**
+ * Pinyin matching (需求 11): what people type when the IME is off. Each case has
+ * a counterpart that must return nothing, otherwise "found it" is satisfied by any
+ * implementation that ignores the query.
+ */
+test('local search matches titles and artists by pinyin initials and full spelling', () => {
+  const tracks = [track('qt', '晴天'), track('bn', '偏爱'), track('sh', '上海一九四三')]
+  assert.deepEqual(searchLocalTracks(tracks, 'qt').map(t => t.id), ['qt'])
+  assert.deepEqual(searchLocalTracks(tracks, 'qingtian').map(t => t.id), ['qt'])
+  assert.deepEqual(searchLocalTracks(tracks, 'pa').map(t => t.id), ['bn'])
+  // The fixture's artist is 周杰伦 on every row, so the abbreviation has to reach
+  // the artist field, not just the title.
+  assert.deepEqual(searchLocalTracks(tracks, 'zjl').map(t => t.id).length, 3)
+  assert.equal(searchLocalTracks(tracks, 'zzzz').length, 0, 'a nonsense abbreviation finds nothing')
+  assert.equal(searchLocalTracks(tracks, 'qqqqqq').length, 0)
+})
+
+test('pinyin matching never swallows a query that is not plain letters', () => {
+  const tracks = [track('love', '热爱105°C你'), track('qt', '晴天')]
+  assert.deepEqual(searchLocalTracks(tracks, '105').map(t => t.id), ['love'])
+  assert.equal(searchLocalTracks(tracks, 'qt1').length, 0, 'letters plus digits is not an abbreviation')
+  assert.equal(searchLocalTracks(tracks, 'a b').length, 0, 'spaced letters are two terms, not one syllable run')
+})

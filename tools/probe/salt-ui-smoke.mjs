@@ -249,7 +249,7 @@ try {
    return response.result.value
   }
   await sleep(1500)
-  check('the overlay window has no jj bridge, only its three methods', await lyricEval('typeof window.jj === "undefined" && typeof window.desktopLyric?.dragTo === "function"'))
+  check('the overlay window has no jj bridge, only its own methods', await lyricEval('typeof window.jj === "undefined" && typeof window.desktopLyric?.dragStart === "function" && typeof window.desktopLyric?.dragEnd === "function" && typeof window.desktopLyric?.dragMove === "undefined"'))
   const strip = await lyricEval(`({ line: document.querySelector('#line')?.textContent ?? null, fallback: document.querySelector('#line')?.classList.contains('is-fallback') ?? null, size: getComputedStyle(document.documentElement).getPropertyValue('--lyric-size').trim(), background: getComputedStyle(document.body).backgroundColor })`)
   const expected = await evaluate(`(() => { const i = uiTestPlayer.activeLyricIndex; const l = i >= 0 ? (uiTestPlayer.lyrics?.lines?.[i]?.text ?? '') : ''; return l || (uiTestPlayer.currentTrack ? uiTestPlayer.currentTrack.name : '') })()`)
   check('the strip shows the line the player is on', strip.line === expected && strip.line !== '', `悬浮窗="${strip.line}" 应有="${expected}"`)

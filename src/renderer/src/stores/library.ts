@@ -15,6 +15,7 @@ import type {
   PlatformProbeResult,
   UserApiMeta
 } from '@shared/types'
+import { isLocalTrack } from '@shared/types'
 import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 import { createSettingsWriter } from '../utils/settings-writer'
 import { createLocalSearchIndex } from '../utils/local-search'
@@ -285,6 +286,21 @@ export const useLibraryStore = defineStore('library', () => {
     await refreshLibrary()
   }
 
+  /**
+   * Forget these songs in the library.
+   *
+   * The files stay exactly where they are, and a 重新扫描 of the folder holding
+   * them brings them back — which is what makes this safe to offer without an
+   * exclusion list the user would have to remember they had set.
+   */
+  async function removeTracks(tracks: PlayableTrack[]): Promise<number> {
+    const ids = tracks.filter(isLocalTrack).map(track => track.id)
+    if (ids.length === 0) return 0
+    const removed = await window.jj.library.removeTracks(ids)
+    await refreshLibrary()
+    return removed
+  }
+
   /*
    * The download directory is picked by a dialog the main process opens, and
    * written there — this is where downloaded audio and tag-write output land, so
@@ -314,6 +330,13 @@ export const useLibraryStore = defineStore('library', () => {
 
   async function importSource(payload: string, name?: string): Promise<UserApiMeta> {
     const meta = await window.jj.sources.import(payload, name)
+    await refreshSources()
+    return meta
+  }
+
+  /** Pull a script from a link; main fetches it under the same guard as lyrics. */
+  async function importSourceUrl(url: string): Promise<UserApiMeta> {
+    const meta = await window.jj.sources.importUrl(url)
     await refreshSources()
     return meta
   }
@@ -380,7 +403,7 @@ export const useLibraryStore = defineStore('library', () => {
   function toggleFavorite(track: PlayableTrack): Promise<void> {
     const snapshot = JSON.parse(JSON.stringify(track)) as PlayableTrack
     const operation = favoriteWrites.catch(() => undefined).then(async () => {
-      if (favorites.value.some(item => item.id === snapshot.id)) await window.jj.playlists.removeTrack('favorites', snapshot.id)
+      if (favorites.value.some(item => item.id === snapshot.id)) await window.jj.playlists.removeTracks('favorites', [snapshot.id])
       else await window.jj.playlists.addTracks('favorites', [snapshot])
       await refreshPlaylists()
     })
@@ -425,9 +448,11 @@ export const useLibraryStore = defineStore('library', () => {
     updateSettings,
     addFolder,
     removeFolder,
+    removeTracks,
     chooseDownloadFolder,
     rescan,
     importSource,
+    importSourceUrl,
     importSourceFile,
     removeSource,
     toggleSource,

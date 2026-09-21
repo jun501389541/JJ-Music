@@ -2,10 +2,12 @@
 /**
  * Lyric editor.
  *
- * Saves to a sidecar `.lrc` beside the audio file, which by design takes
- * priority over the embedded tag on the next resolve. That gives the user a
- * way to correct a bad embedded lyric (a wrong version, a missing line, an
- * offset that drifts) without rewriting the audio file's tags.
+ * Saving writes the edited text where 设置·标签与文件 says (the file's tag, a
+ * sidecar `.lrc`, or both), and always includes the sidecar: resolution prefers
+ * a `.lrc`, so an edit that only reached the tag could be shadowed by the old
+ * sidecar and look like the save did nothing. That is also what lets a user
+ * correct a bad embedded lyric (a wrong version, a missing line, an offset that
+ * drifts) without having to rewrite tags by hand.
  *
  * The timestamp helper is the important part: hand-typing `[mm:ss.xxx]` for
  * every line is what makes lyric editing tedious, so this can stamp the current
@@ -20,8 +22,8 @@ import { formatTime } from '../utils/format'
 const props = defineProps<{
   /** Initial lyric text (LRC). */
   initial: string
-  /** Absolute path of the audio file the sidecar belongs to. */
-  audioPath: string
+  /** Indexed track the lyric belongs to; the path is never taken from here. */
+  trackId: string
 }>()
 
 const emit = defineEmits<{ close: []; saved: [text: string] }>()
@@ -105,8 +107,12 @@ function stampCurrentTime(): void {
 async function save(): Promise<void> {
   saving.value = true
   try {
-    const savedTo = await window.jj.lyric.save(props.audioPath, text.value)
-    toast.success(`歌词已保存到 ${savedTo}`)
+    const saved = await window.jj.lyric.save(props.trackId, text.value)
+    if (!saved.written) {
+      toast.error(saved.note)
+      return
+    }
+    toast.success(`歌词${saved.note}`)
     emit('saved', text.value)
     emit('close')
   } catch (error) {

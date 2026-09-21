@@ -6,12 +6,83 @@ import TrackList from '../components/TrackList.vue'
 import LocatePlaying from '../components/LocatePlaying.vue'
 import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
+import { useToastStore } from '../stores/toast'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
+const toast = useToastStore()
+
+/**
+ * Network portraits, keyed by artist name.
+ *
+ * The library knows artists only as tag strings, so a portrait costs a search per
+ * name — and a real library has hundreds of names. Cards therefore only ask when
+ * they scroll into view, and at most two lookups run at once. The main process
+ * remembers both hits and misses, so a second visit to this page is free.
+ */
+const portraits = ref<Record<string, string>>({})
+const queue: string[] = []
+const queued = new Set<string>()
+let activeLookups = 0
+const MAX_PARALLEL_LOOKUPS = 2
+
+function ask(name: string, refresh = false): void {
+  if (!name || (queued.has(name) && !refresh)) return
+  queued.add(name)
+  if (refresh) void lookup(name, true)
+  else { queue.push(name); pump() }
+}
+
+function pump(): void {
+  while (activeLookups < MAX_PARALLEL_LOOKUPS && queue.length) {
+    const name = queue.shift()!
+    activeLookups++
+    void lookup(name, false).finally(() => { activeLookups--; pump() })
+  }
+}
+
+async function lookup(name: string, refresh: boolean): Promise<void> {
+  try {
+    const path = await window.jj.artists.image(name, refresh)
+    if (path) portraits.value = { ...portraits.value, [name]: toMediaUrl(path) }
+    else if (refresh) delete portraits.value[name]
+  } catch {
+    /* no portrait is the normal outcome for a obscure tag spelling */
+  } finally {
+    queued.delete(name)
+  }
+}
+
+/**
+ * Created in the setup body, not in `onMounted`: the cards' `:ref` callbacks run
+ * during the first render, which is before any mounted hook, so an observer built
+ * in `onMounted` would be `undefined` for every card on the first screen — exactly
+ * the cards that need it.
+ */
+const observer = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue
+    const name = entry.target.getAttribute('data-artist')
+    if (name) ask(name)
+    observer.unobserve(entry.target)
+  }
+}, { rootMargin: '200px' })
+const observed = new WeakSet<Element>()
+function observeCard(element: Element | ComponentPublicInstance | null): void {
+  if (!(element instanceof Element) || observed.has(element)) return
+  observed.add(element)
+  observer.observe(element)
+}
+onBeforeUnmount(() => observer.disconnect())
+async function refreshPortrait(): Promise<void> {
+  const name = selectedArtist.value?.name
+  if (!name) return
+  await lookup(name, true)
+  toast.success(portraits.value[name] ? '已更新网络头像' : '各平台都没有匹配到这位艺术家的头像')
+}
 
 const route = useRoute()
 const filter = ref(typeof route.query.q === 'string' ? route.query.q : '')
@@ -27,12 +98,19 @@ const artists = computed(() => {
 })
 
 const selectedArtist = computed(() => artists.value.find(artist => artist.name === selected.value) ?? null)
+watch(selectedArtist, artist => { if (artist) ask(artist.name) }, { immediate: true })
 
 function coverOf(tracks: LocalMusicInfo[]): string | null {
   const withCover = tracks.find((track) => track.coverPath)
   if (!withCover?.coverPath) return null
   const encoded = toMediaUrl(withCover.coverPath)
   return encoded
+}
+
+/** 网络头像优先；没有（或还没取到）时仍用专辑封面，不至于留白。 */
+function artOf(artist: { name: string; tracks: LocalMusicInfo[] } | null): string | null {
+  if (!artist) return null
+  return portraits.value[artist.name] ?? coverOf(artist.tracks)
 }
 
 async function playArtist(tracks: PlayableTrack[]): Promise<void> {
@@ -56,14 +134,20 @@ function revealPlaying(): void {
 <template>
   <div class="view">
     <header class="view__header">
-      <div>
-        <h1 class="view__title">{{ selectedArtist?.name || '艺术家' }}</h1>
-        <p class="view__subtitle">{{ selectedArtist ? `${selectedArtist.tracks.length} 首歌曲` : `${artists.length} 位艺术家` }}</p>
+      <div class="heading">
+        <span v-if="selectedArtist" class="heading__art" :class="{ 'heading__art--empty': !artOf(selectedArtist) }">
+          <img v-if="artOf(selectedArtist)" :src="artOf(selectedArtist)!" alt="" />
+        </span>
+        <div>
+          <h1 class="view__title">{{ selectedArtist?.name || '艺术家' }}</h1>
+          <p class="view__subtitle">{{ selectedArtist ? `${selectedArtist.tracks.length} 首歌曲` : `${artists.length} 位艺术家` }}</p>
+        </div>
       </div>
       <div v-if="selectedArtist" class="header-actions">
         <button class="btn btn--primary" type="button" :disabled="selectedArtist.tracks.length === 0" @click="playArtist(selectedArtist.tracks)">
           播放全部
         </button>
+        <button class="btn" type="button" @click="refreshPortrait">更新网络头像</button>
         <button class="btn" type="button" @click="selected = null">返回艺术家</button>
       </div>
       <input v-else v-model="filter" class="input" type="search" placeholder="筛选艺术家…" />
@@ -96,8 +180,8 @@ function revealPlaying(): void {
         type="button"
         @click="selected = artist.name"
       >
-        <div class="artist__art">
-          <img v-if="coverOf(artist.tracks)" :src="coverOf(artist.tracks)!" alt="" loading="lazy" />
+        <div class="artist__art" :data-artist="artist.name" :ref="observeCard">
+          <img v-if="artOf(artist)" :src="artOf(artist)!" alt="" loading="lazy" />
           <svg v-else width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <circle cx="12" cy="8.5" r="3.6" stroke="currentColor" stroke-width="1.4" />
             <path
@@ -118,6 +202,35 @@ function revealPlaying(): void {
 </template>
 
 <style scoped>
+.heading {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.heading__art {
+  width: 72px;
+  height: 72px;
+  flex: none;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--bg-panel);
+  color: var(--text-tertiary);
+}
+
+.heading__art--empty {
+  border: 1px dashed var(--border-strong);
+}
+
+.heading__art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .header-actions {
   display: flex;
   gap: 8px;

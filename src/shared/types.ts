@@ -175,6 +175,14 @@ export interface OnlineMusicInfo {
   /** Cover art URL, when known. LX calls this `img` in the delivered shape. */
   picUrl?: string
   /**
+   * Provenance for the art and lyrics of this row.
+   *
+   * Online tracks carry it for the same reason local ones do: whether the cover
+   * came with the platform's search row or had to be asked from the 音源 script
+   * changes what a re-play has to do when it is missing.
+   */
+  assets?: TrackAssets
+  /**
    * Source-specific payload passed straight through to the 音源 script.
    *
    * Identifier fields are typed `string | number` because platforms disagree:
@@ -228,16 +236,178 @@ export interface LocalMusicInfo {
   mtimeMs?: number
   /** Absolute path to a cached cover image, if extracted. */
   coverPath?: string
-  /** Absolute path to a sidecar `.lrc`, if present. */
-  lyricPath?: string
-  /** True when the file's tags carry lyrics (ID3 USLT/SYLT, Vorbis LYRICS, MP4 ©lyr). */
-  hasEmbeddedLyric?: boolean
-  /** True when the embedded lyrics carry per-line timestamps. */
-  hasSyncedLyric?: boolean
+  /**
+   * Where the cover and each lyric slot come from, best source first. Replaces
+   * the old `lyricPath` / `hasEmbeddedLyric` / `hasSyncedLyric` trio, which could
+   * say "there is a lyric" but not which of the three places it was in — the
+   * question the whole UI keeps having to answer.
+   */
+  assets?: TrackAssets
 }
 
 /** Where a displayed lyric came from. */
 export type LyricSource = 'embedded' | 'sidecar' | 'online' | 'none'
+
+/* ------------------------------------------------------------------ *
+ * Assets: cover art and lyrics, and where each copy actually lives
+ * ------------------------------------------------------------------ */
+
+/**
+ * The five places an asset can live. This is not decoration: the value decides
+ * whether deleting it loses something the user owns, and whether the app may
+ * overwrite it.
+ *
+ *  - `embedded`  inside the audio file (APIC / Vorbis PICTURE / USLT / SYLT / ©lyr).
+ *    Writing it mutates a file the user owns, so it needs a backup and an explicit
+ *    action.
+ *  - `sidecar`   a file next to the audio (同名 `.lrc`). Lives in the user's music
+ *    folder, other players read it, and it outranks every automatic source.
+ *  - `cache`     a copy inside the app's data folder (extracted cover art, downloaded
+ *    artist portraits). Deleting it costs a re-extraction, nothing more.
+ *  - `remote`    only an address, no local copy yet.
+ *  - `user`      something the user placed or typed themselves — never overwritten
+ *    by an automatic pass.
+ */
+export type AssetOrigin = 'embedded' | 'sidecar' | 'cache' | 'remote' | 'user'
+
+/**
+ * Where an asset can be put when the app writes one.
+ *
+ * `embedded` mutates a file the user owns; `sidecar` adds a file next to it.
+ * Those are the only two places the app writes — `cache` and `remote` are
+ * sources it reads, never destinations.
+ */
+export type AssetWriteTarget = 'embedded' | 'sidecar'
+
+/** The user's choice in settings: one destination, or both at once. */
+export type AssetWriteChoice = AssetWriteTarget | 'both'
+
+/** The two things this app treats as an asset, i.e. can write for a track. */
+export type AssetKind = 'lyric' | 'cover'
+
+/**
+ * An asset the app has obtained but not written anywhere yet.
+ *
+ * Staging rather than writing is the MusicBrainz Picard model: nothing touches
+ * the user's files until they say so, and the staged list survives a restart so
+ * the decision can be made later, in bulk. A lyric carries its text; a cover
+ * carries the cache file it was saved to, since a binary does not belong in
+ * JSON.
+ */
+export interface PendingAsset {
+  trackId: string
+  kind: AssetKind
+  /** Copy of the song's own labels, so the list can name entries cheaply. */
+  name: string
+  singer: string
+  /** The audio file this would be written into or beside. */
+  path: string
+  /** Lyrics only: the LRC text. */
+  lyric?: string
+  /** Lyrics only: the text carries per-line timestamps. */
+  synced?: boolean
+  /** Covers only: the cached image to embed or copy. */
+  image?: { path: string; mimeType: string }
+  /** Where it came from, for the label the list shows. */
+  origin: AssetOrigin
+  provider?: string
+  /** When it was staged (ms). */
+  at: number
+}
+
+/** One available source for an asset. */
+export interface AssetRef {
+  origin: AssetOrigin
+  /**
+   * Who supplied it: a platform id, `音源脚本`, a tag descriptor. Local cover art
+   * needs no field of its own because the copy's path is the track's `coverPath`.
+   */
+  provider?: string
+  /** Remote address, meaningful only when there is no local copy. */
+  url?: string
+  /** Lyrics only: the text carries per-line timestamps. */
+  synced?: boolean
+  /**
+   * Obtained from the network and staged for writing: usable right now, but not
+   * yet in any file the user owns. Paired with the 待写入 list (`PendingAsset`).
+   */
+  pending?: boolean
+  /** When this was recorded (ms), so "too old, fetch again" is expressible. */
+  at?: number
+}
+
+/**
+ * Every source available for one asset, best first — the resolution priority
+ * written down as data instead of being spread across `if` statements.
+ *
+ * This is what the scanner saw, not a guarantee: a `.lrc` dropped in later does
+ * not change the audio's size or mtime, so an incremental scan never notices.
+ * The resolver still walks the list and actually reads each candidate, which is
+ * why the list can describe availability without being the last word.
+ */
+export type AssetSources = AssetRef[]
+
+/**
+ * Asset provenance for one track.
+ *
+ * Slots follow OpenSubsonic's structured lyrics (`main` / `translation` /
+ * `pronunciation`) so a translation is a labelled slot rather than a naming
+ * convention, and the same shape works for a local FLAC and an online row.
+ */
+export interface TrackAssets {
+  cover?: AssetSources
+  lyrics?: {
+    main?: AssetSources
+    translation?: AssetSources
+    pronunciation?: AssetSources
+  }
+}
+
+/** A short human label for an asset source, e.g. 「文件内嵌（带时间轴）」「在线·平台接口」. */
+export function describeAsset(asset: AssetRef | undefined): string {
+  if (!asset) return '无'
+  // `provider` is a machine id for the online lyric sources and a display string
+  // for everything else (an image format, a platform name); mapping the known ids
+  // here keeps the label in one place.
+  const named = asset.provider ? ONLINE_LYRIC_SOURCE_LABELS[asset.provider as OnlineLyricSource] ?? asset.provider : ''
+  const who = named ? `·${named}` : ''
+  // Staged but not written yet: the label has to say so, or 「在线获取」 reads as
+  // if the text were already safe in a file.
+  const pending = asset.pending ? '（待写入）' : ''
+  switch (asset.origin) {
+    case 'embedded':
+      return asset.synced === undefined
+        ? `文件内嵌${who}`
+        : `${asset.synced ? '文件内嵌（带时间轴）' : '文件内嵌（无时间轴）'}${who}`
+    case 'sidecar':
+      return '同目录文件'
+    case 'cache':
+      return `应用缓存${who}${pending}`
+    case 'remote':
+      return `在线获取${who}${pending}`
+    case 'user':
+      return '用户指定'
+  }
+}
+
+/**
+ * Where an *online* track's lyrics can come from.
+ *
+ * Three genuinely different providers, in the order they became available:
+ *  - `script`: the user's 音源 script's `lyric` action. Rich when the script
+ *    aggregates several sites, absent when it only implements `musicUrl` — which
+ *    is most of them.
+ *  - `platform`: this app's own adapter for the track's platform.
+ *  - `search`: match the title and artist against the *other* platforms and take
+ *    their lyric — what makes a 网易云-only 现场版 still get words.
+ */
+export type OnlineLyricSource = 'script' | 'platform' | 'search'
+export const ONLINE_LYRIC_SOURCES: OnlineLyricSource[] = ['script', 'platform', 'search']
+export const ONLINE_LYRIC_SOURCE_LABELS: Record<OnlineLyricSource, string> = {
+  script: '音源脚本',
+  platform: '平台接口',
+  search: '联网匹配其他平台'
+}
 
 /** Anything the player can queue. */
 export type PlayableTrack = OnlineMusicInfo | LocalMusicInfo
@@ -298,6 +468,11 @@ export interface Playlist {
   locationUpdateTime?: number
   /** Track count, filled in by the store. */
   trackCount?: number
+  /**
+   * Cover art, stored as a file in the same content-addressed folder as track
+   * covers so `jjmedia://` can serve it without a second allow-list.
+   */
+  coverPath?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -353,6 +528,17 @@ export interface AppSettings extends UiPreferences {
   playMode: PlayMode
   /** Prefer local files over online sources when both match. */
   preferLocal: boolean
+  /**
+   * Which source to ask first for an online track's lyrics.
+   *
+   * A setting rather than a fixed chain because the right answer is per-library:
+   * a good 音源 script aggregates several sites and should lead, while most
+   * scripts only implement `musicUrl` and then the platform adapter is the only
+   * thing that ever answers.
+   */
+  onlineLyricSource: OnlineLyricSource
+  /** When the preferred source comes back empty, try the remaining ones in order. */
+  onlineLyricFallback: boolean
   /** Download folder for online tracks. */
   downloadFolder: string
   downloadLyric: boolean
@@ -360,6 +546,23 @@ export interface AppSettings extends UiPreferences {
   downloadTranslation: boolean
   downloadRomanization: boolean
   downloadEmbedCover: boolean
+  /**
+   * Where 「写入封面 / 写入歌词」 puts what it writes.
+   *
+   * `embedded` changes a file the user owns; `sidecar` adds a new one beside it.
+   * `both` is what Picard and JRiver Medley do for lyrics specifically, because
+   * the two are read by different crowds and neither is a superset of the other.
+   * A format the app cannot write falls back to the sidecar, and says so.
+   */
+  assetWriteTarget: AssetWriteChoice
+  /**
+   * File extensions the app may modify in place.
+   *
+   * This can only *narrow* the set the tag writers actually implement, so a
+   * renderer that writes this key cannot make the app touch a new format — the
+   * intersection is taken at write time, not at settings time.
+   */
+  tagWritableFormats: string[]
   /**
    * Keep playing when the window is closed.
    *
@@ -440,6 +643,13 @@ export interface DownloadTask {
   status: 'queued' | 'resolving' | 'downloading' | 'tagging' | 'completed' | 'failed' | 'cancelled'
   received: number
   total?: number
+  /**
+   * Validators from the response that produced `.part`, kept so a resume can send
+   * `If-Range`. Without them a server that rotated its file mid-download would glue
+   * two different recordings into one file that still passes the length check.
+   */
+  etag?: string
+  lastModified?: string
   path?: string
   error?: string
   warnings: string[]
@@ -449,6 +659,8 @@ export interface ImportedPlaylist {
   name: string
   source: SourceId
   sourceListId: string
+  /** The platform's own cover, when its response carried one. */
+  coverUrl?: string
   tracks: OnlineMusicInfo[]
   total: number
   warnings: string[]

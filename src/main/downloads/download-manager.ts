@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rm, link, copyFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rm, link, copyFile, rename, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { parseFile } from 'music-metadata'
 import type { AppSettings, DownloadTask, LyricResult, OnlineMusicInfo, Quality } from '@shared/types'
 import { LX_QUALITIES } from '@shared/types'
-import { writeTags } from '../library/tag-writer'
+import { canWriteTags } from '../library/tag-writer'
+import { exportAssets } from '../library/asset-export'
 import { readBounded } from '../online/read-bounded'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 
@@ -76,7 +77,7 @@ export class DownloadManager {
   async load(): Promise<void> {
     try {
       const saved = parseJsonLoose<DownloadTask[]>(await readFile(this.file, 'utf8'))
-      if (Array.isArray(saved)) this.tasks = saved.filter(t => t?.id && t?.track?.meta && LX_QUALITIES.includes(t.quality)).slice(-1000).map(t => ({ ...t, warnings: Array.isArray(t.warnings) ? t.warnings : [], ...(!['completed','failed','cancelled'].includes(t.status) ? {status:'failed',error:'上次退出时下载未完成，请重试'} : {}) }))
+      if (Array.isArray(saved)) this.tasks = saved.filter(t => t?.id && t?.track?.meta && LX_QUALITIES.includes(t.quality)).slice(-1000).map(t => ({ ...t, warnings: Array.isArray(t.warnings) ? t.warnings : [], ...(!['completed','failed','cancelled'].includes(t.status) ? {status:'failed',error:'上次退出时下载中断，重试会从断点继续'} : {}) }))
     } catch { /* first launch */ }
   }
   list(): DownloadTask[] { return structuredClone(this.tasks) }
@@ -135,6 +136,9 @@ export class DownloadManager {
     const settings = this.deps.settings()
     const folder = settings.downloadFolder || this.deps.defaultFolder
     let temp = '', stage = ''
+    // Set once the partial file exists on disk: it is what makes a retry continue
+    // instead of starting over, so the cleanup in `finally` must not eat it.
+    let keepPart = false
     try {
       if (!isAbsolute(folder)) throw Error('请选择有效的下载目录')
       await mkdir(folder, {recursive:true})
@@ -142,11 +146,37 @@ export class DownloadManager {
       signal.throwIfAborted()
       if (resolved.quality !== task.quality) throw Error('音源未返回所选音质')
       if (!/^https?:\/\//i.test(resolved.url)) throw Error('音频地址无效')
-      const response = await http(resolved.url, {signal})
-      if (!response.ok || !response.body) { await response.body?.cancel(); throw Error(`下载请求失败 HTTP ${response.status}`) }
-      task.status='downloading'; task.total=Number(response.headers.get('content-length')) || undefined
       temp=join(folder, `.jj-${task.id}.part`)
-      const file=await open(temp,'wx')
+      const headers: Record<string, string> = {}
+      // How much of *this* task is already on disk. The file is named after the
+      // task id, so a leftover can only ever belong to this same song and quality.
+      let offset = 0
+      try { offset = Math.max(0, (await stat(temp)).size) } catch { offset = 0 }
+      if (offset > 0) {
+        headers.Range = `bytes=${offset}-`
+        // `If-Range` is what makes resuming safe rather than lucky: if the server's
+        // copy changed since the part was written it answers 200 with the whole
+        // body, and we start over instead of gluing two recordings together.
+        if (task.etag) headers['If-Range'] = task.etag
+        else if (task.lastModified) headers['If-Range'] = task.lastModified
+      }
+      const response = await http(resolved.url, {signal, headers})
+      if (!response.ok || !response.body) { await response.body?.cancel(); throw Error(`下载请求失败 HTTP ${response.status}`) }
+      task.status='downloading'
+      // A 206 is the only answer that means "here is the rest of the file". Anything
+      // else — including a 200 that ignored the Range — is a full body from byte 0.
+      const resuming = offset > 0 && response.status === 206
+      if (offset > 0 && !resuming) offset = 0
+      task.etag = response.headers.get('etag') ?? undefined
+      task.lastModified = response.headers.get('last-modified') ?? undefined
+      const fullLength = Number(/\/(\d+)\s*$/.exec(response.headers.get('content-range') ?? '')?.[1])
+        || Number(response.headers.get('content-length')) || undefined
+      task.received = offset
+      // `content-length` on a 206 counts only what is still coming, so the total has
+      // to come from `content-range`; on a 200 the two are the same number.
+      task.total = resuming ? fullLength : (fullLength ? fullLength + offset : undefined)
+      const file=await open(temp, resuming ? 'a' : 'w')
+      keepPart = true
       try {
         for await (const chunk of response.body) {
           signal.throwIfAborted()
@@ -157,6 +187,10 @@ export class DownloadManager {
       } finally { await file.close() }
       signal.throwIfAborted()
       if (!task.received) throw Error('下载文件为空')
+      // A closed stream that never reached the declared length is a partial file,
+      // not a finished one: keep it and say so, so 重试 picks up where this stopped.
+      if (task.total && task.received < task.total) throw Error(`下载未完成（${task.received}/${task.total}），重试将从断点继续`)
+      keepPart = false
       const metadata = await parseFile(temp)
       const container = (metadata.format.container || '').toLowerCase()
       const codec = (metadata.format.codec || '').toLowerCase()
@@ -193,7 +227,7 @@ export class DownloadManager {
         const tagged=join(folder, `.jj-${task.id}-tagged${ext}`)
         try {
           await copyFile(stage,tagged)
-          const result=await writeTags(tagged,{title:task.track.name,artist:task.track.singer,album:task.track.albumName,lyrics:settings.downloadEmbedLyric ? lyricText : undefined,cover},{skipBackup:true})
+          const result=await exportAssets({audioPath:tagged,stagingPath:tagged,patch:{title:task.track.name,artist:task.track.singer,album:task.track.albumName,lyrics:settings.downloadEmbedLyric ? lyricText : undefined,cover},to:['embedded'],writableFormats:settings.tagWritableFormats,skipBackup:true})
           if (!result.written) throw Error(result.note)
           await rm(stage); stage=tagged
         } catch(error) { task.warnings.push(`标签写入失败：${error instanceof Error ? error.message : error}`); await rm(tagged,{force:true}); await rm(tagged+'.jjtmp',{force:true}) }
@@ -210,11 +244,24 @@ export class DownloadManager {
       task.path=target
       // Publication is the commit point: cancellation must not label a saved file as cancelled.
       task.status='completed'
-      if (lyricText && (settings.downloadLyric || (settings.downloadEmbedLyric && ext!=='.mp3' && ext!=='.flac'))) {
-        try { await writeFile(target.slice(0,-ext.length)+'.lrc',lyricText,{encoding:'utf8',flag:'wx'}) } catch { task.warnings.push('LRC 保存失败或同名歌词已存在') }
+      if (lyricText && (settings.downloadLyric || (settings.downloadEmbedLyric && !canWriteTags(target, settings.tagWritableFormats)))) {
+        // The same writer every other lyric uses, with 不覆盖 on: this pass is
+        // automatic, so a `.lrc` the user wrote by hand is left alone.
+        try {
+          const saved = await exportAssets({ audioPath: target, patch: { lyrics: lyricText }, to: ['sidecar'], noClobber: true })
+          if (!saved.written) task.warnings.push(saved.notes.join('；') || 'LRC 保存失败')
+        } catch { task.warnings.push('LRC 保存失败') }
       }
     } catch(error) {
       if (task.status !== 'cancelled') { task.status='failed'; task.error=error instanceof Error ? error.message : String(error) }
-    } finally { clearTimeout(timeout); if(temp)await rm(temp,{force:true}).catch(()=>undefined);if(stage)await rm(stage,{force:true}).catch(()=>undefined) }
+    } finally {
+      clearTimeout(timeout)
+      // The partial file survives exactly when it is still useful: a failed or
+      // aborted download keeps its bytes so 重试 can continue. Once the body has
+      // been renamed into the staging file (`temp` is cleared) there is nothing to
+      // keep, and a completed task never gets here with `keepPart` set.
+      if(temp && !keepPart)await rm(temp,{force:true}).catch(()=>undefined)
+      if(stage)await rm(stage,{force:true}).catch(()=>undefined)
+    }
   }
 }

@@ -360,7 +360,7 @@ test('rapid favorite toggles run sequentially and cancel each other', async () =
  window.jj.playlists={
    list:async()=>[], items:async()=>[...favorites],
    addTracks:async(_,tracks)=>{await flush();favorites.push(...tracks)},
-   removeTrack:async(_,id)=>{await flush();favorites=favorites.filter(t=>t.id!==id)}
+   removeTracks:async(_,ids)=>{await flush();const drop=new Set(ids);favorites=favorites.filter(t=>!drop.has(t.id))}
  }
  await Promise.all([library.toggleFavorite(local('a')),library.toggleFavorite(local('a'))])
  assert.deepEqual(favorites,[])
@@ -435,4 +435,37 @@ test('clearing the queue discards its resume point and its sleep timer', async (
     globalThis.setTimeout = realSetTimeout
     globalThis.clearTimeout = realClearTimeout
   }
+})
+
+/**
+ * Random playback used to re-roll per skip, so a short queue could repeat a song
+ * seconds after it finished and starve the tail of the list for the whole
+ * session. A shuffled pass guarantees both, and the play log is what lets
+ * 上一首 return the song just heard instead of rolling somewhere else.
+ */
+test('random plays a full shuffled pass before repeating, and steps back through it', async () => {
+  const player = setup()
+  const ids = ['a', 'b', 'c', 'd', 'e']
+  player.setPlayMode('random')
+  await player.playQueue(ids.map(local))
+
+  const seen = new Set([player.currentTrack.id])
+  for (let skip = 0; skip < ids.length - 1; skip++) {
+    await player.next()
+    const id = player.currentTrack.id
+    assert.ok(!seen.has(id), `repeated before the pass ended: ${[...seen, id].join(',')}`)
+    seen.add(id)
+  }
+  assert.equal(seen.size, ids.length, 'one pass plays every queued track exactly once')
+
+  const last = player.currentTrack.id
+  await player.next()
+  assert.notEqual(player.currentTrack.id, last, 'the seam between two passes is not a repeat')
+
+  await player.previous()
+  const back = player.currentTrack.id
+  assert.ok(ids.includes(back))
+  await player.next()
+  await player.previous()
+  assert.equal(player.currentTrack.id, back, 'stepping back twice agrees about where back is')
 })

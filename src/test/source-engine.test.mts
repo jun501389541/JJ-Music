@@ -449,8 +449,7 @@ const legacyLocal = toLegacyLocal({
   genre: '',
   size: 1,
   mtime: 1,
-  ext: 'flac',
-  hasEmbeddedLyric: false
+  ext: 'flac'
 })
 check('local musicInfo.id mirrors the path', legacyLocal.id === 'D:\\Music\\a.flac', legacyLocal.id)
 

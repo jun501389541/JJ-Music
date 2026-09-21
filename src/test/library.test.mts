@@ -7,7 +7,7 @@
  *
  * Usage: node out/test/library.test.mjs [folder]
  */
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -98,7 +98,8 @@ const withDuration = tracks.filter((t) => t.duration && t.duration > 0).length
 const withCover = tracks.filter((t) => t.coverPath).length
 const withSpec = tracks.filter((t) => t.sampleRate).length
 const lossless = tracks.filter((t) => t.lossless).length
-const withLyric = tracks.filter((t) => t.lyricPath).length
+const hasSidecar = (t) => !!t.assets?.lyrics?.main?.some((a) => a.origin === 'sidecar')
+const withLyric = tracks.filter(hasSidecar).length
 
 const pct = (n) => `${((n / Math.max(1, tracks.length)) * 100).toFixed(0)}%`
 console.log(`  title:      ${withTitle} (${pct(withTitle)})`)
@@ -122,7 +123,7 @@ for (const track of tracks.slice(0, 5)) {
   console.log(
     `    ${track.codec ?? '?'} ${track.bitsPerSample ?? '?'}bit/${track.sampleRate ?? '?'}Hz ` +
       `${track.lossless ? 'lossless' : 'lossy'} ${track.duration ?? '?'}s` +
-      `${track.coverPath ? ' [cover]' : ''}${track.lyricPath ? ' [lrc]' : ''}`
+      `${track.coverPath ? ' [cover]' : ''}${hasSidecar(track) ? ' [lrc]' : ''}`
   )
 }
 

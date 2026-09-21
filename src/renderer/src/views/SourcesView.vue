@@ -22,6 +22,7 @@ const toast = useToastStore()
 const pasting = ref(false)
 const pasteText = ref('')
 const pasteName = ref('')
+const pasteUrl = ref('')
 const importing = ref(false)
 const logsFor = ref<string | null>(null)
 const logs = ref<string[]>([])
@@ -67,6 +68,30 @@ async function importFromPaste(): Promise<void> {
     toast.success(`已导入「${meta.name}」`)
     pasteText.value = ''
     pasteName.value = ''
+    pasting.value = false
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '导入失败')
+  } finally {
+    importing.value = false
+  }
+}
+
+/**
+ * Import a script from a link the user pasted.
+ *
+ * The fetch happens in the main process under the same per-hop guard the app uses
+ * for every caller-supplied URL, so a link that redirects to a local proxy or the
+ * cloud metadata address fails here rather than succeeding quietly. The script
+ * still lands disabled and unvalidated until the user starts it.
+ */
+async function importFromUrl(): Promise<void> {
+  const url = pasteUrl.value.trim()
+  if (!url) return
+  importing.value = true
+  try {
+    const meta = await library.importSourceUrl(url)
+    toast.success(`已导入「${meta.name}」`)
+    pasteUrl.value = ''
     pasting.value = false
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '导入失败')
@@ -351,6 +376,19 @@ async function disableAll(): Promise<void> {
 
     <!-- paste import -->
     <section v-if="pasting" class="paste card">
+      <div class="paste__row">
+        <input
+          v-model="pasteUrl"
+          class="input"
+          type="url"
+          aria-label="音源链接"
+          placeholder="粘贴音源链接：http(s)://… （.js 或 LX 导出的 .json）"
+        />
+        <button class="btn" type="button" :disabled="!pasteUrl.trim() || importing" @click="importFromUrl">
+          <span v-if="importing" class="spinner" />
+          <span v-else>从网址导入</span>
+        </button>
+      </div>
       <input
         v-model="pasteName"
         class="input"
@@ -570,6 +608,16 @@ code {
   gap: 10px;
   padding: 16px;
   margin-bottom: 20px;
+}
+
+.paste__row {
+  display: flex;
+  gap: 8px;
+}
+
+.paste__row .input {
+  flex: 1;
+  min-width: 0;
 }
 
 .paste__area {

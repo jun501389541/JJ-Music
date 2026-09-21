@@ -13,10 +13,15 @@
  * about what it supports:
  *
  *   - **MP3 / ID3v2** — full write support via `node-id3` (title, artist,
- *     album, year, track, genre, cover, lyrics).
- *   - **FLAC / OGG (Vorbis comments)** — implemented directly here for the
- *     fields we need. The rewrite preserves every audio frame and only replaces
- *     the comment block.
+ *     album, year, track, genre, cover, USLT and SYLT lyrics).
+ *   - **FLAC** — implemented directly here for the fields we need, writing the
+ *     Vorbis comment block and the picture block. The rewrite preserves every
+ *     audio frame and only replaces those two blocks.
+ *   - **OGG / Opus** — *not* writable, despite also using Vorbis comments. They
+ *     sit inside Ogg pages, so any edit means re-splitting packets across pages
+ *     and recomputing each page's CRC; that is a different job from FLAC's
+ *     flat block chain, and getting it wrong yields a file that no longer
+ *     decodes. `music-metadata` still reads them, and the settings page says so.
  *
  * Every write goes through `backupOnce()`, which keeps a `.bak` copy the first
  * time a file is modified. Tag writing is destructive by nature; a user who
@@ -35,10 +40,35 @@ export type { TagPatch }
 /** Alias kept for brevity inside this module. */
 type WriteResult = TagWriteResult
 
-/** Formats this module can write. */
-export function canWriteTags(filePath: string): boolean {
+/**
+ * The formats this module has a writer for — the ceiling, not the setting.
+ *
+ * `tagWritableFormats` in settings can only narrow this list, never extend it,
+ * so a renderer that writes that key cannot make the app modify a container it
+ * has no tested writer for.
+ */
+export const WRITABLE_TAG_FORMATS = ['.mp3', '.flac']
+
+/**
+ * Formats the app may modify in place.
+ *
+ * `allowed` is the user's whitelist; entries are matched loosely so `.mp3`,
+ * `mp3` and `MP3` all mean the same thing.
+ */
+export function canWriteTags(filePath: string, allowed: string[] = WRITABLE_TAG_FORMATS): boolean {
   const ext = extname(filePath).toLowerCase()
-  return ext === '.mp3' || ext === '.flac'
+  const normalised = Array.isArray(allowed)
+    ? allowed.filter((item) => typeof item === 'string').map((item) => (item.startsWith('.') ? item : `.${item}`).toLowerCase())
+    : []
+  return WRITABLE_TAG_FORMATS.includes(ext) && normalised.includes(ext)
+}
+
+/** A line-start LRC timestamp, which is all the exporter needs to know. */
+const LRC_TIMESTAMP = /\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]/
+
+/** True when the text carries per-line LRC timestamps. */
+export function lyricHasTimestamps(text: string): boolean {
+  return LRC_TIMESTAMP.test(text)
 }
 
 /**
@@ -79,7 +109,18 @@ function writeMp3(filePath: string, patch: TagPatch): WriteResult {
   if (patch.year) tags.year = String(patch.year)
   if (patch.trackNo) tags.trackNumber = String(patch.trackNo)
   if (patch.genre) tags.genre = patch.genre
-  if (patch.lyrics) tags.unsynchronisedLyrics = { language: 'chi', text: patch.lyrics }
+  if (patch.lyrics) {
+    // `USLT` only, and deliberately not `SYLT` even when the text is timed.
+    //
+    // Measured against a real file (`.cache/probe-sylt.cjs`): `node-id3`'s
+    // `update()` treats array-valued frames as *append*, so a second synced
+    // write leaves two `SYLT` frames and a reader takes the first — the stale
+    // one. `synchronisedLyrics: []` does not delete them either. Since the LRC
+    // text itself keeps the line timings, and this app (and the players that
+    // parse `[mm:ss]` out of a lyric string) read them from the text, the frame
+    // would buy nothing and cost a growing, wrong-ordered tag.
+    tags.unsynchronisedLyrics = { language: 'chi', text: patch.lyrics }
+  }
   if (patch.cover) {
     tags.image = {
       mime: patch.cover.mimeType,
@@ -97,7 +138,7 @@ function writeMp3(filePath: string, patch: TagPatch): WriteResult {
 }
 
 /* ------------------------------------------------------------------ *
- * FLAC / OGG (Vorbis comments)
+ * FLAC (Vorbis comments)
  * ------------------------------------------------------------------ */
 
 /** Map our patch fields onto the Vorbis comment keys the ecosystem uses. */
@@ -115,7 +156,9 @@ function toVorbisComments(patch: TagPatch): Array<[string, string]> {
   push('TRACKNUMBER', patch.trackNo)
   push('GENRE', patch.genre)
   // `LYRICS` is the de-facto key; `UNSYNCEDLYRICS` is the older one. Both are
-  // written so any reader finds it.
+  // written so any reader finds it. Vorbis comments have no synchronised-lyrics
+  // frame at all, so the LRC timestamps stay inside the text — which is what the
+  // players that read these keys (and the ecosystem's own taggers) expect.
   push('LYRICS', patch.lyrics)
   push('UNSYNCEDLYRICS', patch.lyrics)
   return out

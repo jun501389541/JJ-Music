@@ -297,13 +297,36 @@ try {
   const tracks = await evaluate(cdp, 'window.jj.library.tracks()')
   console.log(`  tracks: ${tracks.length}`)
   check('library returned tracks through IPC', Array.isArray(tracks) && tracks.length > 0, `${tracks.length}`)
+
+  /*
+   * Wait for artwork instead of asserting on whatever `tracks[0]` happens to be.
+   *
+   * A missing cover here is a legitimate state, not a bug: `library/covers` is a
+   * derived folder, and once someone clears it the index keeps pointing at files
+   * that are gone. The app drops those dead references when it loads and
+   * re-extracts during the background scan it then marks itself stale for — so
+   * the honest assertion is "artwork comes back", with the wait made explicit.
+   * Asserting on the first record instead makes this depend on library order and
+   * on whether that one file's cover happened to be cached.
+   */
+  let withArt = tracks.find((track) => track.coverPath)
+  for (let attempt = 0; attempt < 60 && !withArt; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    const refreshed = await evaluate(cdp, 'window.jj.library.tracks()')
+    tracks.length = 0
+    tracks.push(...refreshed)
+    withArt = tracks.find((track) => track.coverPath)
+  }
+  if (!withArt && tracks.length) console.log('  等了一轮后台扫描，仍然没有曲目带封面')
+
   const sample = tracks[0]
   if (sample) {
     console.log(`  sample: "${sample.name}" — ${sample.singer}`)
     console.log(`          ${sample.codec} ${sample.bitsPerSample}bit/${sample.sampleRate}Hz`)
     check('tracks carry tags', Boolean(sample.name && sample.singer))
     check('tracks carry technical info', Boolean(sample.sampleRate && sample.codec))
-    check('tracks carry cover art', Boolean(sample.coverPath))
+    check('tracks carry cover art', Boolean(withArt?.coverPath), withArt ? `${withArt.name} → ${withArt.coverPath.split(/[\\/]/).pop().slice(0, 16)}…` : 'none')
+    check('封面来源被记进资产链', Boolean(withArt?.assets?.cover?.length), JSON.stringify(withArt?.assets?.cover ?? null))
   }
 
   /* ---------------- 3. sources ---------------- */

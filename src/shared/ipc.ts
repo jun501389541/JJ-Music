@@ -35,11 +35,15 @@ export const IPC = {
   // Settings
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
+  /** Where the app's data lives, and moving it. Never a settings field: see the handler. */
+  dataDirGet: 'data-dir:get',
+  dataDirMove: 'data-dir:move',
 
   // 音源 scripts
   sourcesList: 'sources:list',
   sourcesImport: 'sources:import',
   sourcesImportFile: 'sources:import-file',
+  sourcesImportUrl: 'sources:import-url',
   sourcesRemove: 'sources:remove',
   sourcesToggle: 'sources:toggle',
   sourcesReload: 'sources:reload',
@@ -61,6 +65,8 @@ export const IPC = {
   musicUrl: 'music:url',
   musicLyric: 'music:lyric',
   musicPic: 'music:pic',
+  /** Look up an artist's portrait online and save it with the cover art. */
+  artistImage: 'artist:image',
   /**
    * Fill in what search did not provide — lyrics and cover art for an online
    * track, resolved together so one IPC round-trip covers both.
@@ -73,6 +79,8 @@ export const IPC = {
   libraryRemoveFolder: 'library:remove-folder',
   libraryScan: 'library:scan',
   libraryTracks: 'library:tracks',
+  /** Drop index entries by track id; never touches the file on disk. */
+  libraryRemoveTracks: 'library:remove-tracks',
   libraryProgress: 'library:progress',
 
   // Playlists
@@ -80,11 +88,13 @@ export const IPC = {
   playlistCreate: 'playlist:create',
   playlistRemove: 'playlist:remove',
   playlistRename: 'playlist:rename',
+  /** Picker + copy in one: the chosen image lands in the folder media already serves. */
+  playlistChooseCover: 'playlist:choose-cover',
+  playlistClearCover: 'playlist:clear-cover',
   playlistItems: 'playlist:items',
   playlistAddTracks: 'playlist:add-tracks',
-  playlistRemoveTrack: 'playlist:remove-track',
+  playlistRemoveTracks: 'playlist:remove-tracks',
   playlistReorder: 'playlist:reorder',
-  playlistClear: 'playlist:clear',
 
   // Lyrics
   lyricReadFile: 'lyric:read-file',
@@ -92,10 +102,21 @@ export const IPC = {
   lyricResolve: 'lyric:resolve',
   /** Import a `.lrc` file and attach it to a local track. */
   lyricImport: 'lyric:import',
-  /** Persist edited lyrics as a sidecar `.lrc`. */
+  /** Persist edited lyrics for a local track. */
   lyricSave: 'lyric:save',
   /** Look up lyrics online for a local track (by its tags). */
   lyricSearchOnline: 'lyric:search-online',
+
+  /**
+   * Assets: covers and lyrics, and the queue of fetched ones not yet written.
+   *
+   * Every channel here takes track ids. These writes change files the user owns,
+   * so the path must come from the index and never from the caller.
+   */
+  assetsExport: 'assets:export',
+  assetsPending: 'assets:pending',
+  assetsWritePending: 'assets:write-pending',
+  assetsDiscardPending: 'assets:discard-pending',
 
   /**
    * Desktop-lyric overlay.
@@ -110,7 +131,7 @@ export const IPC = {
   desktopLyricCommand: 'desktop-lyric:command',
   /** The overlay asks for its right-click menu, which only main can build. */
   desktopLyricMenu: 'desktop-lyric:menu',
-  /** The overlay drags itself: pointer moves, main calls `setPosition`. */
+  /** The overlay drags itself: `{ phase: 'start' | 'end' }`, main follows the cursor between them. */
   desktopLyricDrag: 'desktop-lyric:drag',
 
   // Metadata matching (标签匹配)

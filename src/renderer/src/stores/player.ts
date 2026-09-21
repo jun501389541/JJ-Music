@@ -11,8 +11,10 @@ import { computed, ref, shallowRef, toRaw } from 'vue'
 import type { AudioEngine } from '@shared/audio-engine'
 import { EQUALIZER_PRESETS } from '@shared/audio-engine'
 import type {
+  AssetRef,
   LastSession,
   LyricSource,
+  OnlineLyricSource,
   OnlineMusicInfo,
   PlayableTrack,
   PlayMode,
@@ -74,6 +76,24 @@ export const usePlayerStore = defineStore('player', () => {
   const lyricLoading = ref(false)
   /** Where the displayed lyric came from, for the UI's source badge. */
   const lyricSource = ref<LyricSource>('none')
+  /**
+   * The asset record for the lyric being shown — where it lives and who gave it.
+   *
+   * Kept apart from `lyricSource` (which only says "在线") because switching
+   * provider is the action the user takes when the words are wrong, and that needs
+   * to say who wrote them. Local and online lyrics use the same record, so the
+   * badge does not need to know which kind of track is playing.
+   */
+  const lyricAsset = ref<AssetRef | null>(null)
+  /**
+   * A source forced for the current track, from the now-playing menu.
+   *
+   * Deliberately per-track rather than a setting: "this song's lyric is wrong,
+   * show me another" should not silently rewrite which provider every later song
+   * asks first.
+   */
+  const lyricSourceChoice = ref<OnlineLyricSource | null>(null)
+  let lyricSourceChoiceTrack: string | null = null
   /** Why no lyric is shown, when that is the case. */
   const lyricError = ref<string | null>(null)
 
@@ -424,6 +444,7 @@ export const usePlayerStore = defineStore('player', () => {
     mayRetryUrl = options.retryUrl !== false
     const track = queue.value[index]
     currentIndex.value = index
+    if (playMode.value === 'random') rememberRandomDraw(track.id)
     error.value = null
     loading.value = true
     lyrics.value = null
@@ -500,10 +521,79 @@ export const usePlayerStore = defineStore('player', () => {
     await playTrackAt(queue.value.length - 1)
   }
 
+  /** Positions in `items`, shuffled (Fisher-Yates). */
+  function shuffled<T>(items: T[]): T[] {
+    const out = [...items]
+    for (let index = out.length - 1; index > 0; index -= 1) {
+      const swap = Math.floor(Math.random() * (index + 1))
+      ;[out[index], out[swap]] = [out[swap], out[index]]
+    }
+    return out
+  }
+
+  /*
+   * Random playback draws one shuffled pass at a time.
+   *
+   * Re-rolling `Math.random()` per skip repeats songs within seconds on a short
+   * queue and can leave the tail of a list unheard for the whole session; a bag
+   * guarantees every track plays before any can repeat. The draws are also
+   * logged, because 上一首 used to share the forward roll and so jumped
+   * somewhere random instead of returning the song just heard. Entries are ids
+   * rather than positions — other views insert, remove and reorder rows
+   * underneath this one.
+   */
+  const RANDOM_HISTORY_LIMIT = 200
+  let randomPool: string[] = [], randomHistory: string[] = []
+
+  function resetRandomPass(): void {
+    randomPool = []
+    randomHistory = []
+  }
+
+  function rememberRandomDraw(id: string): void {
+    if (randomHistory[randomHistory.length - 1] === id) return
+    randomHistory.push(id)
+    if (randomHistory.length > RANDOM_HISTORY_LIMIT) randomHistory = randomHistory.slice(-RANDOM_HISTORY_LIMIT)
+  }
+
+  /** The next draw of the current pass, refilling from the queue when exhausted. */
+  function randomNextIndex(): number {
+    const tracks = queue.value
+    if (tracks.length === 0) return -1
+    if (tracks.length === 1) return 0
+    if (randomPool.length === 0) {
+      // Hold the track now playing out of a fresh pass so two passes cannot meet
+      // at the same song — the one repeat a shuffled walk should never show.
+      const current = currentTrack.value?.id
+      randomPool = shuffled(tracks.map((track) => track.id).filter((id) => id !== current))
+    }
+    const positions = new Map(tracks.map((track, index) => [track.id, index]))
+    while (randomPool.length > 0) {
+      const id = randomPool.shift() as string
+      const index = positions.get(id)
+      // The row left the queue since the pass was drawn; skip rather than play a
+      // neighbour that happens to have taken its position.
+      if (index !== undefined) return index
+    }
+    return -1
+  }
+
+  /** Step back off the play log, dropping the current entry so a second 上一首
+   * keeps going backwards instead of bouncing to where we just came from. */
+  function randomPreviousIndex(): number {
+    while (randomHistory.length > 1) {
+      randomHistory.pop()
+      const position = queue.value.findIndex((track) => track.id === randomHistory[randomHistory.length - 1])
+      if (position >= 0) return position
+    }
+    return -1
+  }
+
   async function playQueue(tracks: PlayableTrack[], startIndex = 0): Promise<void> {
     stop()
     queue.value = [...tracks]
     currentIndex.value = -1
+    resetRandomPass()
     await playTrackAt(startIndex)
   }
 
@@ -544,13 +634,8 @@ export const usePlayerStore = defineStore('player', () => {
     if (total === 0) return -1
 
     if (playMode.value === 'random') {
-      if (total === 1) return 0
-      let candidate = currentIndex.value
-      // Avoid immediately repeating the same track.
-      while (candidate === currentIndex.value) {
-        candidate = Math.floor(Math.random() * total)
-      }
-      return candidate
+      const drawn = direction === 1 ? randomNextIndex() : randomPreviousIndex()
+      if (drawn >= 0) return drawn
     }
     return (currentIndex.value + direction + total) % total
   }
@@ -602,7 +687,11 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function setPlayMode(mode: PlayMode): void {
+    if (playMode.value === mode) return
     playMode.value = mode
+    // Entering or leaving random starts a clean pass; carrying half a shuffle
+    // over would play the leftovers before anything the user just queued up.
+    resetRandomPass()
   }
 
   function setRate(value: number): void {
@@ -689,6 +778,7 @@ export const usePlayerStore = defineStore('player', () => {
     stop()
     queue.value = []
     currentIndex.value = -1
+    resetRandomPass()
     // `stop()` just snapshotted the queue that is now gone, so the resume point
     // has to be dropped afterwards or the next launch restores what was cleared.
     clearSession()
@@ -908,22 +998,30 @@ export const usePlayerStore = defineStore('player', () => {
 
       if (isLocalTrack(track)) {
         result = await window.jj.lyric.resolve(track.id, true)
+        lyricAsset.value = result.asset ?? null
       } else {
+        // A hand-picked source belongs to the track it was picked for.
+        if (lyricSourceChoiceTrack !== track.id) {
+          lyricSourceChoiceTrack = null
+          lyricSourceChoice.value = null
+        }
         // Online tracks: one call resolves lyrics *and* cover art together.
         //
         // The user's 音源 only implements `musicUrl` in practice, so lyrics come
         // from the host's built-in platform adapters. This matters because a
         // track found by search rarely carries either field.
         const onlineTrack = { ...toIpcPayload(track) } as OnlineMusicInfo
-        const enriched = await window.jj.music.enrich(onlineTrack)
+        const enriched = await window.jj.music.enrich(onlineTrack, lyricSourceChoice.value ?? undefined)
         if (!isCurrent()) return
 
+        lyricAsset.value = enriched.asset ?? null
         result = {
           lyric: enriched.lyric ?? '',
           ...(enriched.tlyric ? { tlyric: enriched.tlyric } : {}),
           ...(enriched.rlyric ? { rlyric: enriched.rlyric } : {}),
           ...(enriched.lxlyric ? { lxlyric: enriched.lxlyric } : {}),
           source: enriched.lyric ? 'online' : 'none',
+          asset: enriched.asset ?? undefined,
           synchronized: false
         }
 
@@ -937,6 +1035,19 @@ export const usePlayerStore = defineStore('player', () => {
             const queued = queue.value[index]
             if ('picUrl' in queued) queued.picUrl = enriched.picUrl
           }
+        }
+
+        // Provenance rides along with the art: an online row that had nothing of
+        // its own now knows where the cover and the words it is showing came from,
+        // so 音轨信息 can answer the same question for it as for a local file.
+        if (enriched.cover || enriched.asset) {
+          onlineTrack.assets = {
+            ...onlineTrack.assets,
+            ...(enriched.cover ? { cover: [enriched.cover] } : {}),
+            ...(enriched.asset ? { lyrics: { ...onlineTrack.assets?.lyrics, main: [enriched.asset] } } : {})
+          }
+          const queued = queue.value.find((item) => item.id === onlineTrack.id)
+          if (queued && 'assets' in queued) queued.assets = onlineTrack.assets
         }
       }
 
@@ -981,7 +1092,7 @@ export const usePlayerStore = defineStore('player', () => {
     const track = currentTrack.value
     if (!track || !isLocalTrack(track)) return false
     const playback = playGeneration
-    const picked = await window.jj.lyric.importFile(track.path)
+    const picked = await window.jj.lyric.importFile(track.id)
     if (!picked) return false
     if (playback === playGeneration) await loadLyrics(track)
     return true
@@ -997,6 +1108,21 @@ export const usePlayerStore = defineStore('player', () => {
   async function reloadLyric(): Promise<void> {
     const track = currentTrack.value
     if (!track) return
+    await loadLyrics(track)
+  }
+
+  /**
+   * Force one lyric source for the current online track, or `null` to hand the
+   * choice back to the setting.
+   *
+   * Only the named source is asked — a user who just watched 音源脚本 return the
+   * wrong words does not want the fallback chain to quietly produce them again.
+   */
+  async function useLyricSource(source: OnlineLyricSource | null): Promise<void> {
+    const track = currentTrack.value
+    if (!track || isLocalTrack(track)) return
+    lyricSourceChoice.value = source
+    lyricSourceChoiceTrack = source ? track.id : null
     await loadLyrics(track)
   }
 
@@ -1048,6 +1174,8 @@ export const usePlayerStore = defineStore('player', () => {
     lyricLoading,
     lyricSource,
     lyricError,
+    lyricAsset,
+    lyricSourceChoice,
     quality,
     equalizer,
     equalizerPreset,
@@ -1075,6 +1203,7 @@ export const usePlayerStore = defineStore('player', () => {
     setQuality,
     setEqualizer,
     reloadLyric,
+    useLyricSource,
     flushSession,
     restoreSession,
     refreshOutputDevices,

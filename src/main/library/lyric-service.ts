@@ -16,15 +16,109 @@
  * the user a way to override any source without a separate "pinned" concept.
  */
 import { readFile, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, join } from 'node:path'
-import type { LyricResult, LocalMusicInfo, OnlineMusicInfo } from '@shared/types'
+import { basename, extname } from 'node:path'
+import type { AssetRef, LyricResult, LocalMusicInfo, OnlineLyricSource, OnlineMusicInfo, SourceId } from '@shared/types'
+import { ONLINE_LYRIC_SOURCES } from '@shared/types'
 import type { ResolvedLyric, LyricCandidate } from '@shared/library-types'
 import { readEmbeddedLyric } from '../library/embedded-lyrics'
+import { sidecarPathFor } from './asset-files'
 import { fetchOnlineLyric } from '../online/lyrics'
 import { matchMetadata } from '../library/metadata-match'
 import { stripBom } from '../store/json-file'
 
 export type { ResolvedLyric }
+
+/* ------------------------------------------------------------------ *
+ * Online lyric sources
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which sources to ask, in what order.
+ *
+ * The preferred one first; with fallback enabled the rest follow in their
+ * declared order. `only` is the per-track switch — when the user says "这次就用
+ * 平台接口", nothing else gets asked, because the point of switching is that the
+ * first answer was wrong rather than missing.
+ */
+export function lyricSourceOrder(
+  preferred: OnlineLyricSource,
+  fallback: boolean,
+  only?: OnlineLyricSource
+): OnlineLyricSource[] {
+  if (only) return [only]
+  if (!fallback) return [preferred]
+  return [preferred, ...ONLINE_LYRIC_SOURCES.filter((source) => source !== preferred)]
+}
+
+/**
+ * Ask each source in turn until one produces text.
+ *
+ * A source that throws counts as "no lyrics" and the next one is still asked:
+ * one provider being down must not be the reason a song shows nothing.
+ *
+ * The answer is reported as an `AssetRef` — the same record the library uses for
+ * what is merely available — so "who gave me these words" has one vocabulary
+ * rather than a parallel `via` field that means nearly the same thing.
+ */
+export async function resolveOnlineLyricByOrder(
+  order: OnlineLyricSource[],
+  steps: Record<OnlineLyricSource, () => Promise<LyricResult>>
+): Promise<{ lyric: LyricResult; asset: AssetRef | null }> {
+  for (const source of order) {
+    try {
+      const result = await steps[source]()
+      if (result?.lyric?.trim()) return { lyric: result, asset: { origin: 'remote', provider: source, at: Date.now() } }
+    } catch {
+      /* try the next one */
+    }
+  }
+  return { lyric: { lyric: '' }, asset: null }
+}
+
+/** Other platforms' adapters are worth trying only when they answer at all. */
+const MIN_OTHER_PLATFORM_SCORE = 0.6
+
+/**
+ * Lyrics from a platform other than the track's own.
+ *
+ * Same-name-different-recording is the risk here, so the match has to clear the
+ * same kind of confidence bar the tag-matching UI uses, and platforms are tried
+ * in a fixed order so the result is reproducible rather than a race.
+ */
+export async function lyricFromOtherPlatforms(
+  music: OnlineMusicInfo,
+  deps: {
+    match?: typeof matchMetadata
+    fetchLyric?: typeof fetchOnlineLyric
+  } = {}
+): Promise<LyricResult> {
+  const match = deps.match ?? matchMetadata
+  const fetchLyric = deps.fetchLyric ?? fetchOnlineLyric
+  const seconds = /^(\d+):(\d{1,2})$/.exec(music.interval ?? '')
+  const duration = seconds ? Number(seconds[1]) * 60 + Number(seconds[2]) : 0
+  const query = {
+    id: music.id,
+    path: '',
+    name: music.name,
+    singer: music.singer,
+    albumName: music.albumName ?? '',
+    duration
+  } as LocalMusicInfo
+  const others: SourceId[] = (['tx', 'wy', 'kw', 'kg', 'mg'] as SourceId[]).filter((source) => source !== music.source)
+
+  let matches
+  try {
+    matches = await match(query, { sources: others, limit: 6 })
+  } catch {
+    return { lyric: '' }
+  }
+  for (const candidate of matches) {
+    if (candidate.score < MIN_OTHER_PLATFORM_SCORE) continue
+    const result = await fetchLyric(candidate.music)
+    if (result.lyric.trim()) return result
+  }
+  return { lyric: '' }
+}
 
 /** LRU-ish cache keyed by track id, so re-opening a track is instant. */
 const cache = new Map<string, ResolvedLyric>()
@@ -41,6 +135,19 @@ function cacheSet(key: string, value: ResolvedLyric): void {
 export function clearLyricCache(trackId?: string): void {
   if (trackId) cache.delete(trackId)
   else cache.clear()
+}
+
+/**
+ * Put a resolved lyric into the cache under this track.
+ *
+ * The caller uses it when it learns something the resolver could not know — that
+ * the online lyric it just handed over is now also sitting in the 待写入 queue.
+ * Without this, the second read of the same track comes from the cache and
+ * reports the lyric as if nothing were pending, so the badge would blink the
+ * truth once and then lie.
+ */
+export function primeLyricCache(trackId: string, resolved: ResolvedLyric): void {
+  cacheSet(trackId, resolved)
 }
 
 /** True when the text contains at least one LRC timestamp. */
@@ -71,10 +178,8 @@ async function readSidecar(path: string): Promise<string | null> {
   }
 }
 
-/** Sidecar path convention: same directory, same base name, `.lrc`. */
-export function sidecarPathFor(audioPath: string): string {
-  return join(dirname(audioPath), `${basename(audioPath, extname(audioPath))}.lrc`)
-}
+/** Sidecar naming lives with the cover sidecars, so the writer and the scanner cannot drift. */
+export { sidecarPathFor }
 
 /**
  * Resolve lyrics for a local track.
@@ -82,11 +187,16 @@ export function sidecarPathFor(audioPath: string): string {
  * Never throws: a track with no lyrics anywhere is a normal result, reported as
  * an empty lyric plus an explanatory note.
  *
+ * The order is the index's own `assets.lyrics.main` list — the resolution chain as
+ * data rather than a ladder of `if`s — with each candidate actually read before it
+ * is accepted. See the chain construction below for the one case where the record
+ * is deliberately not believed.
+ *
  * `track` must be a record this process produced — an index entry, not an object
- * assembled from IPC. Step 1b reads `track.lyricPath` straight off disk, and the
- * scanner is the only writer of that field; hand a renderer-built object to this
- * function and that becomes an arbitrary file read. The IPC layer enforces this
- * through `indexedTrack()`.
+ * assembled from IPC. Step 1 reads a sidecar path derived from `track.path`, and
+ * the scanner is the only writer of that path; hand a renderer-built object to
+ * this function and that becomes an arbitrary file read. The IPC layer enforces
+ * this through `indexedTrack()`.
  */
 export async function resolveLocalLyric(
   track: LocalMusicInfo,
@@ -98,42 +208,46 @@ export async function resolveLocalLyric(
     if (cached) return cached
   }
 
-  // 1. sidecar (an explicit user choice, or a previous manual edit)
-  const sidecar = await readSidecar(sidecarPathFor(track.path))
-  if (sidecar && sidecar.trim()) {
-    const resolved: ResolvedLyric = {
-      lyric: sidecar,
-      source: 'sidecar',
-      synchronized: looksSynchronized(sidecar)
-    }
-    cacheSet(track.id, resolved)
-    return resolved
-  }
+  // The chain is the recorded sources plus one always-probed exception.
+  //
+  // A sidecar is a *separate* file: dropping one next to the audio changes neither
+  // the audio's size nor its mtime, so an incremental scan can never notice it and
+  // the record cannot be trusted to mention it. An embedded tag is the opposite —
+  // writing one rewrites the audio file, which the scan does see — so when the
+  // record says there is no lyric tag we can skip a full `parseFile` of the track.
+  // A track indexed before records existed probes both, as before.
+  const recorded = track.assets?.lyrics?.main
+  const chain: AssetRef[] = [{ origin: 'sidecar' },
+    ...(recorded ?? [{ origin: 'embedded' } as AssetRef]).filter((source) => source.origin !== 'sidecar')]
 
-  // 1b. a path recorded during scanning (covers non-standard names)
-  if (track.lyricPath && track.lyricPath !== sidecarPathFor(track.path)) {
-    const recorded = await readSidecar(track.lyricPath)
-    if (recorded && recorded.trim()) {
-      const resolved: ResolvedLyric = {
-        lyric: recorded,
-        source: 'sidecar',
-        synchronized: looksSynchronized(recorded)
+  for (const source of chain) {
+    // 1. a sidecar `.lrc` next to the audio (an explicit user choice, or a previous edit)
+    if (source.origin === 'sidecar') {
+      const sidecar = await readSidecar(sidecarPathFor(track.path))
+      if (sidecar?.trim()) {
+        const resolved: ResolvedLyric = { lyric: sidecar, source: 'sidecar', synchronized: looksSynchronized(sidecar), asset: source }
+        cacheSet(track.id, resolved)
+        return resolved
       }
-      cacheSet(track.id, resolved)
-      return resolved
+      continue
     }
-  }
 
-  // 2. embedded tag
-  const embedded = await readEmbeddedLyric(track.path)
-  if (embedded && embedded.lyric.trim()) {
-    const resolved: ResolvedLyric = {
-      lyric: embedded.lyric,
-      source: 'embedded',
-      synchronized: embedded.synchronized
+    // 2. the file's own lyric tag
+    if (source.origin === 'embedded') {
+      const embedded = await readEmbeddedLyric(track.path)
+      if (embedded?.lyric.trim()) {
+        const resolved: ResolvedLyric = {
+          lyric: embedded.lyric,
+          source: 'embedded',
+          synchronized: embedded.synchronized,
+          asset: { ...source, synced: embedded.synchronized }
+        }
+        cacheSet(track.id, resolved)
+        return resolved
+      }
     }
-    cacheSet(track.id, resolved)
-    return resolved
+    // Anything else recorded (a cached or user-supplied lyric) has no on-disk
+    // reader yet, so it falls through to the network rather than being trusted.
   }
 
   // 3. online, matched by the track's own tags
@@ -179,7 +293,10 @@ export async function searchLyricOnline(
     source: 'online',
     synchronized: looksSynchronized(best.lyric),
     matchedMusic: best.music,
-    matchScore: best.score
+    matchScore: best.score,
+    // This path is cross-platform matching by name, whatever the winner's own
+    // platform turns out to be — the record says which slot, `matchedMusic` the row.
+    asset: { origin: 'remote', provider: 'search', at: Date.now() }
   }
 }
 

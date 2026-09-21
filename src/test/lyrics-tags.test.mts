@@ -61,8 +61,11 @@ if (!existsSync(folder)) {
   const tracks = library.getAll()
   console.log(`  索引 ${tracks.length} 首 (${Date.now() - started} ms)`)
 
-  const flagged = tracks.filter((t) => t.hasEmbeddedLyric)
-  const synced = tracks.filter((t) => t.hasSyncedLyric)
+  // The index no longer says "there is a lyric"; it says where each one lives, so
+  // availability is read off the asset list instead of a boolean pair.
+  const embeddedOf = (t) => t.assets?.lyrics?.main?.find((a) => a.origin === "embedded")
+  const flagged = tracks.filter((t) => embeddedOf(t))
+  const synced = tracks.filter((t) => embeddedOf(t)?.synced)
   console.log(`  索引标记内嵌歌词: ${flagged.length}`)
   console.log(`  索引标记同步歌词: ${synced.length}`)
 
@@ -74,7 +77,7 @@ if (!existsSync(folder)) {
   )
 
   // Actually read a sample and confirm LRC comes back.
-  const sample = tracks.filter((t) => t.hasEmbeddedLyric).slice(0, 12)
+  const sample = tracks.filter((t) => embeddedOf(t)).slice(0, 12)
   let readOk = 0
   let syncedOk = 0
   let parsedOk = 0
@@ -130,10 +133,10 @@ if (!existsSync(folder)) {
   /* ---------------- 2. Resolution chain ---------------- */
 
   console.log('\n--- 2. 歌词解析优先级 ---')
-  const originalTarget = tracks.find((t) => t.hasEmbeddedLyric)
+  const originalTarget = tracks.find((t) => embeddedOf(t))
   if (originalTarget) {
     // Never overwrite or remove a sidecar in the user's real music directory.
-    const target = { ...originalTarget, id: 'lyric-fixture', path: join(dataDir, `lyric-fixture${extname(originalTarget.path)}`), lyricPath: undefined }
+    const target = { ...originalTarget, id: 'lyric-fixture', path: join(dataDir, `lyric-fixture${extname(originalTarget.path)}`) }
     copyFileSync(originalTarget.path, target.path)
     // Offline resolution must still find the embedded lyric.
     const offline = await resolveLocalLyric(target, { allowOnline: false })

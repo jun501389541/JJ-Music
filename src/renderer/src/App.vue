@@ -24,6 +24,7 @@ import ToastHost from './components/ToastHost.vue'
 import { useLibraryStore } from './stores/library'
 import { usePlayerStore } from './stores/player'
 import { startScrollMemory } from './composables/use-scroll-memory'
+import { startMediaSession } from './composables/use-media-session'
 import { accentApplied, applyAccent, applyAccentFromImage, resetAccent } from './theme/accent'
 
 const library = useLibraryStore()
@@ -34,9 +35,9 @@ const toast = useToastStore()
 
 const ui = useUiStore()
 const nowPlayingOpen = toRef(ui, 'nowPlaying')
-watch(nowPlayingOpen, open => { if (!open) ui.playbackPanel = null })
 /** The routed views render here, which is the whole scope scroll memory covers. */
 const contentEl = ref<HTMLElement | null>(null)
+watch(nowPlayingOpen, open => { if (!open) ui.playbackPanel = null })
 
 /** Apply the persisted theme and keep it in sync with the settings store. */
 function applyTheme(theme: string): void {
@@ -159,6 +160,16 @@ const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
 watch(desktopLyricPayload, payload => {
   if (payload) window.jj.desktopLyric.push(payload)
 }, { immediate: true })
+
+/* ---------------------------------------------------------------- *
+ * System media controls
+ *
+ * The same projection again, this time for Windows: the lock screen and taskbar
+ * ask for the session rather than the app pushing to them, so what is published
+ * is the play/pause/next/previous/seek surface plus whatever the system needs to
+ * draw a scrubber.
+ * ---------------------------------------------------------------- */
+startMediaSession(player)
 
 /**
  * Apply a request from the overlay, by writing the matching preference.
@@ -295,6 +306,11 @@ watch(
 )
 
 onMounted(async () => {
+  /*
+   * Before `library.init()`: the pages below it can be scrolled as soon as they
+   * paint, and an offset that is missed is a page that opens at the top.
+   */
+  if (contentEl.value) startScrollMemory(contentEl.value)
   applyTheme(library.settings.theme)
   if (library.settings.accent !== 'auto') {
     applyAccent(library.settings.accent)
@@ -306,11 +322,6 @@ onMounted(async () => {
   player.setQuality(library.settings.playQuality)
 
   /*
-  /*
-   * Before `library.init()`: the pages below it can be scrolled as soon as they
-   * paint, and an offset that is missed is a page that opens at the top.
-   */
-  if (contentEl.value) startScrollMemory(contentEl.value)
    * The saved output device has to be re-applied here: the setting used to be
    * read only by the audio settings page, so a chosen speaker worked until the
    * next launch and then silently fell back to the system default.

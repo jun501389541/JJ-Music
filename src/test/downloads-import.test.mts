@@ -93,6 +93,13 @@ test('playlist pagination, detail completion, deduplication and partial imports 
   let page=0
   const kw=await importPlaylist('kw','123',async()=>new Response(JSON.stringify({result:'ok',title:'KW',total:2,musiclist:[{id:++page,name:'Song',artist:'A'}]})))
   assert.equal(kw.tracks.length,2);assert.equal(page,2)
+  // 平台没报总数时，短页才是结束标志。旧写法把"已经拿到的数量"当总数，于是
+  // 第一页刚好满 100 就收工 —— 500 首的歌单静默导入 100 首，连句提醒都没有。
+  let kgPages=0
+  const kgRows=count=>Array.from({length:count},(_,i)=>({hash:`h${kgPages}-${i}`,songname:`K${i}`,singername:'S'}))
+  const kg=await importPlaylist('kg','123',async()=>{kgPages+=1;return new Response(JSON.stringify({status:1,data:{specialname:'KG',info:kgRows(kgPages===1?100:50)}}))})
+  assert.equal(kg.tracks.length,150,'满页之后还要继续问')
+  assert.equal(kgPages,2,'第二页只有 50 行，到这里才算完')
   await assert.rejects(()=>importPlaylist('tx','123',async()=>new Response(JSON.stringify({code:1}))))
 })
 test('咪咕歌单按封面与全部分页导入，音质与版权标识取自搜索适配器同一映射',async()=>{
@@ -114,7 +121,10 @@ test('咪咕歌单按封面与全部分页导入，音质与版权标识取自�
 })
 test('歌单封面按平台字段抓取，模板与裸路径都被补成可抓取的地址',async()=>{
   const covers=async(source,payload)=>(await importPlaylist(source,'123',async()=>new Response(JSON.stringify(payload)))).coverUrl
-  assert.equal(await covers('wy',{code:200,playlist:{name:'W',trackCount:1,tracks:[{id:1,name:'A',ar:[],album:{}}],coverUrl:'https://p.music.163.com/x.jpg'}}),'https://p.music.163.com/x.jpg')
+  // 网易云 v6 详情里那个字段叫 coverImgUrl（本机实测），写成 coverUrl 只会让
+  // 网易云歌单永远没有封面 —— 而且看不出来是猜错了字段。
+  assert.equal(await covers('wy',{code:200,playlist:{name:'W',trackCount:1,tracks:[{id:1,name:'A',ar:[],album:{}}],coverImgUrl:'https://p.music.163.com/x.jpg'}}),'https://p.music.163.com/x.jpg')
+  assert.equal(await covers('wy',{code:200,playlist:{name:'W',trackCount:1,tracks:[{id:1,name:'A',ar:[],album:{}}],coverUrl:'https://p.music.163.com/old.jpg'}}),'https://p.music.163.com/old.jpg')
   assert.equal(await covers('tx',{code:0,cdlist:[{dissname:'T',total_song_num:1,songlist:[{mid:'a',title:'A',singer:[]}],imgurl:'//p.qpic.cn/y.jpg'}]}),'https://p.qpic.cn/y.jpg')
   // 酷狗给的是带 `{size}` 占位符的模板，酷我给裸路径，两者都不能原样丢给 <img>
   assert.equal(await covers('kg',{status:1,data:{specialname:'K',total:1,imgurl:'https://imge.kugou.com/{size}/{id}.jpg',info:[{hash:'h',songname:'A',singername:'S'}]}}),'https://imge.kugou.com/600/{id}.jpg')
@@ -268,4 +278,68 @@ test('a server that ignores Range restarts the file instead of gluing two copies
   assert.equal(done.status,'completed',done.error)
   assert.equal(done.received,body.length,'not half + whole')
   assert.ok((await readFile(done.path)).subarray(-21).equals(body.subarray(-21)))
+})
+
+test('请求阶段就失败也不许吃掉已经下载的字节', async () => {
+  const body=flac(),half=Math.floor(body.length/2)
+  const requests=[]
+  let attempt=0
+  const {dir,manager}=await resumeSetup(async(url,init)=>{
+    requests.push(init?.headers??{})
+    attempt+=1
+    if(attempt===1) return fakeResponse(200,{'content-length':String(body.length),etag:'"v1"'},[body.subarray(0,half)])
+    // 第二次连响应都没有（断网、403、中途取消）。以前 keepPart 要到文件打开那一刻
+    // 才置真，于是这条最常见失败路径会把 .part 一起删掉——"断点续传"当场归零。
+    if(attempt===2) throw new Error('fetch failed')
+    return fakeResponse(206,{'content-range':`bytes ${half}-${body.length-1}/${body.length}`},[body.subarray(half)])
+  })
+  const parts=async()=>(await readdir(dir)).filter(f=>f.endsWith('.part'))
+  const [id]=manager.add([track],'flac')
+  await settled(manager,id)
+  assert.equal((await parts()).length,1,'第一段字节先留在了盘上')
+  manager.retry(id)
+  const failed=await settled(manager,id)
+  assert.equal(failed.status,'failed',failed.error)
+  assert.equal((await parts()).length,1,'请求失败之后 .part 还在')
+  assert.equal((await readFile(join(dir, (await parts())[0]))).length,half,'而且一个字节都没少')
+  manager.retry(id)
+  const done=await settled(manager,id)
+  assert.equal(done.status,'completed',done.error)
+  assert.deepEqual(requests[2],{Range:`bytes=${half}-`,'If-Range':'"v1"'},'下一次才是真的从断点接着下')
+})
+
+test('服务器给的分段对不上时宁可重新下载', async () => {
+  const body=flac(),half=Math.floor(body.length/2)
+  let attempt=0
+  const {dir,manager}=await resumeSetup(async()=>{
+    attempt+=1
+    if(attempt===1) return fakeResponse(200,{'content-length':String(body.length),etag:'"v1"'},[body.subarray(0,half)])
+    // 我们问的是 bytes=half-，它回一段从 0 开始的 206：接上去就是半份叠一整份。
+    return fakeResponse(206,{'content-range':`bytes 0-${body.length-1}/${body.length}`},[body])
+  })
+  const [id]=manager.add([track],'flac')
+  await settled(manager,id)
+  manager.retry(id)
+  const after=await settled(manager,id)
+  assert.equal(after.status,'failed',after.error)
+  assert.match(after.error,/对不上/,after.error)
+  assert.equal((await readdir(dir)).filter(f=>f.endsWith('.part')).length,0,'拼不上的那份不留着下次再拼')
+})
+
+test('没有 ETag 的服务器改用长度判断文件有没有换过', async () => {
+  const body=flac(),half=Math.floor(body.length/2)
+  let attempt=0
+  const {manager}=await resumeSetup(async()=>{
+    attempt+=1
+    // 首答只有 content-length：既没有 ETag 也没有 Last-Modified，`If-Range` 无从发送。
+    if(attempt===1) return fakeResponse(200,{'content-length':String(body.length)},[body.subarray(0,half)])
+    // 同一个偏移，但整份长度变了 —— 说明远端换文件了，续下去就是两份的混合。
+    return fakeResponse(206,{'content-range':`bytes ${half}-${body.length+9}/${body.length+10}`},[body.subarray(half)])
+  })
+  const [id]=manager.add([track],'flac')
+  await settled(manager,id)
+  manager.retry(id)
+  const after=await settled(manager,id)
+  assert.equal(after.status,'failed',after.error)
+  assert.match(after.error,/对不上/,after.error)
 })

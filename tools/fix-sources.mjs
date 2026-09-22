@@ -22,11 +22,34 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { inflateSync } from 'node:zlib'
 
-const sourcesPath = join(process.env.APPDATA ?? '', 'jj-music', 'sources', 'user_api.json')
+const appData = process.env.APPDATA
+if (!appData) {
+  console.error('APPDATA 没有设置，无法定位音源文件（默认位置是 %APPDATA%\\jj-music\\sources\\user_api.json）。')
+  process.exit(2)
+}
+const sourcesPath = join(appData, 'jj-music', 'sources', 'user_api.json')
 const backupPath = `${sourcesPath}.bak`
 
 if (!existsSync(sourcesPath)) {
   console.error(`没有找到音源文件: ${sourcesPath}`)
+  process.exit(1)
+}
+
+/**
+ * Read the store with the same tolerance the app uses.
+ *
+ * A BOM and a truncated tail are both real outcomes of the half-written save
+ * this tool exists to work around, so a raw `SyntaxError` here is the difference
+ * between a way back in and a stack trace.
+ */
+function parseStore(text) {
+  try {
+    const value = JSON.parse(text.replace(/^\uFEFF/, ''))
+    if (value && typeof value === 'object') return value
+  } catch {
+    /* reported below, with the path */
+  }
+  console.error(`${sourcesPath} 读不出可解析的 JSON。工具不会改写它；同目录若有 .bak，可用 --restore 恢复。`)
   process.exit(1)
 }
 
@@ -99,7 +122,7 @@ function assess(script) {
 }
 
 const args = process.argv.slice(2)
-const store = JSON.parse(readFileSync(sourcesPath, 'utf8'))
+const store = parseStore(readFileSync(sourcesPath, 'utf8'))
 const apis = Array.isArray(store.userApis) ? store.userApis : []
 
 /* ------------------------------------------------------------------ *

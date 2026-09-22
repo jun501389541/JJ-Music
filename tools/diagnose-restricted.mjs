@@ -23,13 +23,27 @@ const args = process.argv.slice(2)
 const wantAll = args.includes('--all')
 const filter = args.find((a) => a !== '--all' && !/^\d+$/.test(a))
 
-const userApi = join(process.env.APPDATA, 'jj-music', 'sources', 'user_api.json')
+const appData = process.env.APPDATA
+if (!appData) {
+  console.error('APPDATA 没有设置，无法定位 user_api.json。')
+  process.exit(2)
+}
+const userApi = join(appData, 'jj-music', 'sources', 'user_api.json')
 if (!existsSync(userApi)) {
   console.error('user_api.json not found — nothing to diagnose.')
   process.exit(1)
 }
 const { gunzipSync, inflateSync } = await import('node:zlib')
-const data = JSON.parse(readFileSync(userApi, 'utf8'))
+let data
+try {
+  data = JSON.parse(readFileSync(userApi, 'utf8').replace(/^\uFEFF/, ''))
+} catch (error) {
+  console.error(`读不出 ${userApi}: ${error.message}`)
+  process.exit(1)
+}
+// Not `data.userApis.filter`: a store whose shape is unexpected used to end the
+// run with a TypeError in the middle of the table instead of a readable line.
+const apis = Array.isArray(data?.userApis) ? data.userApis : []
 
 function decode(script) {
   if (script.startsWith('gz_') || script.startsWith('zlib_')) {
@@ -44,28 +58,11 @@ const results = []
 
 function diagnose(api) {
   return new Promise((resolve) => {
-    const scratch = mkdtempSync(join(tmpdir(), 'jj-diag-'))
-    const scriptPath = join(scratch, 'script.js')
-    const initPath = join(scratch, 'init.json')
-    writeFileSync(scriptPath, decode(api.script), 'utf8')
-    writeFileSync(initPath, JSON.stringify({
-      env: 'desktop', version: '2.0.0', apiId: api.id,
-      scriptInfo: { name: api.name, description: '', version: '', author: '', homepage: '' }
-    }), 'utf8')
-
-    // Same launcher as the app: .cmd wrapper via runas.
-    const nodeExec = process.execPath
-    const cmdFile = join(scratch, 'launch.cmd')
-    const body = [
-      '@echo off',
-      `"${nodeExec}" --max-old-space-size=512 "${hostPath}" "${scriptPath}" "${initPath}" "${scratch}"`
-    ].join('\r\n')
-    writeFileSync(cmdFile, body, 'utf8')
-
-    const wrapper = spawn('runas', ['/trustlevel:0x20000', `"${cmdFile}"`], {
-      stdio: 'ignore', windowsVerbatimArguments: true
-    })
-
+    const record = (outcome, detail = '', extra = {}) => {
+      resolve({ name: api.name, outcome, detail, files: [], consoleLog: '', ...extra })
+    }
+    let scratch
+    let wrapper
     let settled = false
     let lastHeartbeat = 0
     let heartbeatSeen = false
@@ -73,12 +70,21 @@ function diagnose(api) {
     // report carries what the script printed before it died.
     let logSeen = 0
     let pollTimer
+    let timer
+    try {
+      scratch = mkdtempSync(join(tmpdir(), 'jj-diag-'))
+    } catch (error) {
+      record('SETUP_ERROR', `临时目录都建不出来: ${error.message}`)
+      return
+    }
+
+    /** Stops the clocks, keeps the scratch evidence, and removes the directory. */
     const finish = (outcome, detail = '') => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
-      clearInterval(pollTimer)
-      try { wrapper.kill() } catch { /* ignore */ }
+      if (timer) clearTimeout(timer)
+      if (pollTimer) clearInterval(pollTimer)
+      try { wrapper?.kill() } catch { /* ignore */ }
       // Collect the scratch state as evidence before cleanup.
       const files = existsSync(scratch) ? readdirSync(scratch) : []
       const consoleLog = existsSync(join(scratch, 'console.log'))
@@ -87,12 +93,41 @@ function diagnose(api) {
       try { rmSync(scratch, { recursive: true, force: true }) } catch { /* ignore */ }
       resolve({ name: api.name, outcome, detail, files, consoleLog })
     }
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       const waited = heartbeatSeen
         ? 'init-timeout (alive but never wrote ready.json)'
         : 'init-timeout (heartbeat never started — child likely never ran)'
       finish('TIMEOUT', waited)
     }, INIT_TIMEOUT_MS)
+
+    // A source whose payload will not decode is a result to print, not a reason
+    // to abort the run: this loop is how you find the one bad script in a list.
+    try {
+      const scriptPath = join(scratch, 'script.js')
+      const initPath = join(scratch, 'init.json')
+      writeFileSync(scriptPath, decode(typeof api.script === 'string' ? api.script : ''), 'utf8')
+      writeFileSync(initPath, JSON.stringify({
+        env: 'desktop', version: '2.0.0', apiId: api.id,
+        scriptInfo: { name: api.name, description: '', version: '', author: '', homepage: '' }
+      }), 'utf8')
+
+      // Same launcher as the app: .cmd wrapper via runas.
+      const nodeExec = process.execPath
+      const cmdFile = join(scratch, 'launch.cmd')
+      const body = [
+        '@echo off',
+        `"${nodeExec}" --max-old-space-size=512 "${hostPath}" "${scriptPath}" "${initPath}" "${scratch}"`
+      ].join('\r\n')
+      writeFileSync(cmdFile, body, 'utf8')
+
+      wrapper = spawn('runas', ['/trustlevel:0x20000', `"${cmdFile}"`], {
+        stdio: 'ignore', windowsVerbatimArguments: true
+      })
+      wrapper.on('error', (error) => finish('LAUNCH_ERROR', `runas 没能启动: ${error.message}`))
+    } catch (error) {
+      finish('PREPARE_ERROR', error.message?.slice(0, 160) ?? String(error))
+      return
+    }
 
     // Watch the scratch directory for protocol files.
     pollTimer = setInterval(() => {
@@ -121,9 +156,9 @@ function diagnose(api) {
 }
 
 const limitArg = args.find((a) => /^\d+$/.test(a))
-const list = data.userApis
+const list = apis
   .filter((a) => wantAll || a.enabled !== false)
-  .filter((a) => !filter || a.name.includes(filter))
+  .filter((a) => !filter || String(a.name ?? '').includes(filter))
   .slice(0, limitArg ? Number(limitArg) : 100)
 
 console.log(`diagnosing ${list.length} enabled source(s) under restricted token…\n`)

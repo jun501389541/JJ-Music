@@ -165,7 +165,11 @@ export class DesktopLyrics {
 
     window.on('moved', () => this.persistPosition(window))
     window.on('closed', () => {
+      // A drag outliving the window it moved is the one leak here that a user can
+      // feel: the interval keeps polling the cursor, and if the strip is opened
+      // again mid-gesture the stale timer starts moving the *new* window.
       if (this.window === window) this.window = null
+      this.endDrag()
     })
     return window
   }
@@ -276,7 +280,17 @@ export class DesktopLyrics {
    * other Electron window behaves there.
    */
   private stepDrag(): void {
-    if (!this.window || !this.dragPointer) return
+    if (!this.window || this.window.isDestroyed()) {
+      this.endDrag()
+      return
+    }
+    // 锁定位置可以在手指还按着的时候被勾上（右键菜单、设置页都行），而页面在一次
+    // 拖动中间不会再发任何消息。只在 `drag()` 里查一次等于没查。
+    if (this.hooks.settings().desktopLyricLocked) {
+      this.endDrag()
+      return
+    }
+    if (!this.dragPointer) return
     const pointer = screen.getCursorScreenPoint()
     const delta = { x: pointer.x - this.dragPointer.x, y: pointer.y - this.dragPointer.y }
     this.dragPointer = pointer

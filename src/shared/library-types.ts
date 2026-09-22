@@ -127,10 +127,11 @@ export interface AssetExportInput {
 
 /** Where an asset write actually ended up. */
 export interface AssetExportResult {
+  /** Something landed (in a `dryRun`: would land). */
   written: boolean
   /** Labels of the destinations that took the payload, for the UI. */
   landed: string[]
-  /** Files created or modified, so the caller can refresh what it caches. */
+  /** Files actually created or modified — empty for a `dryRun`. */
   paths: string[]
   /** Anything that stopped part of the write, phrased for the user. */
   notes: string[]
@@ -139,6 +140,14 @@ export interface AssetExportResult {
   /** Provenance to merge into the index entry. */
   assets?: import('./types').TrackAssets
   backupPath?: string
+  /**
+   * True when the audio file's own tags were rewritten.
+   *
+   * Callers need this to decide whether to re-read the track, and `landed` is the
+   * wrong thing to ask: it holds the labels shown in the UI, so rewording 「文件内嵌」
+   * would silently stop the refresh.
+   */
+  embeddedWritten: boolean
 }
 
 /** One candidate recording proposed for a local track. */

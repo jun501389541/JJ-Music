@@ -114,6 +114,23 @@ export interface ScanOptions {
   signal?: AbortSignal
 }
 
+/**
+ * Async stand-in for `existsSync`.
+ *
+ * Cover art is a derived file, so validating an index means stat-ing one path per
+ * track. On the startup path that has to stay off the event loop: `existsSync`
+ * blocks the main process for the whole batch, and a few thousand rows is a
+ * frozen window before the first paint.
+ */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export class MusicLibrary {
   private readonly indexPath: string
   private readonly coverDir: string
@@ -156,22 +173,25 @@ export class MusicLibrary {
     this.stale = raw.version !== INDEX_VERSION
 
     this.folders = Array.isArray(raw.folders) ? raw.folders : []
-    for (const track of raw.tracks ?? []) {
-      if (!track?.path) continue
+    const entries = (raw.tracks ?? []).filter((track) => track?.path)
+    // Checked before anything is stored, in one concurrent batch, so the loop
+    // below never waits on the filesystem.
+    const coverGone = await Promise.all(entries.map((track) => (track.coverPath ? pathExists(track.coverPath) : true)))
+    entries.forEach((track, index) => {
       // Cover art is a derived file living outside the index, so clearing the
       // cover folder never changes the audio's size or mtime — and an incremental
       // scan skips exactly those. Drop the dead reference (otherwise every row
       // paints the browser's broken-image glyph instead of our placeholder) and
       // mark the index for a refresh, which is what makes the startup background
       // scan re-extract the artwork without the user doing anything.
-      if (track.coverPath && !existsSync(track.coverPath)) {
+      if (track.coverPath && !coverGone[index]) {
         delete track.coverPath
         delete track.assets?.cover
         if (track.assets && !track.assets.cover && !track.assets.lyrics) delete track.assets
         this.stale = true
       }
       this.tracks.set(track.path, track)
-    }
+    })
   }
 
   private async persist(): Promise<void> {
@@ -216,9 +236,21 @@ export class MusicLibrary {
 
   /** Add a folder to the library and scan it. */
   async addFolder(folder: string, options: ScanOptions = {}): Promise<ScanProgress> {
+    return this.addFolders([folder], options)
+  }
+
+  /**
+   * Register one or more folders, then scan **once**.
+   *
+   * `scan()` always covers every registered root, so calling `addFolder` in a
+   * loop to add N folders means N complete walks of the whole library — the
+   * multi-folder drop used to do exactly that, which on a few thousand files is
+   * N times the I/O for the same result.
+   */
+  async addFolders(folders: string[], options: ScanOptions = {}): Promise<ScanProgress> {
     await this.load()
-    if (!this.folders.includes(folder)) {
-      this.folders.push(folder)
+    for (const folder of folders) {
+      if (!this.folders.includes(folder)) this.folders.push(folder)
     }
     return this.scan(options)
   }

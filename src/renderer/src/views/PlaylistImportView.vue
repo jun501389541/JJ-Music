@@ -12,7 +12,8 @@ const source=ref<SourceId>('wy'),input=ref(''),busy=ref(false),error=ref(''),pre
 const rows=ref<OnlineMusicInfo[]>([]),removed=ref<OnlineMusicInfo[]>([])
 const library=useLibraryStore(),router=useRouter(),toast=useToastStore(),ui=useUiStore()
 watch([source,input],()=>{preview.value=null;error.value='';rows.value=[];removed.value=[]})
-const edited=computed(()=>rows.value.length!==preview.value?.tracks.length)
+// 顺序不同也算改过：拖动不改变数量，但提交出去的歌单顺序确实和预览不一样了。
+const edited=computed(()=>{const original=preview.value?.tracks??[];return rows.value.length!==original.length||rows.value.some((track,index)=>track.id!==original[index]?.id)})
 async function read():Promise<void>{busy.value=true;error.value='';preview.value=null;rows.value=[];removed.value=[];try{const result=await window.jj.playlistImport.preview(source.value,input.value);preview.value=result;rows.value=[...result.tracks]}catch(e){error.value=e instanceof Error?e.message:'读取失败'}finally{busy.value=false}}
 function reorder(from:number,to:number):void{const list=[...rows.value];const[moved]=list.splice(from,1);if(!moved)return;list.splice(to,0,moved);rows.value=list}
 /** 移除只作用于这份待导入列表，不碰曲库也不碰任何文件。 */

@@ -692,6 +692,11 @@ export const usePlayerStore = defineStore('player', () => {
     // Entering or leaving random starts a clean pass; carrying half a shuffle
     // over would play the leftovers before anything the user just queued up.
     resetRandomPass()
+    // …but the song that is playing right now *is* where the user came from, so
+    // it goes into the log. Without this the first 上一首 after switching to
+    // 随机 has a one-entry history, finds nothing to step back to, and falls
+    // through to the sequential neighbour — skipping the track just heard.
+    if (mode === 'random' && currentTrack.value) rememberRandomDraw(currentTrack.value.id)
   }
 
   function setRate(value: number): void {
@@ -998,6 +1003,10 @@ export const usePlayerStore = defineStore('player', () => {
 
       if (isLocalTrack(track)) {
         result = await window.jj.lyric.resolve(track.id, true)
+        // Same guard the online branch has: two rapid track changes can interleave
+        // here, and the provenance of the song the user has already left must not
+        // land on the one now playing.
+        if (!isCurrent()) return
         lyricAsset.value = result.asset ?? null
       } else {
         // A hand-picked source belongs to the track it was picked for.
@@ -1046,8 +1055,12 @@ export const usePlayerStore = defineStore('player', () => {
             ...(enriched.cover ? { cover: [enriched.cover] } : {}),
             ...(enriched.asset ? { lyrics: { ...onlineTrack.assets?.lyrics, main: [enriched.asset] } } : {})
           }
+          // `onlineTrack` is a clone made for this call, so the row in the queue
+          // has to be written too — and it has to be written *because* it may not
+          // carry an `assets` key yet: a plain search result is exactly the case
+          // this exists for, so gating on `'assets' in queued` skipped it.
           const queued = queue.value.find((item) => item.id === onlineTrack.id)
-          if (queued && 'assets' in queued) queued.assets = onlineTrack.assets
+          if (queued) queued.assets = onlineTrack.assets
         }
       }
 

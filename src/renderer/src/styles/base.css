@@ -27,6 +27,20 @@ body {
 }
 
 /*
+ * Opt the prose back in.
+ *
+ * The shell is non-selectable so that clicking a row, dragging it into a
+ * playlist or scrubbing a slider never paints a blue text selection — but the
+ * blanket rule also made explanatory text impossible to copy, which is the one
+ * thing a user reports when asking for help about it. Informational blocks are
+ * selectable; interactive rows are not. (The 音轨信息 values already opted
+ * themselves in inside DialogHost.)
+ */
+.description, .setting-label, .salt-dialog p, .salt-dialog dt, .settings-heading p {
+  user-select: text;
+}
+
+/*
  * In-app artwork is not a drag source.
  *
  * Chromium makes every `<img>` draggable by default, so grabbing the toolbar's
@@ -95,10 +109,11 @@ img {
 
 /* ---------------- focus ---------------- */
 
+/* Chromium traces an outline along the element's own corner radius, so nothing is
+   needed here — and adding `border-radius` would reshape the control on focus. */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-xs);
 }
 
 /* ---------------- shared primitives ---------------- */
@@ -237,8 +252,15 @@ img {
 
 .view__title {
   margin: 0;
-  font-size: var(--text-xl);
-  font-weight: 650;
+  /*
+   * One step below what the previous duplicate rule rendered (30px at the
+   * default 13px root), because `--text-2xl` is the token the scale actually
+   * offers and the alternative was a magic number that opted page titles out of
+   * the 界面文字大小 setting — which is why a second declaration existed here at
+   * all: it silently overrode the token rule, so editing that one did nothing.
+   */
+  font-size: var(--text-2xl);
+  font-weight: 550;
   letter-spacing: -0.01em;
 }
 
@@ -293,6 +315,5 @@ img {
 }
 
 :root[data-reduced-motion="true"] *, :root[data-reduced-motion="true"] *::before, :root[data-reduced-motion="true"] *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-.view__title { font-size: 30px; font-weight: 550; }
 
 :root[data-material="mica"], :root[data-material="acrylic"]{--bg-base:#1b1d26dc;--bg-elevated:#1b1d2670;background:transparent}:root[data-material="mica"][data-theme="light"],:root[data-material="acrylic"][data-theme="light"]{--bg-base:#fafafade;--bg-elevated:#ffffff70}:root[data-material="mica"] body,:root[data-material="acrylic"] body{background:transparent}

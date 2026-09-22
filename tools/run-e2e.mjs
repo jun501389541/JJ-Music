@@ -59,7 +59,19 @@ function hookReachable() {
     cwd: repoRoot,
     stdio: 'inherit'
   })
-  // probe-hook exits 1 when the hook is reachable, 0 when it is absent.
+  if (probe.error) {
+    console.error(`probe-hook.mjs 没能启动: ${probe.error.message}`)
+    process.exit(1)
+  }
+  // probe-hook exits 1 when the hook is reachable, 0 when it is absent. Any other
+  // outcome — a crash, a signal, the app refusing to launch — says nothing about
+  // the hook, so reading it as "unreachable" would be a green built on nothing.
+  if (probe.status !== 0 && probe.status !== 1) {
+    console.error(
+      `probe-hook.mjs 以 ${probe.status ?? `信号 ${probe.signal}`} 结束，无法判断生产构建里有没有测试钩子`
+    )
+    process.exit(1)
+  }
   return probe.status === 1
 }
 

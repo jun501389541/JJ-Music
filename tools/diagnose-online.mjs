@@ -123,25 +123,33 @@ try {
   }
 
   // A source that throws must not break the engine.
-  const storeErr = new SourceStore(mkdtempSync(join(tmpdir(), 'jj-diag-err-')))
-  storeErr.load()
-  const metaErr = storeErr.import(
-    '/*! * @name 抛错音源 * @version 1 */ const {on,EVENT_NAMES,send}=globalThis.lx;' +
-      'on(EVENT_NAMES.request,()=>{throw new Error("boom")});' +
-      'send(EVENT_NAMES.inited,{sources:{kw:{type:"music",actions:["musicUrl"],qualitys:["128k"]}}})',
-    '抛错音源'
-  )
-  storeErr.setEnabled(metaErr.id, true)
-  const engineErr = new SourceEngine(storeErr, WORKER)
-  await engineErr.startAll()
+  const tmpErr = mkdtempSync(join(tmpdir(), 'jj-diag-err-'))
+  let engineErr
   try {
-    await engineErr.getMusicUrl('kw', TRACK, '128k')
-    console.log('  ✗ 抛错音源竟然返回了结果')
-    problems += 1
-  } catch (error) {
-    console.log(`  ✓ 抛错音源被正确报告: ${error.message.slice(0, 80)}`)
+    const storeErr = new SourceStore(tmpErr)
+    storeErr.load()
+    const metaErr = storeErr.import(
+      '/*! * @name 抛错音源 * @version 1 */ const {on,EVENT_NAMES,send}=globalThis.lx;' +
+        'on(EVENT_NAMES.request,()=>{throw new Error("boom")});' +
+        'send(EVENT_NAMES.inited,{sources:{kw:{type:"music",actions:["musicUrl"],qualitys:["128k"]}}})',
+      '抛错音源'
+    )
+    storeErr.setEnabled(metaErr.id, true)
+    engineErr = new SourceEngine(storeErr, WORKER)
+    await engineErr.startAll()
+    try {
+      await engineErr.getMusicUrl('kw', TRACK, '128k')
+      console.log('  ✗ 抛错音源竟然返回了结果')
+      problems += 1
+    } catch (error) {
+      console.log(`  ✓ 抛错音源被正确报告: ${error.message.slice(0, 80)}`)
+    }
+  } finally {
+    // Both the child and its scratch directory, whatever happened above: this
+    // block used to leak a source process whenever the run took an early exit.
+    await engineErr?.stopAll()
+    rmSync(tmpErr, { recursive: true, force: true })
   }
-  await engineErr.stopAll()
 } catch (error) {
   console.log(`  ✗ 引擎自检异常: ${error.message}`)
   problems += 1

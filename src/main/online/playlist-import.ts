@@ -76,7 +76,10 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
     const list=data.playlist||data.result
     if(!list || data.code!==200)throw Error('歌单不存在、非公开或平台拒绝访问')
     name=list.name;rows=list.tracks||[];total=Number(list.trackCount||list.trackIds?.length||rows.length)
-    cover=String(list.coverUrl||list.cover||'')
+    // `coverImgUrl` is what the v6 detail actually returns (measured against the
+    // live endpoint); the other two are kept as fallbacks only. Guessing the wrong
+    // name here is invisible — the preview just never shows a cover for 网易云.
+    cover=String(list.coverImgUrl||list.coverUrl||list.cover||'')
     const known=new Set(rows.map(t=>String(t.id)))
     const missing=(list.trackIds||[]).map((t:Row)=>String(t.id)).filter((key:string)=>!known.has(key)).slice(0,Math.max(0,5000-rows.length))
     for(let i=0;i<missing.length;i+=100) {
@@ -108,21 +111,34 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
       if(!Array.isArray(chunk))throw Error('歌单数据格式已变化')
       total=Math.max(total,Number(data.data?.totalCount)||0)
       rows.push(...chunk)
-      if(!chunk.length||rows.length>=total)break
+      // A short or empty page is the only trustworthy end marker: a playlist whose
+      // `totalCount` is missing would otherwise stop after page one, because
+      // `rows.length >= 0` is always true. Truncating someone's playlist in
+      // silence is exactly the kind of quiet half-result to avoid.
+      if(!chunk.length||chunk.length<MG_PAGE_SIZE)break
+      if(total&&rows.length>=total)break
     }
   } else {
+    // One page size for both adapters, used in the request *and* in the
+    // short-page test below — the two must not be able to drift apart.
+    const size = 100
     for(let page=0;page<50;page++) {
       const data=source==='kw'
-        ? await json(`https://nplserver.kuwo.cn/pl.svc?op=getlistinfo&pid=${id}&pn=${page}&rn=100&encode=utf8&keyset=pl2012&identity=kuwo&pcmp4=1&vipver=MUSIC_9.0.5.0_W1&newver=1`,'https://www.kuwo.cn/')
-        : await json(`http://mobilecdnbj.kugou.com/api/v3/special/song?specialid=${id}&page=${page+1}&pagesize=100&version=9108&plat=0`,'https://www.kugou.com/')
+        ? await json(`https://nplserver.kuwo.cn/pl.svc?op=getlistinfo&pid=${id}&pn=${page}&rn=${size}&encode=utf8&keyset=pl2012&identity=kuwo&pcmp4=1&vipver=MUSIC_9.0.5.0_W1&newver=1`,'https://www.kuwo.cn/')
+        : await json(`http://mobilecdnbj.kugou.com/api/v3/special/song?specialid=${id}&page=${page+1}&pagesize=${size}&version=9108&plat=0`,'https://www.kugou.com/')
       if(source==='kw' && data.result!=='ok' || source==='kg' && data.status!==1)throw Error('歌单不存在、非公开或平台拒绝访问')
       const chunk=source==='kw'?data.musiclist:data.data?.info
       if(!Array.isArray(chunk))throw Error('歌单数据格式已变化')
       name=data.title||data.data?.specialname||name||`酷狗歌单 ${id}`
       cover=cover||String(data.pic||data.header||data.data?.imgurl||data.data?.cover||'')
-      total=Number(source==='kw'?data.total:data.data?.total)||rows.length+chunk.length
+      total=Number(source==='kw'?data.total:data.data?.total)||0
       rows.push(...chunk)
-      if(!chunk.length || rows.length>=total)break
+      // 平台报了总数就按总数走（有的接口末页本来就短）；没报总数的情况下，
+      // 短页是唯一可信的结束标志。以前总数缺失时把"目前手上的数量"当总数，
+      // 于是第一页刚好满 100 就停 —— 500 首的歌单静默导入 100 首。
+      if(!chunk.length)break
+      if(total) { if(rows.length>=total)break }
+      else if(chunk.length<size)break
     }
   }
   const tracks:OnlineMusicInfo[]=[],seen=new Set<string>()

@@ -58,7 +58,14 @@ async function removeTracks(selection: PlayableTrack[]): Promise<void> {
   if (selection.length === 0) return
   const many = selection.length > 1
   if (many && !await ui.confirm('批量移除', `从歌单移除选中的 ${selection.length} 首？歌曲仍保留在曲库中，可再次加入。`)) return
-  await window.jj.playlists.removeTracks(listId.value, selection.map((track) => track.id))
+  try {
+    await window.jj.playlists.removeTracks(listId.value, selection.map((track) => track.id))
+  } catch (error) {
+    // Without this the rows stay on screen looking removed while the list on disk
+    // never changed, and the next 打开 shows them again.
+    toast.error(error instanceof Error ? error.message : '从歌单移除失败')
+    return
+  }
   await library.refreshPlaylists()
 }
 function playlistActions(_track: PlayableTrack, _index: number, selection: PlayableTrack[]): MenuItem[] {
@@ -73,17 +80,36 @@ function playlistActions(_track: PlayableTrack, _index: number, selection: Playa
  * `reorder` is the store's own replace-the-order call, so there is nothing to
  * reconcile afterwards.
  */
+/**
+ * Each drag sends the *whole* current order, so what matters is that they go out
+ * in the order they were made: two overlapping requests can otherwise be applied
+ * by arrival, which leaves the older snapshot as the final one and the screen
+ * quietly disagreeing with the file.
+ */
+let orderWrite: Promise<void> = Promise.resolve()
 function reorder(from: number, to: number): void {
   const list = [...tracks.value]
   const [moved] = list.splice(from, 1)
   if (!moved) return
   list.splice(to, 0, moved)
   tracks.value = list
-  window.jj.playlists.reorder(listId.value, list.map((track) => track.id)).catch(async (error: unknown) => {
-    toast.error(error instanceof Error ? error.message : '保存顺序失败')
-    await load()
-  })
+  const order = list.map((track) => track.id)
+  orderWrite = orderWrite
+    .catch(() => {})
+    .then(() => window.jj.playlists.reorder(listId.value, order))
+    .catch(async (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : '保存顺序失败')
+      await load()
+    })
 }
+
+/**
+ * A cover file lives outside the playlist record and can be deleted from under
+ * it (清空封面's cache delete does), which would otherwise paint the browser's
+ * broken glyph. Keyed on the path, so choosing a new cover clears the flag.
+ */
+const brokenCover = ref('')
+const coverMissing = computed(() => !playlist.value?.coverPath || brokenCover.value === playlist.value.coverPath)
 
 async function chooseCover(): Promise<void> {
   try {
@@ -97,8 +123,14 @@ async function chooseCover(): Promise<void> {
 }
 
 async function clearCover(): Promise<void> {
-  await window.jj.playlists.clearCover(listId.value)
+  try {
+    await window.jj.playlists.clearCover(listId.value)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '移除封面失败')
+    return
+  }
   await library.refreshPlaylists()
+  toast.info('已移除歌单封面')
 }
 </script>
 
@@ -106,8 +138,8 @@ async function clearCover(): Promise<void> {
   <div class="view playlist-view">
     <header class="view__header">
       <div class="heading">
-        <span class="heading__art" :class="{ 'heading__art--empty': !playlist?.coverPath }">
-          <img v-if="playlist?.coverPath" :src="toMediaUrl(playlist.coverPath)" alt="" />
+        <span class="heading__art" :class="{ 'heading__art--empty': coverMissing }">
+          <img v-if="playlist?.coverPath && !coverMissing" :src="toMediaUrl(playlist.coverPath)" alt="" @error="brokenCover = playlist.coverPath" />
           <AppIcon v-else name="music" :size="26" />
         </span>
         <div>

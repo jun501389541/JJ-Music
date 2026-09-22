@@ -13,17 +13,33 @@ const route = useRoute(), router = useRouter(), library = useLibraryStore(), pla
 const jj = window.jj
 const search = ref('')
 const defaultDownloadFolder = ref('系统下载目录 / JJ Music')
-void window.jj.downloads?.folder().then(path => {defaultDownloadFolder.value=path})
-async function chooseDownloadFolder(): Promise<void> { await library.chooseDownloadFolder() }
+// A rejected IPC must leave the placeholder standing, not an empty label, and an
+// unhandled rejection is what makes the click look like it did nothing.
+void window.jj.downloads?.folder().then(path => { if (path) defaultDownloadFolder.value = path }, () => {})
+async function chooseDownloadFolder(): Promise<void> {
+  try {
+    await library.chooseDownloadFolder()
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '无法选择下载目录')
+  }
+}
 const section = computed(() => Array.isArray(route.params.section) ? route.params.section.join('/') : String(route.params.section || ''))
 const page = computed(() => SETTINGS_PAGES[section.value] || SETTINGS_PAGES[''])
 const crumbs = computed(() => section.value.split('/').filter(Boolean).map((_, i, parts) => { const key = parts.slice(0, i + 1).join('/'); return { key, title: SETTINGS_PAGES[key]?.title || key } }))
 const items = computed(() => !search.value ? page.value.items : Object.entries(SETTINGS_PAGES).flatMap(([key, value]) => value.items.filter(item => `${item.label}${item.description || ''}`.includes(search.value)).map(item => ({ ...item, to: item.to || key, kind: undefined }))))
-async function update(patch: Partial<AppSettings>): Promise<void> { try { await library.updateSettings(patch) } catch(error) { toast.error(error instanceof Error ? error.message : '保存失败') } }
+async function update(patch: Partial<AppSettings>): Promise<void> {
+  // The store already turns a failed save into a toast (`设置保存失败：…`), so
+  // catching here only exists to stop the rejection escaping a watcher.
+  await library.updateSettings(patch).catch(() => {})
+}
 function change(item: SettingItem, value: string | number | boolean): void { if (item.key) void update({ [item.key]: value }) }
 function navigate(to: string): void { search.value = ''; void router.push(to.startsWith('/') ? to : '/settings/' + to) }
 function onSelect(item: SettingItem, event: Event): void { const value = (event.target as HTMLSelectElement).value; change(item, item.options?.find(option => String(option.value) === value)?.value ?? value) }
 /** A `flags` row holds a list, so clicking an option adds or removes just it. */
+function flagOn(item: SettingItem, value: string): boolean {
+  const list = (item.key ? library.settings[item.key] : undefined) as unknown as string[] | undefined
+  return (list ?? []).includes(value)
+}
 function toggleFlag(item: SettingItem, value: string): void {
   if (!item.key) return
   const current = (library.settings[item.key] as unknown as string[] | undefined) ?? []
@@ -36,9 +52,16 @@ async function moveDataDir(): Promise<void> {
     const result = await jj.data.moveTo()
     if (result.moved) toast.success(`已复制到 ${result.dir}，重启后生效`)
     else if (result.reason === 'same') toast.error('目标目录就是当前使用的目录')
-    dataDir.value = await jj.data.location()
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '迁移失败')
+    return
+  }
+  // Outside the try: a failed *refresh* must not be reported as a failed move,
+  // right after the sentence that says the data was copied.
+  try {
+    dataDir.value = await jj.data.location()
+  } catch {
+    /* the row above keeps whatever it showed; the move itself succeeded */
   }
 }
 
@@ -50,19 +73,30 @@ const DATA_DIR_SOURCES: Record<DataDirLocation['source'], string> = {
   portable: '程序所在目录（便携）',
   appdata: '系统应用数据目录'
 }
-watch(section, async value => { if (value === 'data') dataDir.value = await jj.data.location() }, { immediate: true })
+watch(section, async value => {
+  if (value !== 'data') return
+  try {
+    dataDir.value = await jj.data.location()
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '无法读取数据目录位置')
+  }
+}, { immediate: true })
 
 /* ---------------- 待写入队列 (设置·标签与文件) ---------------- */
-const pendingList = ref<PendingAsset[]>([])
-const pendingSummary = computed(() => pendingList.value.length
+/** `null` means "this query failed", which is a different sentence than "the queue is empty". */
+const pendingList = ref<PendingAsset[] | null>(null)
+const pendingSummary = computed(() => pendingList.value === null
+  ? '这次没问到待写入队列的内容，所以两个按钮先禁用；重新进这一页会再问一次。'
+  : pendingList.value.length
   ? `${pendingList.value.length} 项等待写入：${pendingList.value.slice(0, 3).map(entry => `${entry.singer || '未知艺术家'} - ${entry.name}`).join('、')}${pendingList.value.length > 3 ? ' 等' : ''}。写入前不会改动你的文件。`
   : '没有等待写入的内容。播放时联网找到的歌词会先到这里，你确认后才会写进文件或存成同名文件。')
 
 async function refreshPending(): Promise<void> {
   try {
     pendingList.value = await jj.assets.pending()
-  } catch {
-    pendingList.value = []
+  } catch (error) {
+    pendingList.value = null
+    toast.error(error instanceof Error ? error.message : '无法读取待写入队列')
   }
 }
 watch(section, value => { if (value === 'assets') void refreshPending() }, { immediate: true })
@@ -95,18 +129,29 @@ const outputSupported = ref(true)
 /** Load the device list when the section opens, and reflect stored choice. */
 watch(section, async (value) => {
   if (value !== 'audio/output') return
-  await player.refreshOutputDevices()
-  // A single "系统默认输出" entry means enumeration is unavailable in this
-  // environment; say so rather than showing a dropdown that cannot change.
-  outputSupported.value = player.outputDevices.length > 1
-  // Re-apply the saved device so a fresh launch honours the preference.
-  if (library.settings.outputDeviceId && outputSupported.value) {
-    await player.setOutputDevice(library.settings.outputDeviceId)
+  try {
+    await player.refreshOutputDevices()
+    // A single "系统默认输出" entry means enumeration is unavailable in this
+    // environment; say so rather than showing a dropdown that cannot change.
+    outputSupported.value = player.outputDevices.length > 1
+    // Re-apply the saved device so a fresh launch honours the preference.
+    if (library.settings.outputDeviceId && outputSupported.value) {
+      await player.setOutputDevice(library.settings.outputDeviceId)
+    }
+  } catch (error) {
+    outputSupported.value = false
+    toast.error(error instanceof Error ? error.message : '无法读取输出设备列表')
   }
 }, { immediate: true })
 
 async function chooseOutputDevice(deviceId: string): Promise<void> {
-  const ok = await player.setOutputDevice(deviceId)
+  let ok = false
+  try {
+    ok = await player.setOutputDevice(deviceId)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '切换输出设备失败')
+    return
+  }
   if (!ok) {
     toast.error('无法切换到该输出设备，已保留原设备')
     return
@@ -128,7 +173,7 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
         <button v-if="item.kind === 'toggle' && item.key" role="switch" :aria-label="item.label" :aria-checked="!!library.settings[item.key]" class="salt-switch" :class="{ on: library.settings[item.key] }" @click="change(item, !library.settings[item.key])"><span/></button>
         <select v-else-if="item.kind === 'select' && item.key" class="input" :aria-label="item.label" :value="library.settings[item.key]" @change="onSelect(item, $event)"><option v-for="option in item.options" :key="option.value" :value="option.value">{{ option.label }}</option></select>
         <div v-else-if="item.kind === 'range' && item.key" class="setting-range"><input type="range" :min="item.min" :max="item.max" :step="item.step" :value="Number(library.settings[item.key])" :aria-label="item.label" @input="change(item, Number(($event.target as HTMLInputElement).value))"/><span>{{ library.settings[item.key] }}{{ item.unit }}</span></div>
-        <div v-else-if="item.kind === 'flags' && item.key" class="setting-flags"><button v-for="option in item.options" :key="String(option.value)" class="btn" :class="{ 'btn--primary': ((library.settings[item.key] as unknown as string[] | undefined) ?? []).includes(String(option.value)) }" @click="toggleFlag(item, String(option.value))">{{ option.label }}</button></div>
+        <div v-else-if="item.kind === 'flags' && item.key" class="setting-flags"><button v-for="option in item.options" :key="String(option.value)" class="btn" :aria-pressed="flagOn(item, String(option.value))" :class="{ 'btn--primary': flagOn(item, String(option.value)) }" @click="toggleFlag(item, String(option.value))">{{ option.label }}</button></div>
         <div v-else-if="item.kind === 'color'" class="accent-control"><button class="btn" :class="{ 'btn--primary': library.settings.accent === 'auto' }" @click="update({ accent: 'auto' })">跟随封面</button><input type="color" :value="library.settings.accent === 'auto' ? '#4cc2ff' : library.settings.accent" aria-label="强调色" @input="update({ accent: ($event.target as HTMLInputElement).value })"/></div>
       </div>
     </template>
@@ -139,7 +184,7 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
     <!-- The 待写入 queue: what the network handed us for a local song and has
          not been written anywhere. Actions live here rather than per-song
          because that is the point of a queue — decide once, for all of them. -->
-    <div v-if="section === 'assets'" class="setting-row"><span class="setting-label"><strong>待写入</strong><small>{{ pendingSummary }}</small></span><span class="setting-buttons"><button class="btn" :disabled="!pendingList.length" @click="runPending('write')">全部写入</button><button class="btn" :disabled="!pendingList.length" @click="runPending('discard')">全部丢弃</button></span></div>
+    <div v-if="section === 'assets'" class="setting-row"><span class="setting-label"><strong>待写入</strong><small>{{ pendingSummary }}</small></span><span class="setting-buttons"><button class="btn" :disabled="!pendingList?.length" @click="runPending('write')">全部写入</button><button class="btn" :disabled="!pendingList?.length" @click="runPending('discard')">全部丢弃</button></span></div>
     <div v-if="section === 'data' && dataDir?.notice" class="setting-row"><span class="setting-label"><strong>注意</strong><small>{{ dataDir.notice }}</small></span></div>
   </div>
 
@@ -183,5 +228,5 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
   <p v-if="section === 'appearance'" class="settings-footnote">云母和亚克力效果取决于 Windows 版本与系统透明效果设置。</p>
 </div></template>
 <style scoped>
-.settings-page{padding:20px 42px 48px}.settings-topline{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}.breadcrumbs{display:flex;align-items:center;gap:10px;color:var(--text-tertiary);font-size:12px}.breadcrumbs button{border:0;background:none;color:var(--text-secondary);font:inherit;cursor:pointer}.breadcrumbs button:last-child{color:var(--text-primary)}.settings-search{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border-subtle);border-radius:5px;color:var(--text-tertiary);background:var(--bg-input)}.settings-search input{border:0;background:none;outline:none;color:var(--text-primary);font:inherit;width:130px;font-size:11px}.settings-heading{display:flex;gap:10px;align-items:center;margin-bottom:28px}.settings-heading h1{font-size:30px;font-weight:550;margin:0}.settings-heading p{margin:9px 0 0;color:var(--text-secondary);font-size:12px}.settings-items{display:flex;flex-direction:column;gap:5px;max-width:950px}.setting-row{min-height:76px;display:flex;align-items:center;gap:22px;border:1px solid var(--border-subtle);border-radius:6px;padding:17px 22px;background:var(--bg-panel);color:var(--text-primary);font:inherit;text-align:left;width:100%;margin-bottom:1px}.setting-link{cursor:pointer}.setting-link:hover{background:var(--bg-hover)}.setting-link>svg:first-child{color:var(--text-secondary)}.setting-label{display:flex;flex:1;flex-direction:column;gap:7px;min-width:0}.setting-label strong{font-size:14px;font-weight:450}.setting-label small{font-size:11px;line-height:1.6;color:var(--text-secondary)}.setting-row select{min-width:150px;max-width:220px;font-size:12px}.salt-switch{width:40px;height:21px;border:1px solid var(--text-tertiary);border-radius:30px;background:transparent;padding:3px;flex:none;cursor:pointer}.salt-switch span{display:block;width:13px;height:13px;background:var(--text-secondary);border-radius:50%;transition:transform .15s}.salt-switch.on{background:var(--accent);border-color:var(--accent)}.salt-switch.on span{transform:translateX(17px);background:#182126}.setting-range{display:flex;gap:14px;align-items:center;width:245px}.setting-range input{min-width:100px;flex:1;accent-color:var(--accent)}.setting-range span{font-size:12px;min-width:44px;text-align:right}.accent-control{display:flex;align-items:center;gap:12px}.setting-flags,.setting-buttons{display:flex;gap:8px;flex-wrap:wrap;flex:none}.setting-flags .btn,.setting-buttons .btn{font-size:12px;padding:7px 13px}.accent-control input{width:30px;height:30px;padding:0;border:0;background:none;cursor:pointer}.theme-previews{display:flex;gap:16px;margin:0 0 24px;max-width:600px}.theme-preview{flex:1;background:none;color:var(--text-primary);border:0;font:inherit;cursor:pointer;padding:0}.mock-window{display:flex;border:3px solid transparent;border-radius:8px;height:93px;background:#e5e7ea;padding:9px;gap:9px;box-shadow:inset 0 0 0 1px #8883}.mock-window i{width:25%;background:#c6c9ce;border-radius:3px}.mock-window>span{flex:1;display:flex;flex-direction:column;gap:6px}.mock-window b{height:18px;background:#fafafa;border-radius:3px}.dark .mock-window{background:#27282e}.dark .mock-window i{background:#373941}.dark .mock-window b{background:#42454f}.system .mock-window{background:linear-gradient(110deg,#27282e 50%,#e5e7ea 50%)}.chosen .mock-window{border-color:var(--accent)}.theme-preview>span:last-child{display:flex;justify-content:center;align-items:center;gap:9px;margin-top:10px;font-size:12px}.settings-footnote{font-size:11px;color:var(--text-tertiary);margin-top:20px}.eq-presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}.equalizer-panel{display:flex;justify-content:space-between;gap:12px;padding:32px 24px;border-radius:8px;background:var(--bg-panel)}.equalizer-panel>div{display:flex;flex:1;flex-direction:column;align-items:center;gap:20px}.equalizer-panel input{writing-mode:vertical-lr;direction:rtl;height:190px;width:20px;accent-color:var(--accent)}.equalizer-panel output{font-size:14px}.equalizer-panel small,.equalizer-panel span{font-size:10px;color:var(--text-secondary)}.lyric-preview{padding:36px;margin-top:18px;display:flex;flex-direction:column;gap:18px;border-radius:8px;background:var(--bg-panel)}.lyric-preview>span{opacity:.25}.lyric-preview strong{font-weight:600}.lyric-preview small{font-size:.45em;opacity:.55}.data-actions{display:flex;gap:12px;margin-top:24px}.about-mark{display:flex;gap:25px;align-items:center;margin:44px 0}.about-mark>span{display:grid;place-items:center;font:italic 600 54px Georgia;color:white;width:88px;height:88px;border-radius:24px;background:linear-gradient(140deg,#6ebdcc,#7689c9)}.about-mark strong{font-size:28px;font-weight:500}.about-mark p{font-size:12px;color:var(--text-secondary)}
+.settings-page{padding:20px 42px 48px}.settings-topline{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}.breadcrumbs{display:flex;align-items:center;gap:10px;color:var(--text-tertiary);font-size:12px}.breadcrumbs button{border:0;background:none;color:var(--text-secondary);font:inherit;cursor:pointer}.breadcrumbs button:last-child{color:var(--text-primary)}.settings-search{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border-subtle);border-radius:5px;color:var(--text-tertiary);background:var(--bg-input)}.settings-search input{border:0;background:none;outline:none;color:var(--text-primary);font:inherit;width:130px;font-size:11px}.settings-heading{display:flex;gap:10px;align-items:center;margin-bottom:28px}.settings-heading h1{font-size:var(--text-2xl);font-weight:550;margin:0}.settings-heading p{margin:9px 0 0;color:var(--text-secondary);font-size:12px}.settings-items{display:flex;flex-direction:column;gap:5px;max-width:950px}.setting-row{min-height:76px;display:flex;align-items:center;gap:22px;border:1px solid var(--border-subtle);border-radius:6px;padding:17px 22px;background:var(--bg-panel);color:var(--text-primary);font:inherit;text-align:left;width:100%;margin-bottom:1px}.setting-link{cursor:pointer}.setting-link:hover{background:var(--bg-hover)}.setting-link>svg:first-child{color:var(--text-secondary)}.setting-label{display:flex;flex:1;flex-direction:column;gap:7px;min-width:0}.setting-label strong{font-size:14px;font-weight:450}.setting-label small{font-size:11px;line-height:1.6;color:var(--text-secondary)}.setting-row select{min-width:150px;max-width:220px;font-size:12px}.salt-switch{width:40px;height:21px;border:1px solid var(--text-tertiary);border-radius:30px;background:transparent;padding:3px;flex:none;cursor:pointer}.salt-switch span{display:block;width:13px;height:13px;background:var(--text-secondary);border-radius:50%;transition:transform .15s}.salt-switch.on{background:var(--accent);border-color:var(--accent)}.salt-switch.on span{transform:translateX(17px);background:#182126}.setting-range{display:flex;gap:14px;align-items:center;width:245px}.setting-range input{min-width:100px;flex:1;accent-color:var(--accent)}.setting-range span{font-size:12px;min-width:44px;text-align:right}.accent-control{display:flex;align-items:center;gap:12px}.setting-flags,.setting-buttons{display:flex;gap:8px;flex-wrap:wrap;flex:none}.setting-flags .btn,.setting-buttons .btn{font-size:12px;padding:7px 13px}.accent-control input{width:30px;height:30px;padding:0;border:0;background:none;cursor:pointer}.theme-previews{display:flex;gap:16px;margin:0 0 24px;max-width:600px}.theme-preview{flex:1;background:none;color:var(--text-primary);border:0;font:inherit;cursor:pointer;padding:0}.mock-window{display:flex;border:3px solid transparent;border-radius:8px;height:93px;background:#e5e7ea;padding:9px;gap:9px;box-shadow:inset 0 0 0 1px #8883}.mock-window i{width:25%;background:#c6c9ce;border-radius:3px}.mock-window>span{flex:1;display:flex;flex-direction:column;gap:6px}.mock-window b{height:18px;background:#fafafa;border-radius:3px}.dark .mock-window{background:#27282e}.dark .mock-window i{background:#373941}.dark .mock-window b{background:#42454f}.system .mock-window{background:linear-gradient(110deg,#27282e 50%,#e5e7ea 50%)}.chosen .mock-window{border-color:var(--accent)}.theme-preview>span:last-child{display:flex;justify-content:center;align-items:center;gap:9px;margin-top:10px;font-size:12px}.settings-footnote{font-size:11px;color:var(--text-tertiary);margin-top:20px}.eq-presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}.equalizer-panel{display:flex;justify-content:space-between;gap:12px;padding:32px 24px;border-radius:8px;background:var(--bg-panel)}.equalizer-panel>div{display:flex;flex:1;flex-direction:column;align-items:center;gap:20px}.equalizer-panel input{writing-mode:vertical-lr;direction:rtl;height:190px;width:20px;accent-color:var(--accent)}.equalizer-panel output{font-size:14px}.equalizer-panel small,.equalizer-panel span{font-size:10px;color:var(--text-secondary)}.lyric-preview{padding:36px;margin-top:18px;display:flex;flex-direction:column;gap:18px;border-radius:8px;background:var(--bg-panel)}.lyric-preview>span{opacity:.25}.lyric-preview strong{font-weight:600}.lyric-preview small{font-size:.45em;opacity:.55}.data-actions{display:flex;gap:12px;margin-top:24px}.about-mark{display:flex;gap:25px;align-items:center;margin:44px 0}.about-mark>span{display:grid;place-items:center;font:italic 600 54px Georgia;color:white;width:88px;height:88px;border-radius:24px;background:linear-gradient(140deg,#6ebdcc,#7689c9)}.about-mark strong{font-size:28px;font-weight:500}.about-mark p{font-size:12px;color:var(--text-secondary)}
 </style>

@@ -83,10 +83,20 @@ function canvas(size = 32) {
   const rect = (x0, y0, w, h, colour) => {
     for (let y = y0; y < y0 + h; y += 1) for (let x = x0; x < x0 + w; x += 1) set(x, y, colour)
   }
-  const triangle = (x0, y0, w, h, colour) => {
+  /**
+   * A solid triangle inside the box `(x0, y0, w, h)`: a flat edge on one side and
+   * the apex at the vertical middle of the opposite side. `left` mirrors it, which
+   * is what 上一首 needs.
+   *
+   * The row width is driven by the distance from that middle, not by `y` — the
+   * first version here grew the span with `y`, which drew every transport glyph as
+   * an upward ▲ instead of ▶ / ◀.
+   */
+  const triangle = (x0, y0, w, h, colour, left = false) => {
+    const mid = (h - 1) / 2
     for (let y = 0; y < h; y += 1) {
-      const half = Math.round(((y + 0.5) / h) * (w / 2))
-      for (let x = w / 2 - half; x < w / 2 + half; x += 1) set(x0 + Math.round(x), y0 + y, colour)
+      const reach = mid === 0 ? w - 1 : Math.round((w - 1) * (1 - Math.abs(y - mid) / mid))
+      for (let x = 0; x <= reach; x += 1) set(left ? x0 + w - 1 - x : x0 + x, y0 + y, colour)
     }
   }
   const rounded = (radius, colour) => {
@@ -115,7 +125,7 @@ const glyphs = {
   },
   previous: (c) => {
     c.rect(8, 7, 3, 18, WHITE)
-    c.triangle(13, 7, 12, 18, WHITE)
+    c.triangle(13, 7, 12, 18, WHITE, true)
   },
   next: (c) => {
     c.triangle(8, 7, 12, 18, WHITE)

@@ -37,7 +37,11 @@ export function createLocalSearchIndex(tracks: LocalMusicInfo[]): (query: string
     const terms = needle.split(/\s+/)
     // Only a plain ASCII-letter query is treated as pinyin: `dj` should look for a
     // song called DJ *and* for 东北, but `105` must not be read as a syllable.
-    const asPinyin = /^[a-z]+$/.test(needle) ? needle.replace(/\s+/g, '') : null
+    // Strip the whitespace *before* that test — `zhou jie` is the same initials
+    // query as `zhoujie`, and testing the unstripped needle meant the spaced form
+    // never reached the pinyin index at all.
+    const pinyinQuery = needle.replace(/\s+/g, '')
+    const asPinyin = /^[a-z]+$/.test(pinyinQuery) ? pinyinQuery : null
     return entries
       .filter(entry => {
         if (terms.every(term => entry.text.includes(term))) return true

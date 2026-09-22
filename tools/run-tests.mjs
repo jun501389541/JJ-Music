@@ -4,10 +4,11 @@
  * The suites import the *compiled* engine (see `tools/build-test.mjs`), so they
  * exercise the same code the app ships rather than a parallel implementation.
  *
- * Usage: node tools/run-tests.mjs
+ * Usage: node tools/run-tests.mjs [--online]
+ *        `--online` runs only the suites that reach the live lyric endpoints.
  */
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,9 +43,7 @@ function stageSuites() {
   mkdirSync(outDir, { recursive: true })
   const suites = readdirSync(srcTestDir).filter((name) => name.endsWith('.test.mts'))
   for (const name of suites) {
-    const target = join(outDir, name.replace(/\.mts$/, '.mjs'))
-    copyFileSync(join(srcTestDir, name), target)
-    renameSync(target, target)
+    copyFileSync(join(srcTestDir, name), join(outDir, name.replace(/\.mts$/, '.mjs')))
   }
   return suites.map((name) => name.replace(/\.mts$/, '.mjs'))
 }
@@ -58,9 +57,19 @@ buildEngine()
 
 const staged = stageSuites()
 // Live endpoint checks are separate from the repeatable regression run.
-const suites = online
-  ? staged.filter((name) => ['lyrics-search.test.mjs', 'lyrics-tags.test.mjs'].includes(name))
-  : staged
+const ONLINE_SUITES = ['lyrics-search.test.mjs', 'lyrics-tags.test.mjs']
+const suites = online ? staged.filter((name) => ONLINE_SUITES.includes(name)) : staged
+// An empty run is a green run by the arithmetic below, which is the one outcome
+// a gate must never produce: rename a live suite and `--online` would report
+// success having executed nothing.
+const missing = online ? ONLINE_SUITES.filter((name) => !suites.includes(name)) : []
+if (missing.length || suites.length === 0) {
+  console.error(
+    `没有可跑的套件不等于通过。选中 ${suites.length} 个` +
+      (missing.length ? `，--online 预期却没有 ${missing.join(', ')}` : '')
+  )
+  process.exit(1)
+}
 console.log(`staged ${suites.length} suite(s): ${suites.join(', ')}`)
 
 const results = []

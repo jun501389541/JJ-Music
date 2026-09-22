@@ -24,35 +24,95 @@ const toast = useToastStore()
  * remembers both hits and misses, so a second visit to this page is free.
  */
 const portraits = ref<Record<string, string>>({})
-const queue: string[] = []
-const queued = new Set<string>()
+
+/** What a lookup concluded. The distinction only matters to the refresh toast. */
+type PortraitResult = 'found' | 'none' | 'failed'
+
+interface PortraitJob {
+  name: string
+  refresh: boolean
+  /** False while it still only sits in `queue` — see `ask`. */
+  started: boolean
+  done: Promise<PortraitResult>
+  settle: (result: PortraitResult) => void
+}
+
+const queue: PortraitJob[] = []
+/** Names with a lookup queued or running, so a busy grid queues one job per name. */
+const jobs = new Map<string, PortraitJob>()
 let activeLookups = 0
+/** Set on unmount: a prefetch queue must not outlive the page that filled it. */
+let disposed = false
 const MAX_PARALLEL_LOOKUPS = 2
 
-function ask(name: string, refresh = false): void {
-  if (!name || (queued.has(name) && !refresh)) return
-  queued.add(name)
-  if (refresh) void lookup(name, true)
-  else { queue.push(name); pump() }
+/**
+ * Queue one lookup, joining the job already pending for this name.
+ *
+ * The manual refresh goes through the same limiter as the scroll-triggered ones:
+ * clicking 「更新网络头像」 is not a licence to run searches without bound. But it
+ * also cannot be made to wait behind them: scrolling a few-hundred-artist grid to
+ * the bottom queues hundreds of lazy prefetches, two of which run at a time, so
+ * a refresh pushed to the back of that queue would sit there for minutes. A
+ * refresh therefore takes the head of the queue, and if a lookup for that name
+ * has already started it is re-queued once that one settles — the in-flight pass
+ * may be answering from the cache, and reporting 「已更新」 with the old portrait
+ * is worse than taking a second trip.
+ */
+function ask(name: string, refresh = false): Promise<PortraitResult> {
+  if (!name) return Promise.resolve('failed')
+  const pending = jobs.get(name)
+  if (pending) {
+    if (!refresh) return pending.done
+    if (pending.started) return pending.done.then(() => ask(name, true))
+    pending.refresh = true
+    const queued = queue.indexOf(pending)
+    if (queued > 0) {
+      queue.splice(queued, 1)
+      queue.unshift(pending)
+    }
+    return pending.done
+  }
+  let settle!: (result: PortraitResult) => void
+  const done = new Promise<PortraitResult>((resolve) => {
+    settle = resolve
+  })
+  const job: PortraitJob = { name, refresh, started: false, done, settle }
+  jobs.set(name, job)
+  if (refresh) queue.unshift(job)
+  else queue.push(job)
+  pump()
+  return done
 }
 
 function pump(): void {
-  while (activeLookups < MAX_PARALLEL_LOOKUPS && queue.length) {
-    const name = queue.shift()!
+  while (!disposed && activeLookups < MAX_PARALLEL_LOOKUPS && queue.length) {
+    const job = queue.shift()!
+    job.started = true
     activeLookups++
-    void lookup(name, false).finally(() => { activeLookups--; pump() })
+    void run(job).finally(() => {
+      activeLookups--
+      pump()
+    })
   }
 }
 
-async function lookup(name: string, refresh: boolean): Promise<void> {
+async function run(job: PortraitJob): Promise<void> {
+  let result: PortraitResult = 'failed'
   try {
-    const path = await window.jj.artists.image(name, refresh)
-    if (path) portraits.value = { ...portraits.value, [name]: toMediaUrl(path) }
-    else if (refresh) delete portraits.value[name]
+    const path = await window.jj.artists.image(job.name, job.refresh)
+    if (path) {
+      portraits.value = { ...portraits.value, [job.name]: toMediaUrl(path) }
+      result = 'found'
+    } else {
+      if (job.refresh) delete portraits.value[job.name]
+      result = 'none'
+    }
   } catch {
-    /* no portrait is the normal outcome for a obscure tag spelling */
+    // A lookup that could not finish says nothing about whether a portrait
+    // exists, which is why it is not the same outcome as `none`.
   } finally {
-    queued.delete(name)
+    jobs.delete(job.name)
+    job.settle(result)
   }
 }
 
@@ -76,12 +136,20 @@ function observeCard(element: Element | ComponentPublicInstance | null): void {
   observed.add(element)
   observer.observe(element)
 }
-onBeforeUnmount(() => observer.disconnect())
+onBeforeUnmount(() => {
+  disposed = true
+  observer.disconnect()
+  // Settle what never started, so a refresh awaiting its own queued job is not
+  // left hanging on a page that is gone.
+  for (const job of queue.splice(0, queue.length)) job.settle('failed')
+})
 async function refreshPortrait(): Promise<void> {
   const name = selectedArtist.value?.name
   if (!name) return
-  await lookup(name, true)
-  toast.success(portraits.value[name] ? '已更新网络头像' : '各平台都没有匹配到这位艺术家的头像')
+  const result = await ask(name, true)
+  if (result === 'found') toast.success('已更新网络头像')
+  else if (result === 'none') toast.info('各平台都没有匹配到这位艺术家的头像')
+  else toast.error('头像查询失败，可能是网络或平台没有响应')
 }
 
 const route = useRoute()

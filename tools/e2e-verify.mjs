@@ -183,8 +183,23 @@ console.log('='.repeat(72))
  * Isolated profile
  * ------------------------------------------------------------------ */
 
-const realDataDir = join(process.env.APPDATA ?? '', 'jj-music')
-const PROFILE_FILES = ['settings.json', 'playlists.json', 'library/index.json']
+const appData = process.env.APPDATA
+if (!appData) {
+  console.error('APPDATA 没有设置：这次运行既找不到开发者的数据目录可以复制，也就无法证明自己没有写它。')
+  process.exit(1)
+}
+const realDataDir = join(appData, 'jj-music')
+// Only the stores this app writes itself. Chromium's cache subtrees are excluded
+// because a second running instance churns them constantly, and a check that
+// fails on noise is a check that gets ignored.
+const PROFILE_FILES = [
+  'settings.json',
+  'playlists.json',
+  'library/index.json',
+  'downloads.json',
+  'pending-assets.json',
+  'artist-images.json'
+]
 
 /**
  * Identity of the developer's own data, used to prove the run leaves it alone.
@@ -221,12 +236,20 @@ function createIsolatedProfile() {
   }
   // Cover paths inside the copied JSON must point at the copy, or the app reads
   // — and on repair, writes — the developer's originals.
+  const prefixes = [`${realDataDir}\\`, `${realDataDir}/`]
   for (const name of PROFILE_FILES) {
     const file = join(dir, name)
     if (!existsSync(file)) continue
-    const data = JSON.parse(readFileSync(file, 'utf8'), (_key, value) =>
-      typeof value === 'string' && value.startsWith(`${realDataDir}\\`)
-        ? dir + value.slice(realDataDir.length) : value)
+    const data = JSON.parse(readFileSync(file, 'utf8'), (_key, value) => {
+      if (typeof value !== 'string') return value
+      // Either separator, matched case-insensitively: the app writes backslashes,
+      // but an imported path can carry forward slashes, and Windows treats the
+      // directory name's case as noise. One missed prefix is enough for the
+      // "isolated" run to repair the real library.
+      const lower = value.toLowerCase()
+      const prefix = prefixes.find((candidate) => lower.startsWith(candidate.toLowerCase()))
+      return prefix ? dir + value.slice(prefix.length - 1) : value
+    })
     writeFileSync(file, JSON.stringify(data))
   }
   return dir
@@ -234,6 +257,8 @@ function createIsolatedProfile() {
 
 const keepProfile = process.argv.includes('--keep-profile')
 const profileBefore = fingerprintRealProfile()
+/** How much of the developer's data there was to compare — an empty set passes vacuously. */
+const profileCompared = PROFILE_FILES.filter((name) => existsSync(join(realDataDir, name))).length
 const profileDir = createIsolatedProfile()
 console.log(`隔离 profile: ${profileDir}`)
 
@@ -775,7 +800,9 @@ try {
 check(
   '真实 profile 未被写入',
   fingerprintRealProfile() === profileBefore,
-  `对比项: ${PROFILE_FILES.join(', ')}`
+  profileCompared
+    ? `对比 ${profileCompared} 个文件: ${PROFILE_FILES.join(', ')}`
+    : `开发者的 ${realDataDir} 里一个待比对文件都没有，这项没有可比对的内容`
 )
 
 if (keepProfile) console.log(`保留隔离 profile: ${profileDir}`)

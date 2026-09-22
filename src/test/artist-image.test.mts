@@ -151,15 +151,63 @@ test('头像按名字落盘、记住命中也记住没命中，刷新才会再�
   await rm(missed.dir, { recursive: true, force: true })
 })
 
+test('四家平台全都答不上时抛错，而不是把故障写成"这位歌手没有头像"', async () => {
+  const seen = []
+  const http = async (url) => {
+    seen.push(String(url))
+    throw new Error('connect timeout')
+  }
+  await assert.rejects(() => resolveArtistImage('周杰伦', http), /connect timeout/)
+  assert.equal(seen.length, 4, '每家都问过了才叫没答上')
+
+  // 只要有一家真的答了，"没有"就是可信结论而不是故障。
+  const partly = async (url) => (String(url).includes('migu.cn')
+    ? Promise.reject(new Error('connect timeout'))
+    : new Response(JSON.stringify({ data: { song: { list: [] } } })))
+  assert.equal(await resolveArtistImage('周杰伦', partly), null)
+})
+
+test('查询失败的头像不会记成永久未命中，网络恢复后还能拿到', async () => {
+  let attempts = 0
+  const { dir, store } = await setup({
+    fetch: async () => {
+      attempts += 1
+      // 前四次：四家平台各问一次，全都连不上。
+      if (attempts <= 4) throw new Error('connect timeout')
+      return new Response(JSON.stringify({ data: { song: { list: [{ singer: [{ mid: 'm7', name: '周杰伦' }] }] } } }))
+    },
+    getBytes: async () => ({ body: Buffer.from('x'), contentType: 'image/jpeg' })
+  })
+  await assert.rejects(() => store.image('周杰伦'), /connect timeout/)
+  assert.equal(attempts, 4)
+  assert.equal(store.peek('周杰伦'), undefined, '失败的那次不能留下"没头像"的记录')
+
+  const path = await store.image('周杰伦')
+  assert.equal(typeof path, 'string')
+  assert.equal(store.peek('周杰伦'), path)
+  await rm(dir, { recursive: true, force: true })
+})
+
 test('指向已被删除文件的头像记录作废，而不是继续返回死路径', async () => {
-  const { dir, store } = await setup({ fetch: async () => new Response(JSON.stringify({ data: { song: { list: [] } } })), getBytes: async () => ({ body: Buffer.from(''), contentType: '' }) })
+  // `reloaded` needs the same fakes as the first store: it re-resolves, and a
+  // missing `fetch` there used to send this suite out to the real platforms —
+  // which passed or failed depending on what 周杰伦 happened to have that day.
+  let answered = 0
+  const fetchNone = async () => {
+    answered += 1
+    return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+  }
+  const getBytes = async () => ({ body: Buffer.from(''), contentType: '' })
+  const { dir, store } = await setup({ fetch: fetchNone, getBytes })
   const gone = join(dir, 'covers', 'deleted.jpg')
   await store.image('周杰伦')
   writeFileSync(join(dir, 'artist-images.json'), JSON.stringify({ '周杰伦': { path: gone, source: 'tx', at: 1 } }))
-  const reloaded = new ArtistImageStore(dir, { saveCover: async () => undefined })
+  const reloaded = new ArtistImageStore(dir, { saveCover: async () => undefined, fetch: fetchNone, getBytes })
   await reloaded.load()
   assert.equal(reloaded.peek('周杰伦'), undefined, '这条记录等于没查过')
+  const before = answered
   assert.equal(await reloaded.image('周杰伦'), null, '重新解析而不是把死路径交出去')
+  assert.ok(answered > before, '作废之后确实重新问过平台')
   await rm(dir, { recursive: true, force: true })
 })
 

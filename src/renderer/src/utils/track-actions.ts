@@ -1,4 +1,5 @@
 import { isLocalTrack, LX_QUALITIES, QUALITY_LABELS, type LocalMusicInfo, type OnlineMusicInfo, type PlayableTrack } from '@shared/types'
+import type { AssetExportResult } from '@shared/library-types'
 import { DESKTOP_LYRIC_FONTS } from '@shared/desktop-lyric'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { usePlayerStore } from '../stores/player'
@@ -50,14 +51,29 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
         label: locals.length > 1 ? `写入封面与歌词（${locals.length} 首）` : '写入封面与歌词',
         icon: 'download',
         action: async () => {
-          const results = await window.jj.assets.export(locals.map((item) => item.id))
-          const done = results.filter((item) => item.written)
-          const notes = [...new Set(results.map((item) => item.note))]
-          if (done.length) await library.refreshLibrary()
-          // The note already names the destination, so the count and it are the
-          // whole message; the rest goes on a second clause rather than being dropped.
-          if (done.length) toast.success(`${done.length} 首${notes[0]}${notes.length > 1 ? `；${notes.slice(1).join('、')}` : ''}`)
-          else toast.info(notes[0] ?? '没有需要写入的内容')
+          let results: AssetExportResult[]
+          try {
+            results = await window.jj.assets.export(locals.map((item) => item.id))
+          } catch (error) {
+            // The main process caps and rejects the id list, so a menu click can
+            // fail outright; without this the toast never appears and the user
+            // has no way to know nothing was written.
+            toast.error(error instanceof Error ? error.message : '写入失败')
+            return
+          }
+          const written = results.filter((item) => item.written)
+          const skipped = results.filter((item) => !item.written)
+          if (written.length) await library.refreshLibrary()
+          // Counted per note and split by outcome: the note already names the
+          // destination, so a 「未写入」 line must not end up describing the
+          // tracks that were written — nor the reverse.
+          const tally = (items: Array<{ note: string }>) => {
+            const counts = new Map<string, number>()
+            for (const item of items) counts.set(item.note, (counts.get(item.note) ?? 0) + 1)
+            return [...counts].map(([note, count]) => `${count} 首${note}`).join('；')
+          }
+          if (written.length) toast.success(tally(written) + (skipped.length ? `；${tally(skipped)}` : ''))
+          else toast.info(tally(skipped) || '没有需要写入的内容')
         }
       }
     ] }] : []),

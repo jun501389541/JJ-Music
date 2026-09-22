@@ -21,7 +21,7 @@
  */
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { PendingAsset } from '@shared/types'
+import type { AssetKind, PendingAsset } from '@shared/types'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 
 /** One entry per track and kind, so a re-fetch replaces what it staged. */
@@ -37,6 +37,15 @@ export function pendingKey(trackId: string, kind: PendingAsset['kind']): string 
  * lyric for a song that has not been played since is not going to be written.
  */
 const MAX_ENTRIES = 500
+
+/**
+ * How much lyric text the whole queue may hold, whatever the entry count.
+ *
+ * `MAX_ENTRIES` alone does not bound the file: 500 entries at the per-lyric
+ * ceiling is a hundred megabytes, and `persist()` rewrites the entire file on
+ * every single add — so the cap that matters is the aggregate, not the count.
+ */
+const MAX_TOTAL_CHARS = 2_000_000
 
 /** A lyric longer than this is not a lyric; refuse to store it rather than grow. */
 const MAX_LYRIC_CHARS = 200_000
@@ -82,19 +91,20 @@ export class PendingAssetStore {
     await this.trimAndPersist()
   }
 
-  async remove(trackIds: string[], kind?: PendingAsset['kind']): Promise<number> {
+  /**
+   * Forget whatever the queue holds for these kinds of one track.
+   *
+   * Keyed, not scanned: the caller has just written the asset into a file, so
+   * the entries to forget are exactly this track's. Deleting by key also cannot
+   * sweep away a second entry that was staged while the write was running — that
+   * one is still pending, and the next 全部写入 must still see it.
+   */
+  async dropFor(trackId: string, kinds: AssetKind[]): Promise<number> {
     await this.load()
-    const wanted = new Set(trackIds)
-    let removed = 0
-    for (const key of [...this.items.keys()]) {
-      const entry = this.items.get(key)
-      if (!entry || !wanted.has(entry.trackId)) continue
-      if (kind && entry.kind !== kind) continue
-      this.items.delete(key)
-      removed += 1
-    }
-    if (removed) await this.persist()
-    return removed
+    let dropped = 0
+    for (const kind of kinds) if (this.items.delete(pendingKey(trackId, kind))) dropped += 1
+    if (dropped) await this.persist()
+    return dropped
   }
 
   /**
@@ -104,7 +114,7 @@ export class PendingAssetStore {
    * of three hundred tracks is three hundred rewrites of the same file.
    */
   async removeEntries(entries: PendingAsset[]): Promise<void> {
-    if (entries.length === 0) return
+    if (!Array.isArray(entries) || entries.length === 0) return
     await this.load()
     for (const entry of entries) this.items.delete(pendingKey(entry.trackId, entry.kind))
     await this.persist()
@@ -117,13 +127,14 @@ export class PendingAssetStore {
     await this.persist()
   }
 
-  /** Drop the oldest entries past the cap, then write. */
+  /** Drop the oldest entries past either cap, then write. */
   private async trimAndPersist(): Promise<void> {
-    if (this.items.size > MAX_ENTRIES) {
-      const oldest = [...this.items.values()]
-        .sort((a, b) => a.at - b.at)
-        .slice(0, this.items.size - MAX_ENTRIES)
-      for (const entry of oldest) this.items.delete(pendingKey(entry.trackId, entry.kind))
+    const ordered = [...this.items.values()].sort((a, b) => a.at - b.at)
+    let total = ordered.reduce((sum, entry) => sum + (entry.lyric?.length ?? 0), 0)
+    for (const entry of ordered) {
+      if (this.items.size <= MAX_ENTRIES && total <= MAX_TOTAL_CHARS) break
+      this.items.delete(pendingKey(entry.trackId, entry.kind))
+      total -= entry.lyric?.length ?? 0
     }
     await this.persist()
   }

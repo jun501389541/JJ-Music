@@ -650,6 +650,15 @@ export interface DownloadTask {
    */
   etag?: string
   lastModified?: string
+  /**
+   * The whole-file length the first response reported, kept across retries.
+   *
+   * `If-Range` is what notices a rotated remote file, but some relays send no
+   * ETag and no Last-Modified at all. For those the length is the only signal
+   * left, so a resumed segment is checked against this instead of against
+   * `total`, which is per-attempt progress and is cleared on 重试.
+   */
+  remoteSize?: number
   path?: string
   error?: string
   warnings: string[]

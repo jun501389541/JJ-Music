@@ -115,7 +115,14 @@
   --divider: rgba(0, 0, 0, 0.06);
 
   --accent-soft: rgba(76, 194, 255, 0.18);
-  --accent-text: #ffffff;
+  /*
+   * No `--accent-text` here on purpose. The light theme does not redefine
+   * `--accent` — it stays #4cc2ff — so white ink on it was ~2:1, and every
+   * `.btn--primary` went hard to read in light mode. The token inherits the dark
+   * ink from `:root`, which is also what `applyAccent()` derives at runtime from
+   * the accent's own lightness (cover art can be any colour, so that derivation
+   * is what the static value has to agree with).
+   */
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);

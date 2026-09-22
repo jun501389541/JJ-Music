@@ -15,6 +15,17 @@ const router = useRouter()
 const creating = ref(false)
 const newName = ref('')
 
+/**
+ * Cover files live outside the playlist record, so a picture can be deleted (the
+ * 清空封面 caches action does exactly that) while `coverPath` still points at it.
+ * `<img>` would then paint the browser's broken glyph, which is not this app's
+ * placeholder; keyed on the path so picking a new cover clears the flag.
+ */
+const brokenCovers = ref<Record<string, boolean>>({})
+function markCoverBroken(path?: string | null): void {
+  if (path) brokenCovers.value[path] = true
+}
+
 async function create(): Promise<void> {
   const name = newName.value.trim()
   if (!name) return
@@ -73,7 +84,7 @@ async function remove(id: string, name: string): Promise<void> {
       >
         <button class="plcard__body" type="button" @click="router.push(`/playlist/${list.id}`)">
           <span class="plcard__art">
-            <img v-if="list.coverPath" :src="toMediaUrl(list.coverPath)" alt="" loading="lazy" />
+            <img v-if="list.coverPath && !brokenCovers[list.coverPath]" :src="toMediaUrl(list.coverPath)" alt="" loading="lazy" @error="markCoverBroken(list.coverPath)" />
             <svg v-else width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path
                 d="M4 6h16M4 12h16M4 18h10"

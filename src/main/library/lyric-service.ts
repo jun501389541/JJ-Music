@@ -15,18 +15,26 @@
  * Manual edits are stored as a sidecar, which then wins by rule 1. That gives
  * the user a way to override any source without a separate "pinned" concept.
  */
-import { readFile, stat, writeFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
-import type { AssetRef, LyricResult, LocalMusicInfo, OnlineLyricSource, OnlineMusicInfo, SourceId } from '@shared/types'
-import { ONLINE_LYRIC_SOURCES } from '@shared/types'
+import type { AssetRef, LyricResult, LocalMusicInfo, OnlineLyricSource, OnlineMusicInfo } from '@shared/types'
+import { ONLINE_LYRIC_SOURCES, ONLINE_SOURCE_IDS } from '@shared/types'
 import type { ResolvedLyric, LyricCandidate } from '@shared/library-types'
 import { readEmbeddedLyric } from '../library/embedded-lyrics'
 import { sidecarPathFor } from './asset-files'
 import { fetchOnlineLyric } from '../online/lyrics'
 import { matchMetadata } from '../library/metadata-match'
-import { stripBom } from '../store/json-file'
+import { stripBom, writeFileAtomic } from '../store/json-file'
 
 export type { ResolvedLyric }
+
+/**
+ * Order in which the "match a lyric on another platform" fallback asks.
+ *
+ * A priority, not the set of platforms: anything in `ONLINE_SOURCE_IDS` that is
+ * missing here is still tried, just last.
+ */
+const LYRIC_FALLBACK_PRIORITY: readonly string[] = ['tx', 'wy', 'kw', 'kg', 'mg']
 
 /* ------------------------------------------------------------------ *
  * Online lyric sources
@@ -104,7 +112,12 @@ export async function lyricFromOtherPlatforms(
     albumName: music.albumName ?? '',
     duration
   } as LocalMusicInfo
-  const others: SourceId[] = (['tx', 'wy', 'kw', 'kg', 'mg'] as SourceId[]).filter((source) => source !== music.source)
+  // Which platform to ask first is a deliberate order (QQ's lyric library is the
+  // largest, so it wins most ties), but the list of platforms to ask at all is
+  // `ONLINE_SOURCE_IDS`' job — a platform added to the search adapters must not
+  // be skipped here just because nobody remembered to edit a second table.
+  const ranked = [...LYRIC_FALLBACK_PRIORITY, ...ONLINE_SOURCE_IDS.filter((source) => !LYRIC_FALLBACK_PRIORITY.includes(source))]
+  const others = ranked.filter((source) => source !== music.source)
 
   let matches
   try {
@@ -399,7 +412,8 @@ export async function lyricCandidates(
 export async function saveSidecar(audioPath: string, lyric: string): Promise<string> {
   const target = sidecarPathFor(audioPath)
   // UTF-8 with no BOM: the most widely compatible choice for .lrc consumers.
-  await writeFile(target, lyric.replace(/\r\n/g, '\n'), 'utf8')
+  // Atomic, because a half-written sidecar beats the intact embedded lyric.
+  await writeFileAtomic(target, lyric.replace(/\r\n/g, '\n'))
   return target
 }
 

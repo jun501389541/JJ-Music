@@ -68,6 +68,9 @@ function absoluteMgImage(value: string): string {
  * search host sometimes stalls for the full connect timeout, and a single shared
  * signal would let that one hang end the whole chain — so every artist would come
  * back with no portrait because of the first platform that was asked.
+ *
+ * `null` therefore means "someone answered and had no photo", never "nothing
+ * could be reached": when every platform threw, the last error is thrown instead.
  */
 export async function resolveArtistImage(
   name: string,
@@ -171,14 +174,23 @@ export async function resolveArtistImage(
     }
   ]
 
+  let answered = 0
+  let lastError: unknown
   for (const lookup of lookups) {
     if (!allowed.includes(lookup.source)) continue
     try {
       const found = await lookup.find()
+      answered++
       if (found) return found
-    } catch {
+    } catch (error) {
+      lastError = error
       // 这一家没答上，换下一家。
     }
   }
+  // 一家都没答上时，"这位歌手没有头像"是无从得知的——断网和真没照片是两回事。
+  //  Returning `null` for both would let the caller cache the outage as a
+  //  permanent miss, so a fully failed chain throws and only a completed lookup
+  //  ends up as an answer either way.
+  if (!answered && lastError) throw lastError
   return null
 }

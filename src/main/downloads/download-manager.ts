@@ -147,6 +147,11 @@ export class DownloadManager {
       if (resolved.quality !== task.quality) throw Error('音源未返回所选音质')
       if (!/^https?:\/\//i.test(resolved.url)) throw Error('音频地址无效')
       temp=join(folder, `.jj-${task.id}.part`)
+      // From here on the bytes already on disk are worth keeping. Setting this
+      // only after the body was opened meant the common failures — no route, a
+      // timeout, a 403 from the relay — ran the cleanup below and deleted the
+      // very part this task had just resumed from, so 重试 started over at 0.
+      keepPart = true
       const headers: Record<string, string> = {}
       // How much of *this* task is already on disk. The file is named after the
       // task id, so a leftover can only ever belong to this same song and quality.
@@ -165,7 +170,30 @@ export class DownloadManager {
       task.status='downloading'
       // A 206 is the only answer that means "here is the rest of the file". Anything
       // else — including a 200 that ignored the Range — is a full body from byte 0.
-      const resuming = offset > 0 && response.status === 206
+      let resuming = offset > 0 && response.status === 206
+      if (resuming) {
+        const range = /^bytes\s+(\d+)-(\d+)\/(\d+)\s*$/i.exec(response.headers.get('content-range') ?? '')
+        // A 206 that does not say which segment it is gets no trust either.
+        const start = range ? Number(range[1]) : Number.NaN
+        const whole = range ? Number(range[3]) : Number.NaN
+        const startsWhereAsked = start === offset
+        // …and it has to be *our* file. With an `If-Range` the server checks the
+        // validator itself and answers 200 when the copy changed. Without one
+        // (some relays send no ETag), the length is the only signal left, so the
+        // total in this response must be the one the first attempt reported.
+        const stillTheSameFile = Number.isFinite(whole) && (task.etag || task.lastModified || !task.remoteSize
+          ? true
+          : whole === task.remoteSize)
+        if (!startsWhereAsked || !stillTheSameFile) {
+          // Appending a segment we did not ask for, or one from a different
+          // version of the song, is what produces a file that plays but is wrong.
+          await response.body?.cancel?.()
+          await rm(temp, { force: true }).catch(() => undefined)
+          keepPart = false
+          temp = ''
+          throw Error('服务器返回的分段与已下载内容对不上，重试会重新下载整份文件')
+        }
+      }
       if (offset > 0 && !resuming) offset = 0
       task.etag = response.headers.get('etag') ?? undefined
       task.lastModified = response.headers.get('last-modified') ?? undefined
@@ -175,8 +203,10 @@ export class DownloadManager {
       // `content-length` on a 206 counts only what is still coming, so the total has
       // to come from `content-range`; on a 200 the two are the same number.
       task.total = resuming ? fullLength : (fullLength ? fullLength + offset : undefined)
+      // Remembered for the next attempt's `stillTheSameFile` check, and not
+      // cleared by `retry()` — it describes the remote object, not this attempt.
+      if (fullLength) task.remoteSize = fullLength
       const file=await open(temp, resuming ? 'a' : 'w')
-      keepPart = true
       try {
         for await (const chunk of response.body) {
           signal.throwIfAborted()

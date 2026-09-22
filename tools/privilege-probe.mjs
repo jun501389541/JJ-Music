@@ -16,6 +16,7 @@ if (!outFile) {
 }
 
 let privileges = []
+let privilegeError = null
 try {
   const out = execFileSync('whoami', ['/priv'], { encoding: 'utf8' })
   privileges = out
@@ -24,7 +25,9 @@ try {
     .map((line) => line.trim().split(/\s{2,}/)[0])
     .filter(Boolean)
 } catch (error) {
-  privileges = [`error: ${error.message.slice(0, 80)}`]
+  // Kept out of the list: a row in the report that reads `error: …` is a row a
+  // later comparison would count as a privilege the token holds.
+  privilegeError = error.message.slice(0, 120)
 }
 
 const integrity = (() => {
@@ -37,10 +40,19 @@ const integrity = (() => {
   }
 })()
 
-writeFileSync(
-  outFile,
-  JSON.stringify({ integrity, privileges, pid: process.pid, at: new Date().toISOString() }, null, 2)
-)
+const report = { integrity, privileges, pid: process.pid, at: new Date().toISOString() }
+if (privilegeError) report.privilegeError = privilegeError
+try {
+  writeFileSync(outFile, JSON.stringify(report, null, 2))
+} catch (error) {
+  // Writing the report is itself a capability, and a restricted token can be
+  // denied it — which is the result worth keeping, so it goes to stdout too
+  // rather than dying in a stack trace that loses the measurement.
+  console.error(`无法写入 ${outFile}: ${error.code ?? error.message}`)
+  console.log(JSON.stringify(report, null, 2))
+  process.exit(1)
+}
 console.log(`integrity: ${integrity}`)
+if (privilegeError) console.log(`whoami /priv 失败: ${privilegeError}`)
 console.log(`privileges (${privileges.length}):`)
 for (const p of privileges) console.log('  ', p)

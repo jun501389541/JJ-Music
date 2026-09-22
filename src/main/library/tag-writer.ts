@@ -13,7 +13,10 @@
  * about what it supports:
  *
  *   - **MP3 / ID3v2** — full write support via `node-id3` (title, artist,
- *     album, year, track, genre, cover, USLT and SYLT lyrics).
+ *     album, year, track, genre, cover, and lyrics as a `USLT` text frame).
+ *     `SYLT` is deliberately *not* written: the library appends that frame
+ *     instead of replacing it, so a second timed write would leave the old one
+ *     winning on read — see `writeMp3`.
  *   - **FLAC** — implemented directly here for the fields we need, writing the
  *     Vorbis comment block and the picture block. The rewrite preserves every
  *     audio frame and only replaces those two blocks.
@@ -57,10 +60,17 @@ export const WRITABLE_TAG_FORMATS = ['.mp3', '.flac']
  */
 export function canWriteTags(filePath: string, allowed: string[] = WRITABLE_TAG_FORMATS): boolean {
   const ext = extname(filePath).toLowerCase()
-  const normalised = Array.isArray(allowed)
-    ? allowed.filter((item) => typeof item === 'string').map((item) => (item.startsWith('.') ? item : `.${item}`).toLowerCase())
-    : []
-  return WRITABLE_TAG_FORMATS.includes(ext) && normalised.includes(ext)
+  if (!WRITABLE_TAG_FORMATS.includes(ext)) return false
+  if (!Array.isArray(allowed)) return false
+  // A set, because `allowed` is renderer-supplied: normalising it per call would
+  // make a bulk write over a library quadratic in the size of a list this app
+  // never bounds. Entries the user cannot write are dropped here either way.
+  const normalised = new Set<string>()
+  for (const item of allowed) {
+    if (typeof item !== 'string') continue
+    normalised.add((item.startsWith('.') ? item : `.${item}`).toLowerCase())
+  }
+  return normalised.has(ext)
 }
 
 /** A line-start LRC timestamp, which is all the exporter needs to know. */

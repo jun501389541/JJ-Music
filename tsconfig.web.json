@@ -22,6 +22,15 @@
     "moduleResolution": "Bundler",
     "target": "ES2022",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    /*
+     * An explicit allow-list, because without `types` every package under
+     * `node_modules/@types` is pulled into the renderer program — including
+     * `@types/node`, which lets `process`, `Buffer` or `require` typecheck in
+     * code that runs in a sandboxed window where they do not exist. A typo then
+     * compiles clean and fails at runtime, which is the one class of mistake the
+     * renderer/main split was supposed to catch.
+     */
+    "types": ["vite/client"],
     "jsx": "preserve",
     "baseUrl": ".",
     "paths": {

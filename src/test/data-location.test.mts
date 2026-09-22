@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { join } from 'node:path'
-import { migrationSource, pointerPath, resolveDataDir } from './data-location.js'
+import { migrationSource, pointerPath, relocationProblem, resolveDataDir } from './data-location.js'
 
 const APPDATA = 'C:/Users/me/AppData/Roaming/jj-music'
 const EXE = 'D:/Apps/JJ Music'
@@ -98,4 +98,33 @@ test('the pointer lives beside the exe only when that folder is writable', () =>
   const fallback = pointerPath('C:/Program Files/JJ Music', APPDATA, () => false)
   assert.equal(fallback, join('C:/Users/me/AppData/Roaming', '.jj-music-data-location.json'))
   assert.notEqual(fallback, join(APPDATA, 'data-location.json'), 'not inside the directory being replaced')
+})
+
+test('一个记下的数据目录如果写不进去，就不能被当成数据目录采用', () => {
+  // 路径上留了个同名普通文件、或者那块盘如今只读：光判 exists 会让应用把数据定在那儿，
+  // 之后每一次保存都失败，而且界面上一句解释都没有。
+  const readOnly = pick({ pointer: 'E:/JJ Music Data', writable: path => path !== 'E:/JJ Music Data' })
+  assert.equal(readOnly.source, 'portable', '它还是要起在某个能写的地方')
+  assert.ok(readOnly.notice?.includes('写不进去'), JSON.stringify(readOnly.notice))
+  assert.ok(readOnly.notice?.includes('E:/JJ Music Data'), '并且要说清是哪个位置不行了')
+  // 完全不在，仍然是"不可用"那句，不该说成写不进去。
+  const missing = pick({ pointer: 'E:/JJ Music Data', exists: () => false })
+  assert.ok(missing.notice?.includes('不可用'), JSON.stringify(missing.notice))
+})
+
+test('迁移目标不能与当前数据目录互相包含', () => {
+  // `cp(current, target, {recursive:true})` 是一边走一边写：目标在当前目录里面，
+  // 就会把新建出来的目录再复制进自己，一层层套到路径超长或盘写满为止。
+  assert.equal(relocationProblem('D:/Apps/JJ Music/data', 'D:/Apps/JJ Music', true), 'nested')
+  assert.equal(relocationProblem('D:\\Apps\\JJ Music\\data\\x', 'D:/Apps/JJ Music/', true), 'nested', '分隔符与结尾斜杠都要认')
+  // 反方向同样不行：把数据挪到自己的上级，等于把应用的文件散到那个目录里。
+  assert.equal(relocationProblem('D:/Apps', 'D:/Apps/JJ Music', true), 'nested')
+  // 同一个目录用不同写法（大小写、斜杠、结尾分隔符）仍然是 same。
+  assert.equal(relocationProblem('d:\\apps\\jj music\\', 'D:/Apps/JJ Music', true), 'same')
+  // 只是名字开头相同的兄弟目录必须放过，否则「JJ Music 2」永远挪不动。
+  assert.equal(relocationProblem('D:/Apps/JJ Music 2', 'D:/Apps/JJ Music', true), null)
+  assert.equal(relocationProblem('E:/Data', 'D:/Apps/JJ Music', true), null)
+  // 大小写敏感的文件系统上，只有真正同一个路径才算 same。
+  assert.equal(relocationProblem('/data/JJ', '/data/jj', false), null)
+  assert.equal(relocationProblem('/data/jj/', '/data/jj', false), 'same')
 })

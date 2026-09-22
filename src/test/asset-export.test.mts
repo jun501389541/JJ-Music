@@ -150,6 +150,18 @@ check(
     (previewBefore === null ? !existsSync(sidecarPathFor(wav)) : readFileSync(sidecarPathFor(wav), 'utf8') === previewBefore),
   `${preview.note} / ${existsSync(sidecarPathFor(wav))}`
 )
+// `paths` 是"真的改过的文件"，将来时由 note 表达；调用方靠它决定要不要重读文件、
+// 要不要清掉待写入条目，预览里填上路径就等于让预览去改索引。
+check('预览不列出任何"已改过"的文件', preview.paths.length === 0, JSON.stringify(preview.paths))
+
+// 标题/艺术家这类文本字段只有标签装得下，所以"写入位置=同名文件"也不能让它们静默消失。
+const metaOnly = await exportAssets({ audioPath: wav, patch: { title: '新标题', artist: '新歌手' }, to: ['sidecar'] })
+check(
+  '文本字段仍然会试着走标签那一路，即使设置里只要同名文件',
+  metaOnly.notes.some((n) => n.includes('文本字段未写入')),
+  JSON.stringify(metaOnly.notes)
+)
+check('它一个文件都没改', metaOnly.paths.length === 0 && !metaOnly.embeddedWritten, JSON.stringify(metaOnly.paths))
 
 // Downloads write a staging file; a sidecar must never appear next to it.
 const stageDir = join(scratch, 'stage')
@@ -334,6 +346,9 @@ if (!existsSync(libraryFolder)) {
       writableFormats: ['.mp3']
     })
     const after = await readEmbeddedLyric(copy)
+    // 调用方判断"要不要重读这个文件"用的是 embeddedWritten，不是界面文案；
+    // 文案改一个字就让刷新静默失效，是这轮审查看出来的耦合。
+    check('真的改了标签时 embeddedWritten 为真', wrote.embeddedWritten === true && wrote.paths.join() === copy, JSON.stringify(wrote.paths))
     // The known limit: the tag was written, and the timed frame still wins on
     // read. So the write has to arrive with a warning that says so…
     check('旧的时间轴标签仍然优先被读到（这是已知边界）', (after?.lyric ?? '').includes('旧的时间轴歌词'), JSON.stringify(after?.lyric))

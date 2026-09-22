@@ -28,7 +28,6 @@
  *     for why the per-track name is the one this app creates.
  */
 import { existsSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
 import { extname } from 'node:path'
 import type {
   AssetExportInput,
@@ -39,6 +38,7 @@ import type { AssetRef, AssetWriteTarget, TrackAssets } from '@shared/types'
 import { canWriteTags, lyricHasTimestamps, writeTags } from './tag-writer'
 import { readEmbeddedLyric } from './embedded-lyrics'
 import { coverSidecarPathFor, sidecarPathFor } from './asset-files'
+import { writeFileAtomic } from '../store/json-file'
 import { saveSidecar } from './lyric-service'
 
 const EMBEDDED_LABEL = '文件内嵌'
@@ -66,7 +66,7 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
   const { audioPath, patch } = input
   const targets = input.to?.length ? input.to : DEFAULT_TARGETS
   const assets: TrackAssets = {}
-  const result: AssetExportResult = { written: false, landed: [], paths: [], notes: [], note: '' }
+  const result: AssetExportResult = { written: false, landed: [], paths: [], notes: [], note: '', embeddedWritten: false }
 
   const lyric = patch.lyrics?.trim() ?? ''
   const hasAssetPayload = Boolean(lyric || patch.cover)
@@ -75,19 +75,25 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
 
   // The ceiling is the writer set, intersected with the user's whitelist, so a
   // settings write cannot make the app touch a format it cannot handle.
-  const embedded = targets.includes('embedded') && canWriteTags(targetFile, input.writableFormats)
+  //
+  // Title/artist/album have nowhere else to go, so a patch that carries any of
+  // them always asks for the embedded write even when 写入位置 says 「同名文件」
+  // only: otherwise 标签匹配 from that setting matches the candidate, writes
+  // nothing, and does not even say it did nothing.
+  const wantsEmbedded = targets.includes('embedded') || hasMetadataFields(patch)
+  const embedded = wantsEmbedded && canWriteTags(targetFile, input.writableFormats)
   // `embedded` in the settings means "in the file, and beside it if the file
   // cannot be modified" — the alternative is a button that quietly does nothing
   // for a whole class of files. Except while the caller is writing a staging
   // file: a sidecar belongs next to the *published* track, not in a temp folder.
-  const fallback = !embedded && targets.includes('embedded') && hasAssetPayload && !input.stagingPath
+  const fallback = !embedded && wantsEmbedded && hasAssetPayload && !input.stagingPath
   const sidecar = (targets.includes('sidecar') || fallback) && !input.stagingPath
 
   if (input.stagingPath && targets.includes('sidecar')) {
     result.notes.push('下载文件尚未定名，同目录副本会在保存后写入')
   }
 
-  if (!embedded && targets.includes('embedded')) {
+  if (!embedded && wantsEmbedded) {
     const ext = extname(targetFile).toUpperCase().replace(/^\./, '')
     if (fallback) {
       result.notes.push(`${ext} 不支持写入标签，已改为保存同目录文件`)
@@ -100,12 +106,18 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
   if (embedded) {
     const written = await writeTags(targetFile, patch, {
       dryRun: input.dryRun === true,
-      skipBackup: input.skipBackup === true
+      // Skipping the backup is only safe because the file is a staging copy that
+      // nothing else has open — the download's `.jj-<id>` temp. Honouring the flag
+      // for an in-place write would edit a user's real file with no way back.
+      skipBackup: input.skipBackup === true && Boolean(input.stagingPath)
     })
     if (written.written) {
       result.written = true
+      result.embeddedWritten = true
       result.landed.push(EMBEDDED_LABEL)
-      result.paths.push(targetFile)
+      // `paths` means "files that changed", so a preview reports none — the tense
+      // in `note` is what tells the two apart.
+      if (!input.dryRun) result.paths.push(targetFile)
       if (written.note) result.notes.push(written.note)
       if (written.backupPath) result.backupPath = written.backupPath
       // What landed is recorded from the caller's payload, not from a re-read:
@@ -153,8 +165,8 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
       if (input.noClobber && existsSync(file)) {
         result.notes.push('同名封面已存在，未覆盖')
       } else {
-        if (!input.dryRun) await writeFile(file, Buffer.from(patch.cover.data))
-        result.paths.push(file)
+        if (!input.dryRun) await writeFileAtomic(file, Buffer.from(patch.cover.data))
+        if (!input.dryRun) result.paths.push(file)
         if (!result.landed.includes(SIDECAR_LABEL)) result.landed.push(SIDECAR_LABEL)
         pushAsset(assets, 'cover', { origin: 'sidecar', provider: patch.cover.mimeType, at: now })
         result.written = true

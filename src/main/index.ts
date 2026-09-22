@@ -18,15 +18,15 @@ import { ArtistImageStore } from './library/artist-images'
 import { flushJsonWrites } from './store/json-file'
 import { applyImportOrder, fetchImportCover, importPlaylist } from './online/playlist-import'
 import type { ImportedPlaylist } from '@shared/types'
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path'
 import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { cp, readFile } from 'node:fs/promises'
-import { resolveDataDir, migrationSource, pointerPath, type DataDirChoice } from './data-location'
+import { resolveDataDir, migrationSource, pointerPath, relocationProblem, type DataDirChoice } from './data-location'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
-import { fail, ok, type AppSettings, type AssetKind, type AssetRef, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
+import { fail, ok, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
 import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
@@ -48,7 +48,7 @@ import {
 import { matchMetadata, lyricsForMatch } from './library/metadata-match'
 import { exportAssets, mergeAssets } from './library/asset-export'
 import { imageMimeFor } from './library/asset-files'
-import { PendingAssetStore } from './library/pending-assets'
+import { PendingAssetStore, pendingKey } from './library/pending-assets'
 import type { TagPatch } from './library/tag-writer'
 import type { AssetExportInput, AssetExportResult, ResolvedLyric } from '@shared/library-types'
 import { DesktopLyrics } from './desktop-lyrics'
@@ -669,7 +669,14 @@ function indexedTrack(id: unknown): LocalMusicInfo {
  */
 function assetWriteTargets(): { to: AssetWriteTarget[]; writableFormats: string[] } {
   const { assetWriteTarget, tagWritableFormats } = requireServices().settings.get()
-  const to: AssetWriteTarget[] = assetWriteTarget === 'both' ? ['embedded', 'sidecar'] : [assetWriteTarget]
+  // Normalised, because the value arrives from a settings file the renderer can
+  // write. `embedded` is the only destination that touches a file the user owns,
+  // so an unrecognised value falls to the *other* one rather than to the default:
+  // a corrupt preference must not choose the invasive interpretation for them.
+  const choice: AssetWriteChoice = assetWriteTarget === 'embedded' || assetWriteTarget === 'both' ? assetWriteTarget : 'sidecar'
+  const to: AssetWriteTarget[] = choice === 'both' ? ['embedded', 'sidecar'] : [choice]
+  // The formats list is normalized and intersected with the writer set by
+  // `canWriteTags`, so passing the raw value through cannot widen anything.
   return { to, writableFormats: tagWritableFormats }
 }
 
@@ -692,13 +699,16 @@ async function commitAssetWrite(
     ...assetWriteTargets(),
     ...overrides
   })
-  if (!result.written) return result
+  // A 试运行 asked what *would* happen; nothing changed on disk, so the index, the
+  // lyric cache and the 待写入 queue must all stay as they were. `written` is true
+  // for a preview by design — it means "this would land".
+  if (!result.written || overrides.dryRun) return result
 
   // An embedded write changed the tags themselves, so the entry has to be
   // re-read. A sidecar changed nothing about the audio file, and re-reading it
   // for that would mean a `music-metadata` pass over a file that never moved —
   // so only the provenance is folded in.
-  const next = result.landed.includes('文件内嵌')
+  const next = result.embeddedWritten
     ? await library.readTrack(track.path)
     : { ...track, assets: mergeAssets(track.assets, result.assets) }
   await library.updateTrack(next)
@@ -709,11 +719,7 @@ async function commitAssetWrite(
   const kinds = (['lyric', 'cover'] as const).filter((kind) =>
     kind === 'lyric' ? Boolean(patch.lyrics?.trim()) : Boolean(patch.cover)
   )
-  if (kinds.length) {
-    const { pendingAssets } = requireServices()
-    const staged = await pendingAssets.load()
-    await pendingAssets.removeEntries(staged.filter((entry) => entry.trackId === track.id && kinds.includes(entry.kind)))
-  }
+  if (kinds.length) await requireServices().pendingAssets.dropFor(track.id, kinds)
   return result
 }
 
@@ -752,7 +758,7 @@ async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric)
 
 /** A result for "there is nothing here to write", so the UI can say why. */
 function nothingToWrite(note: string): AssetExportResult {
-  return { written: false, landed: [], paths: [], notes: [note], note }
+  return { written: false, landed: [], paths: [], notes: [note], note, embeddedWritten: false }
 }
 
 /** Read an image this app already has (a cache copy or a sidecar) for writing. */
@@ -770,6 +776,38 @@ function readKnownImage(path: string): { data: Uint8Array; mimeType: string } | 
   }
 }
 
+/** Ceiling on a renderer-supplied id list for one bulk call. */
+const MAX_BULK_IDS = 2000
+
+/**
+ * The id list a renderer sends for a bulk asset operation, or `null` for "all".
+ *
+ * Three jobs in one place: the elements are untrusted (a non-string would be
+ * compared against every queued entry), the length is unbounded (the queue holds
+ * at most a few hundred, so a huge list is either a bug or a bid to make the app
+ * scan quadratically), and membership has to be a set lookup rather than
+ * `Array.includes` inside a filter. An oversized call is refused, not truncated —
+ * dropping half of a 全选 without saying so is worse than an error.
+ */
+function bulkTrackIds(value: unknown): Set<string> | null {
+  if (value === undefined || value === null) return null
+  if (!Array.isArray(value)) throw new Error('曲目 id 列表格式不对')
+  if (value.length === 0) return null
+  if (value.length > MAX_BULK_IDS) throw new Error(`一次最多处理 ${MAX_BULK_IDS} 首`)
+  const ids = value.filter((item): item is string => typeof item === 'string' && item !== '')
+  return ids.length ? new Set(ids) : null
+}
+
+/**
+ * Keep the queued entries the caller named, or all of them for no list.
+ *
+ * The set is built once, so a bulk call over a full queue is linear instead of
+ * comparing the whole selection against every entry.
+ */
+function pendingSelection<Entry extends { trackId: string }>(staged: Entry[], ids: Set<string> | null): Entry[] {
+  return ids ? staged.filter((entry) => ids.has(entry.trackId)) : staged
+}
+
 /**
  * Write the assets one or more tracks have available.
  *
@@ -781,18 +819,21 @@ function readKnownImage(path: string): { data: Uint8Array; mimeType: string } | 
  * over the library would rewrite thousands of files that did not change, and
  * `backupOnce` would leave a `.bak` beside each one.
  */
-async function writeTrackAssets(trackIds: string[], kinds: AssetKind[]): Promise<AssetExportResult[]> {
+async function writeTrackAssets(trackIds: Set<string>, kinds: AssetKind[]): Promise<AssetExportResult[]> {
   const { pendingAssets } = requireServices()
-  const staged = await pendingAssets.load()
+  // One pass over the queue, keyed the same way the store keys it. Looking each
+  // track up with a scan of the list would be O(tracks × queue) on a 全选 over a
+  // library whose queue is at its cap.
+  const staged = new Map((await pendingAssets.load()).map((entry) => [pendingKey(entry.trackId, entry.kind), entry]))
   const out: AssetExportResult[] = []
 
-  for (const id of new Set(trackIds.filter((item) => typeof item === 'string'))) {
+  for (const id of trackIds) {
     const track = requireServices().library.get(id)
     if (!track) continue
     const { to, writableFormats } = assetWriteTargets()
 
     for (const kind of kinds) {
-      const entry = staged.find((item) => item.trackId === track.id && item.kind === kind)
+      const entry = staged.get(pendingKey(track.id, kind))
       const chain = kind === 'lyric' ? track.assets?.lyrics?.main : track.assets?.cover
       const patch: TagPatch = {}
 
@@ -1112,16 +1153,13 @@ function registerIpc(): void {
         detail: '将扫描其中的音频文件，此后该文件夹内的内容可被播放器读取。'
       })
       if (response === 0) {
-        for (const [index, folder] of newFolders.entries()) {
-          // One walk per drop, not one per folder: `scan()` covers every
-          // registered root, so only the last add reports progress.
-          const last = index === newFolders.length - 1
-          const progress = await library.addFolder(folder, last
-            ? { onProgress: (value) => mainWindow?.webContents.send(IPC.libraryProgress, value) }
-            : {})
-          result.audio += progress.added
-          result.folders += 1
-        }
+        // One walk for the whole drop: `scan()` covers every registered root, so
+        // adding them folder by folder would re-scan the entire library N times.
+        const progress = await library.addFolders(newFolders, {
+          onProgress: (value) => mainWindow?.webContents.send(IPC.libraryProgress, value)
+        })
+        result.audio += progress.added
+        result.folders += newFolders.length
         await settings.update({ libraryFolders: library.getFolders() })
       } else {
         result.skipped += newFolders.length
@@ -1213,9 +1251,13 @@ function registerIpc(): void {
     const target = picked.filePaths[0]
     // Windows paths are case-insensitive and accept either separator, so a plain
     // `resolve` compare lets the same folder through spelled differently — and then
-    // the copy would run onto itself.
-    const samePath = (a: string, b: string) => resolve(a).toLowerCase().replace(/[\\/]+$/, '') === resolve(b).toLowerCase().replace(/[\\/]+$/, '')
-    if (samePath(target, current)) return { moved: false, reason: 'same' }
+    // the copy would run onto itself. Nested in either direction is worse than the
+    // same folder: the recursive copy would walk into the directory it is writing.
+    const problem = relocationProblem(target, current)
+    if (problem === 'same') return { moved: false, reason: 'same' }
+    if (problem === 'nested') {
+      throw new Error('目标目录与当前数据目录互相包含，复制会一层层套进自己。请选一个既不在这两个目录之内、也不是它们上级的位置。')
+    }
     if (!isWritableDir(target)) throw new Error('目标目录不可写')
     const { response } = await dialog.showMessageBox({
       type: 'question',
@@ -1332,8 +1374,12 @@ function registerIpc(): void {
     const content = fetched.body.toString('utf8')
     if (!content.trim()) throw new Error('链接没有返回内容')
     const file = new URL(link).pathname.split('/').pop() ?? ''
-    const name = decodeURIComponent(file || '') || '在线音源'
-    const { meta, blocking } = importScript(content, name)
+    // A stray `%` in a link's file name makes `decodeURIComponent` throw a
+    // `URIError`, which would fail the whole import with "URI malformed" — the
+    // undecoded name is the better label, so it is what is kept.
+    let name = file
+    try { name = decodeURIComponent(file) } catch { /* not percent-encoded */ }
+    const { meta, blocking } = importScript(content, name || '在线音源')
     await sourceEngine.startAll()
     if (blocking.length) {
       throw new Error(`「${meta.name}」未通过启动前校验，已导入但保持停用：\n${blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')}`)
@@ -1799,11 +1845,16 @@ function registerIpc(): void {
    * own audio files, so the file must be one the index vouches for.
    */
   handle(IPC.assetsExport, (trackIds: unknown, kinds?: unknown) => {
-    const ids = Array.isArray(trackIds) ? trackIds.filter((id): id is string => typeof id === 'string') : []
-    const wanted = Array.isArray(kinds) && kinds.length
-      ? kinds.filter((kind): kind is AssetKind => kind === 'lyric' || kind === 'cover')
+    if (kinds !== undefined && kinds !== null && !Array.isArray(kinds)) throw new Error('写入内容列表格式不对')
+    const given = Array.isArray(kinds) ? kinds : []
+    const wanted = given.length
+      ? given.filter((kind): kind is AssetKind => kind === 'lyric' || kind === 'cover')
       : (['lyric', 'cover'] as AssetKind[])
-    return writeTrackAssets(ids, wanted)
+    // A list that survives filtering to nothing is a caller bug; treating it as
+    // "both" (or as "nothing") would make a broken menu item look like a
+    // successful write.
+    if (given.length && wanted.length === 0) throw new Error('只能写入封面或歌词')
+    return writeTrackAssets(bulkTrackIds(trackIds) ?? new Set(), wanted)
   })
 
   /** What is staged but unwritten, oldest first. */
@@ -1819,9 +1870,8 @@ function registerIpc(): void {
   handle(IPC.assetsWritePending, async (trackIds?: unknown) => {
     const { pendingAssets, library } = requireServices()
     const staged = await pendingAssets.load()
-    const wanted = Array.isArray(trackIds) && trackIds.length
-      ? staged.filter((entry) => trackIds.includes(entry.trackId))
-      : staged
+    // An id list filters what is queued; it never names things to invent.
+    const wanted = pendingSelection(staged, bulkTrackIds(trackIds))
 
     let written = 0
     const notes: string[] = []
@@ -1855,10 +1905,12 @@ function registerIpc(): void {
   handle(IPC.assetsDiscardPending, async (trackIds?: unknown) => {
     const { pendingAssets } = requireServices()
     const staged = await pendingAssets.load()
-    const wanted = Array.isArray(trackIds) && trackIds.length
-      ? staged.filter((entry) => trackIds.includes(entry.trackId))
-      : staged
-    await pendingAssets.removeEntries(wanted)
+    const dropped = pendingSelection(staged, bulkTrackIds(trackIds))
+    await pendingAssets.removeEntries(dropped)
+    // The badge reads the resolver's cache, not the queue: a discarded lyric
+    // stays decorated as 「待写入」 there until it is re-resolved, so 全部丢弃
+    // looked like it had done nothing until the user played the song again.
+    for (const entry of dropped) clearLyricCache(entry.trackId)
     return (await pendingAssets.load()).length
   })
 

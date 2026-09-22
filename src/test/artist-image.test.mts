@@ -242,3 +242,68 @@ test('同名并发只查一次，写盘的文件能被重新读回', async () =>
   await rm(one.dir, { recursive: true, force: true })
   await rm(two.dir, { recursive: true, force: true })
 })
+
+test('批量预读一次网络都不发；预取只问没记录过的名字，并发不超过两个', async () => {
+  let asks = 0
+  let inFlight = 0
+  let peak = 0
+  const { dir, store } = await setup({
+    // 每家平台都"答了但没匹配"，于是这条被记成没头像——预取要的就是这种一次性结论。
+    fetch: async () => {
+      asks += 1
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      inFlight -= 1
+      return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+    }
+  })
+  await store.image('已知歌手')
+  // 一次解析要问几家平台是顺序的事，这里数的是"有没有为已知名字多发一轮"。
+  const perName = asks
+  assert.ok(perName > 0, '对照组：查一个名字确实发了请求')
+  const before = asks
+  assert.deepEqual(store.peekMany(['已知歌手', '甲']), { 已知歌手: null }, '只回已经答过的名字')
+  assert.equal(asks, before, 'peekMany 一次请求都不该发：它是给页面进首帧用的')
+
+  const started = await store.prefetch(['已知歌手', '甲', '乙', '丙', '  '])
+  assert.equal(started, 3, '空白与已有记录都不该占名额')
+  assert.equal(asks, before + 3 * perName, '只问没记录过的那三个名字')
+  assert.ok(peak <= 2, `并发上限是 2，实测峰值 ${peak}`)
+  assert.equal(Object.keys(store.peekMany(['甲', '乙', '丙'])).length, 3, '预取过的名字下次进页面不再问')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('一轮预取有上限，剩下的下一轮接着问', async () => {
+  let asks = 0
+  const { dir, store } = await setup({
+    fetch: async () => { asks += 1; return new Response(JSON.stringify({ data: { song: { list: [] } } })) }
+  })
+  const many = Array.from({ length: 30 }, (_, index) => `歌手${index}`)
+  await store.image('探针')
+  const perName = asks
+  const before = asks
+  assert.equal(await store.prefetch(many, 12), 12, '一次只吃满上限，不给平台来一场几百个名字的突袭')
+  assert.equal(asks - before, perName * 12)
+  assert.equal(await store.prefetch(many, 12), 12, '下一轮接着问剩下的')
+  assert.equal(asks - before, perName * 24)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('移除后重新导入：记录还在，首帧就能显示，不再问平台', async () => {
+  let asks = 0
+  const { dir, store } = await setup({
+    fetch: async () => { asks += 1; return new Response(JSON.stringify({ data: { song: { list: [{ singer: [{ mid: 'm1', name: '周杰伦' }] }] } } })) },
+    getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' })
+  })
+  const path = await store.image('周杰伦')
+  assert.ok(path)
+  const afterImport = asks
+  // 从曲库移除歌曲不碰这份记录（它按歌手名存），所以"重新导入"等价于重启后再读一次。
+  const again = new ArtistImageStore(dir, { saveCover: async () => path, fetch: async () => { asks += 1; return new Response('{}') }, getBytes: async () => ({ body: Buffer.from('x'), contentType: 'image/jpeg' }) })
+  await again.load()
+  assert.deepEqual(again.peekMany(['周杰伦']), { 周杰伦: path }, '重新导入的第一帧就该有头像')
+  assert.equal(asks, afterImport, '这条路径一次网络都不该发')
+  assert.equal(await again.prefetch(['周杰伦']), 0, '预取也不该重查已知名字')
+  await rm(dir, { recursive: true, force: true })
+})

@@ -252,7 +252,15 @@ const api = {
      * `null` means no platform had one — which is remembered, so the grid does not
      * ask again on every visit. `refresh` ignores what is already known.
      */
-    image: (name: string, refresh = false) => invoke<string | null>(IPC.artistImage, name, refresh)
+    image: (name: string, refresh = false) => invoke<string | null>(IPC.artistImage, name, refresh),
+    /**
+     * Portraits already remembered for these names, in one round-trip and without
+     * any lookup: the artist grid paints from this instead of re-asking per card,
+     * which is what made a cached page look like it was refreshing again.
+     */
+    portraits: (names: string[]) => invoke<Record<string, string | null>>(IPC.artistPortraits, names),
+    /** Ask for the artist names an import just brought in. Returns once they are all answered. */
+    prefetch: (names: string[]) => invoke<void>(IPC.artistPrefetch, names)
   },
 
   library: {

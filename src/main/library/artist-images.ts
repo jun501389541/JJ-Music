@@ -15,6 +15,11 @@ interface ArtistImageEntry {
   at: number
 }
 
+/** Names one import-time prefetch run answers; the rest wait for the next scan or a visit. */
+const PREFETCH_LIMIT = 120
+/** The same ceiling the artist page uses: two searches at a time, never more. */
+const PREFETCH_PARALLEL = 2
+
 /**
  * Artist name → a portrait file stored with the rest of the cover art.
  *
@@ -65,6 +70,53 @@ export class ArtistImageStore {
   /** Path already known for this artist, or `undefined` when never asked. */
   peek(name: string): string | null | undefined {
     return this.entries.get(name.trim())?.path
+  }
+
+  /**
+   * Everything already known, for a page that is about to paint hundreds of cards.
+   *
+   * Without this the grid has to ask per artist even for the ones it remembered,
+   * and each of those answers arrives a frame or two late — which reads as the
+   * portraits reloading every time the page opens, even though nothing goes out to
+   * the network. This never looks anything up.
+   */
+  peekMany(names: string[]): Record<string, string | null> {
+    const known: Record<string, string | null> = {}
+    for (const raw of names) {
+      const name = raw.trim()
+      const entry = this.entries.get(name)
+      if (name && entry) known[name] = entry.path
+    }
+    return known
+  }
+
+  /**
+   * Ask for the names that have never been looked up, in the background.
+   *
+   * Called after a scan, so an import is where the network work happens rather
+   * than the first visit to the artist page. Bounded twice over: at most `limit`
+   * names per run and at most two searches at a time, because a first import of a
+   * real library is several hundred names and the platforms are not ours to
+   * hammer. Names already answered — hit *or* miss — are skipped, which is what
+   * makes a removed-then-reimported album show its artist's portrait at once.
+   */
+  async prefetch(names: string[], limit = PREFETCH_LIMIT): Promise<number> {
+    const missing = [...new Set(names.map(name => name.trim()).filter(Boolean))]
+      .filter(name => !this.entries.has(name))
+      .slice(0, Math.max(0, limit))
+    let started = 0
+    const workers = Array.from({ length: Math.min(PREFETCH_PARALLEL, missing.length) }, async () => {
+      for (let name = missing.shift(); name; name = missing.shift()) {
+        started += 1
+        try {
+          await this.image(name)
+        } catch {
+          /* a failed lookup is not remembered, so the artist page will ask again */
+        }
+      }
+    })
+    await Promise.all(workers)
+    return started
   }
 
   /**

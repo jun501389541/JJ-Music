@@ -69,6 +69,10 @@ export const IPC = {
   musicPic: 'music:pic',
   /** Look up an artist's portrait online and save it with the cover art. */
   artistImage: 'artist:image',
+  /** Portraits already remembered for these names, answered without any lookup. */
+  artistPortraits: 'artist:portraits',
+  /** Answer the artist names an import just brought in, in the background. */
+  artistPrefetch: 'artist:prefetch',
   /**
    * Fill in what search did not provide — lyrics and cover art for an online
    * track, resolved together so one IPC round-trip covers both.

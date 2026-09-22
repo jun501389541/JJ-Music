@@ -253,7 +253,7 @@ async function createServices(): Promise<Services> {
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
   const artistImages = new ArtistImageStore(dataDir, { saveCover: (data, format) => library.saveCover(data, format) })
-  const hotWords = new HotWordSource()
+  const hotWords = new HotWordSource(undefined, { file: join(dataDir, 'library', 'hot-words.json') })
   const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
   // Sources run in a forked child process, so they can be killed without
@@ -261,7 +261,7 @@ async function createServices(): Promise<Services> {
   // was not enough. The host file must live outside the asar archive.
   const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'))
 
-  await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load()])
+  await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load(), hotWords.load()])
   sourceStore.load()
 
   /**
@@ -1632,6 +1632,19 @@ function registerIpc(): void {
   handle(IPC.artistImage, async (name: string, refresh?: boolean) => {
     if (typeof name !== 'string' || !name.trim() || name.trim().length > 60) return null
     return requireServices().artistImages.image(name, refresh === true)
+  })
+
+  /**
+   * Names come from the renderer, so they are filtered before they reach a map
+   * keyed by artist string. This handler answers from what is already remembered
+   * and never looks anything up.
+   */
+  const artistNames = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((name): name is string => typeof name === 'string' && !!name.trim() && name.trim().length <= 60).slice(0, 4000)
+    : []
+  handle(IPC.artistPortraits, (names: unknown) => requireServices().artistImages.peekMany(artistNames(names)))
+  handle(IPC.artistPrefetch, async (names: unknown) => {
+    await requireServices().artistImages.prefetch(artistNames(names))
   })
 
   /* ---------------- local library ---------------- */

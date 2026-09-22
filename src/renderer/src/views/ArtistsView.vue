@@ -6,7 +6,7 @@ import TrackList from '../components/TrackList.vue'
 import LocatePlaying from '../components/LocatePlaying.vue'
 import { useDrilldown } from '../composables/use-drilldown'
 import { useRoute } from 'vue-router'
-import { computed, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
@@ -24,6 +24,27 @@ const toast = useToastStore()
  * remembers both hits and misses, so a second visit to this page is free.
  */
 const portraits = ref<Record<string, string>>({})
+/** Names the batched read answered, portrait or not: neither needs a per-card ask. */
+const remembered = new Set<string>()
+
+/*
+ * Paint what is already remembered before the cards start asking one at a time.
+ * Even a cached name costs an IPC round-trip and a repaint per card, so on a grid
+ * of a few hundred artists the second visit to this page looked like the portraits
+ * were being fetched again — they were not, only re-read one by one.
+ */
+onMounted(() => {
+  void window.jj.artists.portraits(library.artists.map(artist => artist.name))
+    .then((known) => {
+      const seeded: Record<string, string> = {}
+      for (const [name, path] of Object.entries(known)) {
+        remembered.add(name)
+        if (path) seeded[name] = toMediaUrl(path)
+      }
+      if (Object.keys(seeded).length) portraits.value = { ...portraits.value, ...seeded }
+    })
+    .catch(() => undefined)
+})
 
 /** What a lookup concluded. The distinction only matters to the refresh toast. */
 type PortraitResult = 'found' | 'none' | 'failed'
@@ -126,7 +147,9 @@ const observer = new IntersectionObserver((entries) => {
   for (const entry of entries) {
     if (!entry.isIntersecting) continue
     const name = entry.target.getAttribute('data-artist')
-    if (name) ask(name)
+    // A name the batched read already answered — with a portrait or with "none of
+    // the platforms have one" — needs no trip to the main process at all.
+    if (name && !remembered.has(name)) ask(name)
     observer.unobserve(entry.target)
   }
 }, { rootMargin: '200px' })

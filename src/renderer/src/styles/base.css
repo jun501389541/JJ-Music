@@ -27,16 +27,36 @@ body {
 }
 
 /*
- * Opt the prose back in.
+ * Opt the prose back in — by naming it, not by naming its container.
  *
  * The shell is non-selectable so that clicking a row, dragging it into a
- * playlist or scrubbing a slider never paints a blue text selection — but the
+ * playlist or scrubbing a slider never paints a blue text selection — but that
  * blanket rule also made explanatory text impossible to copy, which is the one
- * thing a user reports when asking for help about it. Informational blocks are
- * selectable; interactive rows are not. (The 音轨信息 values already opted
- * themselves in inside DialogHost.)
+ * thing a user reports when asking for help about it.
+ *
+ * `.setting-label` used to be on this list, and it was too wide: every settings
+ * row is one of those spans, so the 键盘快捷键 page turned into a wall of blue
+ * under Ctrl+A, and a selection in a browser is also a drag source — holding the
+ * button down then moved text around a settings page. `.copyable` is now the
+ * opt-in instead, put on the handful of rows that carry something you would
+ * actually paste into a bug report (a folder path, a state message). The cost is
+ * that new copyable text has to be marked; that is the point.
+ *
+ * `.settings-heading p` came off the list for the same reason in miniature: it
+ * holds each settings page's tagline (「让播放器，成为你喜欢的样子」), which is
+ * decoration, not something anyone copies. `.description` came off too — it is
+ * used for four paragraphs in the music library, and three of them are help
+ * text. The one worth copying is the folder path, which already carries
+ * `.folder-path`, so that is what the list names now: a value opts in by being
+ * a value, not by sharing a class with the sentences around it.
+ *
+ * The 音轨信息 dialog's `dt` followed. Listing the *labels* (标题, 艺术家, 文件地址)
+ * made Ctrl+A paint the whole table, and a selection is a drag source, so the
+ * dialog could be dragged around the window as text. The values did not need
+ * this: `DialogHost` already opts its own `dd` in, which is the column that
+ * holds the path someone pastes into a bug report.
  */
-.description, .setting-label, .salt-dialog p, .salt-dialog dt, .settings-heading p {
+.folder-path, .copyable {
   user-select: text;
 }
 

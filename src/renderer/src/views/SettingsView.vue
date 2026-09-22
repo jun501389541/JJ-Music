@@ -166,7 +166,7 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
   <header class="settings-heading"><button v-if="section" class="icon-btn" aria-label="返回上一级" @click="navigate(section.split('/').slice(0,-1).join('/'))"><AppIcon name="back" :size="25"/></button><div><h1>{{ search ? '搜索设置' : page.title }}</h1><p v-if="page.description && !search">{{ page.description }}</p></div></header>
   <div v-if="section === 'appearance' && !search" class="theme-previews"><button v-for="theme in ['light','dark','system'] as const" :key="theme" :class="['theme-preview', theme, { chosen: library.settings.theme === theme }]" @click="update({ theme })"><span class="mock-window"><i/><span><b/><b/><b/></span></span><span>{{ {light:'浅色',dark:'深色',system:'跟随系统'}[theme] }}<AppIcon v-if="library.settings.theme === theme" name="check" :size="14"/></span></button></div>
   <div class="settings-items">
-    <div v-if="section === 'downloads' && !search" class="setting-row"><span class="setting-label"><strong>下载目录</strong><small>{{ library.settings.downloadFolder || defaultDownloadFolder }}</small></span><button class="btn" @click="chooseDownloadFolder">选择目录</button></div>
+    <div v-if="section === 'downloads' && !search" class="setting-row"><span class="setting-label copyable"><strong>下载目录</strong><small>{{ library.settings.downloadFolder || defaultDownloadFolder }}</small></span><button class="btn" @click="chooseDownloadFolder">选择目录</button></div>
     <template v-for="(item, index) in items" :key="index">
       <button v-if="item.to !== undefined" class="setting-row setting-link" @click="navigate(item.to)"><AppIcon :name="item.icon || 'settings'" :size="22"/><span class="setting-label"><strong>{{ item.label }}</strong><small v-if="item.description">{{ item.description }}</small></span><AppIcon name="next" :size="15"/></button>
       <div v-else class="setting-row"><span class="setting-label"><strong>{{ item.label }}</strong><small v-if="item.description">{{ item.description }}</small></span>
@@ -180,12 +180,12 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
     <!-- Inside `.settings-items` so it shares the group panel, width and dividers;
          as a sibling it rendered outside the group as a detached full-width row. -->
     <div v-if="section === 'playback'" class="setting-row"><span class="setting-label"><strong>睡眠定时</strong><small>{{ player.sleepAt ? `将在 ${new Date(player.sleepAt).toLocaleTimeString()} 停止播放` : '在指定时间后停止播放' }}</small></span><select class="input" aria-label="睡眠定时" @change="player.setSleepMinutes(Number(($event.target as HTMLSelectElement).value))"><option value="0">关闭</option><option v-for="minutes in [15,30,45,60,90]" :key="minutes" :value="minutes">{{ minutes }} 分钟</option></select></div>
-    <div v-if="section === 'data' && dataDir" class="setting-row"><span class="setting-label"><strong>数据目录</strong><small>{{ dataDir.dir }} · {{ DATA_DIR_SOURCES[dataDir.source] ?? dataDir.source }}</small></span><button class="btn" :disabled="!dataDir.relocatable" @click="moveDataDir">迁移到其它目录</button></div>
+    <div v-if="section === 'data' && dataDir" class="setting-row"><span class="setting-label copyable"><strong>数据目录</strong><small>{{ dataDir.dir }} · {{ DATA_DIR_SOURCES[dataDir.source] ?? dataDir.source }}</small></span><button class="btn" :disabled="!dataDir.relocatable" @click="moveDataDir">迁移到其它目录</button></div>
     <!-- The 待写入 queue: what the network handed us for a local song and has
          not been written anywhere. Actions live here rather than per-song
          because that is the point of a queue — decide once, for all of them. -->
     <div v-if="section === 'assets'" class="setting-row"><span class="setting-label"><strong>待写入</strong><small>{{ pendingSummary }}</small></span><span class="setting-buttons"><button class="btn" :disabled="!pendingList?.length" @click="runPending('write')">全部写入</button><button class="btn" :disabled="!pendingList?.length" @click="runPending('discard')">全部丢弃</button></span></div>
-    <div v-if="section === 'data' && dataDir?.notice" class="setting-row"><span class="setting-label"><strong>注意</strong><small>{{ dataDir.notice }}</small></span></div>
+    <div v-if="section === 'data' && dataDir?.notice" class="setting-row"><span class="setting-label copyable"><strong>注意</strong><small>{{ dataDir.notice }}</small></span></div>
   </div>
 
   <div v-if="section === 'appearance/lyrics'" class="lyric-preview" :style="{ fontSize: library.settings.lyricFontSize + 'px', textAlign: library.settings.lyricAlign }"><span>让每一个音符</span><strong>都在此刻，与你相遇</strong><small v-if="library.settings.lyricTranslation">Let the music stay with you.</small></div>
@@ -200,7 +200,7 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
   -->
   <div v-if="section === 'audio/output' && !search" class="settings-items">
     <div class="setting-row">
-      <span class="setting-label">
+      <span class="setting-label copyable">
         <strong>输出设备</strong>
         <small>
           切换后当前播放会从原位置继续。

@@ -27,21 +27,33 @@ const props = withDefaults(
   defineProps<{
     /** Normalised position, 0..1. */
     value: number
-    /** Emitted continuously while dragging and on click. */
     ariaLabel?: string
     disabled?: boolean
     /** Visual weight: the main progress bar, a secondary inline control, or a tall vertical bar. */
     variant?: 'progress' | 'subtle' | 'vertical'
+    /**
+     * When the new value is handed to the owner.
+     *
+     * `live` (default) is right for volume: every step is cheap and audible, and
+     * you want to hear it as you move. `release` is for anything where the gesture
+     * has a cost — the seek bar: applying each pointer move restarts the audio
+     * decode dozens of times per drag, so the bar previews and only the release
+     * seeks.
+     */
+    commit?: 'live' | 'release'
   }>(),
-  { value: 0, disabled: false, variant: 'progress' }
+  { value: 0, disabled: false, variant: 'progress', commit: 'live' }
 )
 
-const emit = defineEmits<{ 'update:value': [value: number] }>()
+const emit = defineEmits<{ 'update:value': [value: number]; preview: [value: number | null] }>()
 
 const track = ref<HTMLElement | null>(null)
 const dragging = ref(false)
+/** Set only while a `release` drag is in progress; null means "show the owner's value". */
+const previewValue = ref<number | null>(null)
 
-const percent = computed(() => `${Math.min(100, Math.max(0, props.value * 100))}%`)
+const shown = computed(() => previewValue.value ?? props.value)
+const percent = computed(() => `${Math.min(100, Math.max(0, shown.value * 100))}%`)
 
 function ratioFromEvent(event: PointerEvent): number {
   const element = track.value
@@ -61,19 +73,39 @@ function onPointerDown(event: PointerEvent): void {
   if (props.disabled) return
   dragging.value = true
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  emit('update:value', ratioFromEvent(event))
+  apply(ratioFromEvent(event))
 }
 
 function onPointerMove(event: PointerEvent): void {
   if (!dragging.value) return
-  emit('update:value', ratioFromEvent(event))
+  apply(ratioFromEvent(event))
 }
 
-function onPointerUp(event: PointerEvent): void {
+/**
+ * One gesture entry point for both commit modes: `release` previews, `live` hands
+ * the value to the owner on every step.
+ */
+function apply(ratio: number): void {
+  if (props.commit === 'release') {
+    previewValue.value = ratio
+    emit('preview', ratio)
+    return
+  }
+  emit('update:value', ratio)
+}
+
+function onPointerUp(event: PointerEvent, cancelled = false): void {
   if (!dragging.value) return
   dragging.value = false
   const target = event.currentTarget as HTMLElement
   if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
+  if (previewValue.value === null) return
+  const ratio = previewValue.value
+  previewValue.value = null
+  // A cancelled gesture (the pointer taken over by another window) is not a
+  // request to move; the bar snaps back to where the owner says it is.
+  if (!cancelled) emit('update:value', ratio)
+  emit('preview', null)
 }
 
 /**
@@ -88,19 +120,23 @@ function onWheel(event: WheelEvent): void {
   event.preventDefault()
   const step = 0.03
   const delta = event.deltaY < 0 ? step : -step
-  emit('update:value', Math.min(1, Math.max(0, props.value + delta)))
+  emit('update:value', Math.min(1, Math.max(0, shown.value + delta)))
 }
 
-/** Keyboard support keeps the control usable without a mouse. */
+/**
+ * Keyboard and wheel steps commit on the spot, even in `release` mode: a click
+ * of the arrow key is already a finished intention, unlike a pointer move,
+ * which is only half a gesture until the button comes up.
+ */
 function onKeydown(event: KeyboardEvent): void {
   if (props.disabled) return
   const step = event.shiftKey ? 0.1 : 0.02
   if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
     event.preventDefault()
-    emit('update:value', Math.min(1, props.value + step))
+    emit('update:value', Math.min(1, shown.value + step))
   } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
     event.preventDefault()
-    emit('update:value', Math.max(0, props.value - step))
+    emit('update:value', Math.max(0, shown.value - step))
   } else if (event.key === 'Home') {
     event.preventDefault()
     emit('update:value', 0)
@@ -121,11 +157,11 @@ function onKeydown(event: KeyboardEvent): void {
     :aria-label="ariaLabel"
     :aria-valuemin="0"
     :aria-valuemax="100"
-    :aria-valuenow="Math.round(value * 100)"
+    :aria-valuenow="Math.round(shown * 100)"
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
-    @pointerup="onPointerUp"
-    @pointercancel="onPointerUp"
+    @pointerup="onPointerUp($event, false)"
+    @pointercancel="onPointerUp($event, true)"
     @wheel="onWheel"
     @keydown="onKeydown"
   >

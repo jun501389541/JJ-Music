@@ -15,7 +15,7 @@ const player = usePlayerStore()
 const toast = useToastStore()
 
 /**
- * Filter, sort and the lossless toggle persist across navigation.
+ * Filter and sort persist across navigation.
  *
  * Coming back to a library of thousands of rows and having to retype the filter
  * is the specific annoyance this addresses: the view is re-created cheaply, but
@@ -23,18 +23,16 @@ const toast = useToastStore()
  */
 const remembered = useViewState('library', {
   filter: '',
-  sortKey: 'added' as 'name' | 'singer' | 'album' | 'added',
-  onlyLossless: false
+  sortKey: 'added' as 'name' | 'singer' | 'album' | 'added'
 })
 
 const filter = ref(remembered.state.filter)
 const sortKey = ref(remembered.state.sortKey)
-const onlyLossless = ref(remembered.state.onlyLossless)
 /** Track currently open in the tag-match dialog, if any. */
 const matching = ref<LocalMusicInfo | null>(null)
 
-watch([filter, sortKey, onlyLossless], () => {
-  remembered.save({ filter: filter.value, sortKey: sortKey.value, onlyLossless: onlyLossless.value })
+watch([filter, sortKey], () => {
+  remembered.save({ filter: filter.value, sortKey: sortKey.value })
 })
 
 /** The virtualised track list, so "locate current" can drive its offset. */
@@ -53,9 +51,8 @@ function locateCurrent(): void {
   const track = player.currentTrack
   if (!track) return
   let index = filtered.value.findIndex((item) => item.id === track.id)
-  if (index < 0 && (filter.value || onlyLossless.value)) {
+  if (index < 0 && filter.value) {
     filter.value = ''
-    onlyLossless.value = false
     // Wait for the recomputed list to render before measuring rows.
     void nextTick(() => {
       const found = filtered.value.findIndex((item) => item.id === track.id)
@@ -75,8 +72,6 @@ function openMatch(track: PlayableTrack): void {
 const filtered = computed(() => {
   const needle = filter.value.trim().toLowerCase()
   let list = library.tracks
-
-  if (onlyLossless.value) list = list.filter((track) => track.lossless)
 
   if (needle) {
     list = list.filter((track) =>
@@ -177,10 +172,6 @@ async function playAll(): Promise<void> {
     <!-- controls -->
     <div v-if="library.tracks.length > 0" class="controls">
       <input v-model="filter" class="input controls__filter" type="search" placeholder="筛选曲目…" />
-      <label class="toggle">
-        <input v-model="onlyLossless" type="checkbox" />
-        <span>仅无损</span>
-      </label>
       <select v-model="sortKey" class="input controls__sort">
         <option value="added">按添加时间</option>
         <option value="name">按标题</option>
@@ -327,20 +318,6 @@ async function playAll(): Promise<void> {
 
 .controls__sort {
   width: 148px;
-  cursor: pointer;
-}
-
-.toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-base);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.toggle input {
-  accent-color: var(--accent);
   cursor: pointer;
 }
 </style>

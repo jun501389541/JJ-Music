@@ -8,7 +8,9 @@ import { useToastStore } from '../stores/toast'
 import { useUiStore } from '../stores/ui'
 import TrackList from '../components/TrackList.vue'
 import SearchSuggest from '../components/SearchSuggest.vue'
+import AppIcon from '../components/AppIcon.vue'
 import { useSearchSuggest } from '../composables/use-search-suggest'
+import { useViewState } from '../composables/view-state'
 
 const library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore(), ui = useUiStore()
 const router = useRouter(), route = useRoute()
@@ -22,12 +24,21 @@ const VIEW_SCOPES: Array<{ id: SourceId; name: string }> = [
 ]
 const platforms = ref<Array<{ id: SourceId; name: string }>>([...VIEW_SCOPES])
 const keyword = ref(typeof route.query.q === 'string' ? route.query.q : '')
-const submittedQuery = ref(''), activeSource = ref<SourceId>('all')
+const submittedQuery = ref('')
+/**
+ * Which tab was last open is view state, not URL state: it changes the shape of
+ * the answer, not the place you are, so it stays out of the history and comes
+ * back on its own when you return to 全局搜索.
+ */
+const { state: rememberedView, save: saveView } = useViewState('search', { source: 'all' as SourceId })
+const activeSource = ref<SourceId>(rememberedView.source)
 const onlineResults = ref<OnlineMusicInfo[]>([]), searching = ref(false), searched = ref(false)
 const page = ref(1), allPage = ref(1), total = ref(0), searchError = ref('')
 let generation = 0
 onUnmounted(() => { generation++ })
 const localResults = computed(() => library.searchTracks(submittedQuery.value))
+/** Whether this tab answers from the local library at all. */
+const localScope = computed(() => activeSource.value === 'all' || activeSource.value === 'local')
 /**
  * A platform tab answers for its own catalogue only.
  *
@@ -35,12 +46,25 @@ const localResults = computed(() => library.searchTracks(submittedQuery.value))
  * "本地歌曲优先显示" read as a filter that was being ignored. That phrase is about
  * ordering inside `全部`; the local matches belong to `全部` and `本地音乐`.
  */
-const shownLocal = computed(() => activeSource.value === 'all' || activeSource.value === 'local' ? localResults.value : [])
+const shownLocal = computed(() => {
+  if (!localScope.value) return []
+  // …and inside `全部` they belong to the first page. Re-pinning the whole local
+  // match set above every later page answered a question that had already been
+  // answered, and it shuffled the rows underneath: the same online song was #1
+  // on one page and #15 on the next, which reads as the pager not working.
+  if (activeSource.value === 'all' && page.value > 1) return []
+  return localResults.value
+})
 const results = computed(() => [...shownLocal.value, ...onlineResults.value])
+/**
+ * The count line reports the library, not the page: how many local songs match
+ * does not change when you turn to page 2, and a `本地 0 首` that appears on the
+ * second page reads as if turning the page deleted the local matches.
+ */
 const resultMeta = computed(() => {
-  const local = `本地 ${shownLocal.value.length} 首`
-  if (activeSource.value === 'local') return local
-  return activeSource.value === 'all' ? `${local} · 在线 ${total.value} 条` : `在线 ${total.value} 条`
+  if (!localScope.value) return `在线 ${total.value} 条`
+  const local = `本地 ${localResults.value.length} 首`
+  return activeSource.value === 'local' ? local : `${local} · 在线 ${total.value} 条`
 })
 const hasSources = computed(() => library.playableSources.length > 0)
 
@@ -68,6 +92,7 @@ async function runSearch(targetPage = 1): Promise<void> {
   // something the user typed and may want again.
   if (query && query !== submittedQuery.value) rememberWord(query)
   submittedQuery.value = query
+  syncUrl(query)
   onlineResults.value = []; total.value = 0; allPage.value = 1; page.value = targetPage; searchError.value = ''
   searched.value = !!query
   searching.value = false
@@ -89,7 +114,30 @@ async function runSearch(targetPage = 1): Promise<void> {
     searchError.value = `在线搜索暂不可用：${error instanceof Error ? error.message : '请求失败'}`
   } finally { if (request === generation) searching.value = false }
 }
-function switchSource(source: SourceId): void { if (source === activeSource.value) return; activeSource.value = source; void runSearch() }
+function switchSource(source: SourceId): void {
+  if (source === activeSource.value) return
+  activeSource.value = source
+  saveView({ source })
+  void runSearch()
+}
+
+/**
+ * The submitted query goes into the URL.
+ *
+ * With it there, the page becomes a place you can come back to: the title bar's
+ * 返回 and the sidebar's remembered section both land on these results instead of
+ * an empty box that has to be typed into again. `replace` rather than `push`,
+ * because switching platform or turning to page 2 is the same place, not a new
+ * one to return to.
+ */
+function syncUrl(query: string): void {
+  const current = typeof route.query.q === 'string' ? route.query.q : ''
+  if (current === query) return
+  const next = { ...route.query }
+  if (query) next.q = query
+  else delete next.q
+  void router.replace({ query: next })
+}
 async function playAt(index: number): Promise<void> {
   const track = results.value[index]
   if (!track) return
@@ -105,7 +153,15 @@ onMounted(() => {
     .catch(() => undefined)
   if (keyword.value) void runSearch()
 })
-watch(() => route.query.q, value => { keyword.value=typeof value==='string'?value:'';void runSearch() })
+watch(() => route.query.q, value => {
+  keyword.value = typeof value === 'string' ? value : ''
+  // `runSearch` writes the query back into the URL, so this watcher also fires
+  // for our own edit. Re-running would ask the platforms the same question twice
+  // per search; the guard is what separates "someone else moved us here" from
+  // "we just moved ourselves".
+  if (keyword.value.trim() === submittedQuery.value) return
+  void runSearch()
+})
 
 /* ------------------------------------------------------------------ *
  * 搜索历史与热门搜索词 — what the page offers before you have typed anything.
@@ -175,29 +231,49 @@ function platformName(source: SourceId): string {
 </script>
 <template>
   <div class="view search-view">
-    <header class="view__header"><div><h1 class="view__title">全局搜索</h1><p class="view__subtitle">搜索本地曲库与在线音乐，切换平台可只看该来源的结果</p></div></header>
-    <form class="searchbar" @submit.prevent="runSearch()">
-      <div class="searchbar__field">
-        <input v-model="keyword" class="input searchbar__input" type="search" placeholder="搜索歌曲、歌手、专辑，或拼音首字母…" aria-label="全局搜索关键词" role="combobox" :aria-expanded="suggestions.length > 0" aria-autocomplete="list" @focus="focused = true" @blur="focused = false" @keydown="onKey"/>
-        <SearchSuggest v-if="focused && suggestions.length" :items="suggestions" :highlight="highlight" @pick="pickSuggestion" @hover="highlight = $event"/>
+    <!--
+      The search field sits in the page header rather than on a row of its own.
+      Half this page's height was chrome — measured, not judged: with a 690 px
+      content area the result list only got 355 px of it, which is why a page of
+      40 songs looked like it held five. The title and the box are the same two
+      facts about this page, so they share one line and the list gets the 46 px
+      back.
+    -->
+    <header class="view__header">
+      <div class="search-view__title">
+        <h1 class="view__title">全局搜索</h1>
+        <p class="view__subtitle">搜索本地曲库与在线音乐，切换平台可只看该来源的结果</p>
       </div>
-      <button class="btn btn--primary" type="submit">搜索</button>
-    </form>
-    <div class="platforms"><button v-for="platform in platforms" :key="platform.id" class="platform" :class="{ 'is-active': activeSource === platform.id }" @click="switchSource(platform.id)">{{ platform.name }}</button></div>
+      <form class="searchbar" @submit.prevent="runSearch()">
+        <div class="searchbar__field">
+          <input v-model="keyword" class="input searchbar__input" type="search" placeholder="搜索歌曲、歌手、专辑，或拼音首字母…" aria-label="全局搜索关键词" role="combobox" :aria-expanded="suggestions.length > 0" aria-autocomplete="list" @focus="focused = true" @blur="focused = false" @keydown="onKey"/>
+          <SearchSuggest v-if="focused && suggestions.length" :items="suggestions" :highlight="highlight" @pick="pickSuggestion" @hover="highlight = $event"/>
+        </div>
+        <button class="btn btn--primary" type="submit">搜索</button>
+      </form>
+    </header>
+    <!--
+      The count line rides at the right end of the tab row. It describes the
+      answer for the tab that is selected, and on its own it cost another 25 px
+      of a page that was already half chrome.
+    -->
+    <div class="platforms">
+      <button v-for="platform in platforms" :key="platform.id" class="platform" :class="{ 'is-active': activeSource === platform.id }" @click="switchSource(platform.id)">{{ platform.name }}</button>
+      <span v-if="searched" class="result-meta">{{ resultMeta }}<span v-if="searching" class="search-pending"><i class="spinner"/>正在搜索在线音乐…</span></span>
+    </div>
     <div v-if="boxEmpty && (history.length > 0 || hotWords.length > 0)" class="hints">
       <div v-if="history.length" class="hints__row">
         <span class="hints__label">搜索历史</span>
+        <button class="hints__clear" type="button" aria-label="清空搜索历史" title="清空搜索历史" @click="clearHistory"><AppIcon name="trash" :size="13"/></button>
         <button v-for="word in history" :key="word" class="chip" type="button" @click="searchFor(word)" @contextmenu.prevent="historyMenu(word, $event)">{{ word }}</button>
-        <button class="hints__clear" type="button" @click="clearHistory">清空</button>
       </div>
       <div v-if="hotWords.length" class="hints__row">
-        <span class="hints__label">{{ activeSource === 'all' ? '热门搜索 · 各家汇总' : `热门搜索 · ${platformName(activeSource)}` }}</span>
-        <button v-for="word in hotWords" :key="`${word.source}-${word.text}`" class="chip" type="button" @click="searchFor(word.text)">{{ word.text }}<small v-if="activeSource === 'all'">{{ platformName(word.source) }}</small></button>
+        <span class="hints__label">热门搜索</span>
+        <button v-for="word in hotWords" :key="`${word.source}-${word.text}`" class="chip" type="button" :title="activeSource === 'all' ? platformName(word.source) : undefined" @click="searchFor(word.text)">{{ word.text }}</button>
       </div>
     </div>
     <div v-if="searchError" class="search-status">{{ searchError }} · 本地曲库不受影响</div>
     <div v-if="!hasSources && searched && activeSource !== 'local'" class="notice"><span>本地音乐可直接播放，在线音乐需启用音源。</span><button class="btn btn--ghost" @click="router.push('/sources')">音源管理</button></div>
-    <div v-if="searched" class="result-meta">{{ resultMeta }}<span v-if="searching" class="search-pending"><i class="spinner"/>正在搜索在线音乐…</span></div>
     <TrackList v-if="results.length" :tracks="results" :show-source="true" @play="(_, index) => playAt(index)"/>
     <div v-else-if="searched && !searching" class="empty"><span class="empty__title">没有找到「{{ submittedQuery }}」</span><span class="empty__hint">换个关键词试试。</span></div>
     <div v-else-if="!searched" class="empty"><span class="empty__title">发现本地收藏，也搜索在线音乐</span><span class="empty__hint">输入歌名、艺术家或专辑，搜索所有来源。</span></div>
@@ -205,13 +281,18 @@ function platformName(source: SourceId): string {
   </div>
 </template>
 <style scoped>
-.search-view{display:flex;flex-direction:column;overflow:hidden}.search-view :deep(.tracklist){height:auto;min-height:0;flex:1}.searchbar,.platforms,.notice,.result-meta,.view__header,.pager{flex:none}.search-status{font-size:12px;color:var(--warning);margin-bottom:12px}.search-pending{display:inline-flex;align-items:center;gap:8px;margin-left:18px}.platforms{flex-wrap:wrap}
+.search-view{display:flex;flex-direction:column;overflow:hidden;padding-bottom:14px}.search-view :deep(.tracklist){height:auto;min-height:0;flex:1}.platforms,.notice,.view__header,.pager,.search-view__title{flex:none}.search-status{font-size:12px;color:var(--warning);margin-bottom:12px}.search-pending{display:inline-flex;align-items:center;gap:8px;margin-left:18px}.platforms{flex-wrap:wrap;align-items:center}
+/* The header holds the title block and the search box on one line, so give the
+   title room to truncate rather than pushing the box off the edge. */
+.search-view .view__header{margin-bottom:16px}
+.search-view__title{min-width:0}
 
 .searchbar {
   display: flex;
   gap: 8px;
-  margin-bottom: 14px;
-  max-width: 620px;
+  flex: 1 1 300px;
+  min-width: 200px;
+  max-width: 420px;
 }
 
 .searchbar__input {
@@ -306,8 +387,7 @@ function platformName(source: SourceId): string {
 
 .chip {
   display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
   max-width: 220px;
   padding: 4px 12px;
   border: 1px solid var(--border-subtle);
@@ -327,30 +407,29 @@ function platformName(source: SourceId): string {
   color: var(--text-primary);
 }
 
-.chip small {
-  flex: none;
-  font-size: 10px;
-  color: var(--text-tertiary);
-}
-
+/* Sitting next to the label rather than at the end of the row: the chips wrap,
+   and a control that moves depending on how much history you have is a control
+   you learn to hunt for. */
 .hints__clear {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px;
   border: 0;
+  border-radius: var(--radius-xs);
   background: none;
   color: var(--text-tertiary);
-  font: inherit;
-  font-size: var(--text-xs);
   cursor: pointer;
-  text-decoration: underline;
 }
 
 .hints__clear:hover {
   color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
 .platforms {
   display: flex;
   gap: 6px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 
 .platform {
@@ -409,8 +488,10 @@ function platformName(source: SourceId): string {
   font-size: var(--text-base);
 }
 
+/* Sits at the right end of the tab row rather than on a line of its own. */
 .result-meta {
-  margin-bottom: 10px;
+  margin-left: auto;
+  flex: none;
   font-size: var(--text-sm);
   color: var(--text-tertiary);
 }
@@ -425,12 +506,18 @@ function platformName(source: SourceId): string {
   font-size: var(--text-xs);
 }
 
+/*
+ * Pagination stays below the list on purpose: after reading to the bottom of a
+ * page of results, 下一页 has to be where the eye already is. It is the row
+ * spacing that gives, not the position — 54 px of chrome under a scrolling list
+ * was the most of any line on this page.
+ */
 .pager {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 14px;
-  margin-top: 22px;
+  margin-top: 10px;
 }
 
 .pager__label {

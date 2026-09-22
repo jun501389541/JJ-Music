@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { toMediaUrl } from '@shared/media-url'
 import { isLocalTrack } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
@@ -61,9 +61,32 @@ function onVolume(value: number): void {
 function openPlayingView(): void {
   if (!props.bare) emit('openNowPlaying')
 }
+
+/**
+ * Progress scrubbing.
+ *
+ * The handle reports the pointer position while the drag is running and the
+ * seek happens once on release (see `SliderBar`'s `commit` prop). Seeking on
+ * every pointer move re-started the audio decode dozens of times per drag, so
+ * the track audibly stuttered through the whole gesture instead of jumping
+ * where the user let go.
+ *
+ * `scrubRatio` is only here so the time readout agrees with the handle: without
+ * it the seconds keep counting from the real position while the thumb sits three
+ * minutes ahead, and the two disagree at exactly the moment the user is looking
+ * at the bar.
+ */
+const scrubRatio = ref<number | null>(null)
+function onScrub(value: number | null): void {
+  scrubRatio.value = value
+}
+const timeLabel = computed(() => {
+  const shown = scrubRatio.value === null ? player.currentTime : scrubRatio.value * player.duration
+  return `${formatTime(shown)} / ${formatTime(player.duration)}`
+})
 </script>
 <template><footer class="playbar" :class="{ 'playbar--bare': bare }">
-  <div class="mini-progress"><SliderBar :value="player.progress" aria-label="播放进度" @update:value="player.seekRatio"/></div>
+  <div class="mini-progress"><SliderBar :value="player.progress" aria-label="播放进度" commit="release" @update:value="player.seekRatio" @preview="onScrub"/></div>
   <!--
     Layout: three columns with the transport cluster in the middle one.
 
@@ -107,7 +130,7 @@ function openPlayingView(): void {
     <TransportControls show-favorite show-queue show-desktop-lyric />
   </div>
   <div class="mini-side mini-side--right">
-    <span class="mini-time tnum" aria-label="播放时长">{{ player.currentTrack ? `${formatTime(player.currentTime)} / ${formatTime(player.duration)}` : 'JJ Music' }}</span>
+    <span class="mini-time tnum" aria-label="播放时长">{{ player.currentTrack ? timeLabel : 'JJ Music' }}</span>
     <!--
       Output spec first, then 更多: the format readout belongs with the other
       status text on its left, and the menu button reads better next to the
@@ -147,7 +170,7 @@ function openPlayingView(): void {
 .playbar:hover .mini-progress :deep(.slider__rail){height:6px}
 .playbar:hover .mini-progress :deep(.slider__thumb){transform:translateY(-50%) scale(1)}
 .mini-side{display:flex;align-items:center;gap:10px;flex:1 1 0;min-width:0}
-.mini-side--right{justify-content:flex-end;gap:12px}
+.mini-side--right{justify-content:flex-end;gap:14px}
 .mini-track{display:flex;align-items:center;gap:14px;min-width:0;max-width:280px;text-align:left;background:none;border:0;color:var(--text-primary);padding:0;cursor:pointer;font:inherit}
 .mini-art{width:49px;height:49px;flex:none;border-radius:6px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden}
 .mini-art img{width:100%;height:100%;object-fit:cover}

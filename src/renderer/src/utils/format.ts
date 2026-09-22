@@ -1,16 +1,23 @@
 /** Small formatting helpers shared by the renderer. */
 
-/** Seconds to `m:ss`, or `h:mm:ss` past an hour. */
+/**
+ * Seconds to `mm:ss`, or `hh:mm:ss` past an hour.
+ *
+ * The minutes are padded because the same column also shows the platforms' own
+ * `interval` strings, which arrive as `03:47`: an unpadded `3:48` next to them
+ * makes the column ragged, and the tabular figures cannot do their job.
+ */
 export function formatTime(seconds: number | undefined): string {
-  if (!seconds || !Number.isFinite(seconds) || seconds < 0) return '0:00'
+  if (!seconds || !Number.isFinite(seconds) || seconds < 0) return '00:00'
   const total = Math.floor(seconds)
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const secs = total % 60
+  const pad = (value: number): string => String(value).padStart(2, '0')
   if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    return `${hours}:${pad(minutes)}:${pad(secs)}`
   }
-  return `${minutes}:${String(secs).padStart(2, '0')}`
+  return `${pad(minutes)}:${pad(secs)}`
 }
 
 /** Human-readable file size. */

@@ -16,8 +16,6 @@ const totalDuration = computed(() => {
   return Math.round(seconds / 3600)
 })
 
-const losslessCount = computed(() => library.tracks.filter((track) => track.lossless).length)
-
 /*
  * Same re-resolution as the 最近播放 page: history stores a snapshot of each
  * track, so local entries are looked back up in the index. A rail built from the
@@ -79,7 +77,6 @@ async function shuffleAll(): Promise<void> {
         <span class="stat__hint">
           {{ library.folders.length }} 个文件夹
           <template v-if="totalDuration > 0"> · 约 {{ totalDuration }} 小时</template>
-          <template v-if="losslessCount > 0"> · {{ losslessCount }} 首无损</template>
         </span>
       </button>
 
@@ -92,12 +89,11 @@ async function shuffleAll(): Promise<void> {
         <span class="stat__hint">按文件里的歌手标签归并</span>
       </button>
 
-      <button
-        class="stat"
-        :class="{ 'stat--warning': library.playableSources.length === 0 }"
-        type="button"
-        @click="router.push('/sources')"
-      >
+      <!-- 0 个在线平台不是错误状态：只用本地曲库的人什么都没做错。以前这里加过一圈
+           琥珀色警告边框，但它会被 .stat:hover 覆盖（一悬停就变回普通边框），而且只
+           影响四张卡片中的一张，看起来更像渲染故障而不是提示。要不要引导用户导入音源，
+           交给下面的「开始使用」清单。 -->
+      <button class="stat" type="button" @click="router.push('/sources')">
         <span class="stat__value tnum">{{ library.playableSources.length }}</span>
         <span class="stat__label">在线平台</span>
         <span class="stat__hint">
@@ -307,10 +303,6 @@ async function shuffleAll(): Promise<void> {
 .stat:hover {
   background: var(--bg-hover);
   border-color: var(--border-strong);
-}
-
-.stat--warning {
-  border-color: rgba(255, 180, 84, 0.4);
 }
 
 .stat__value {

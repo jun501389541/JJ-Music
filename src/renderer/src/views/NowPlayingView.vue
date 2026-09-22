@@ -384,6 +384,15 @@ function playArtworkFlight(): void {
     <!-- blurred cover backdrop -->
     <div v-if="library.settings.sunglow" class="np__backdrop" :style="cover ? { backgroundImage: `url('${cover}')` } : undefined" />
     <div class="np__scrim" />
+    <!--
+      The spectrum runs the full width along the bottom, mirrored about its own
+      centre, and sits *behind* the artwork and the lyrics rather than taking a
+      row of its own. It used to be a 44 px strip under the cover, which pushed
+      the artwork up out of the middle of the page to make room for it — the
+      shape of the music is decoration on this surface, not a control, so it no
+      longer costs the layout anything.
+    -->
+    <div v-if="library.settings.showSpectrum" class="np__spectrum-band"><SpectrumVisualizer /></div>
 
     <button class="np__close icon-btn" type="button" title="收起" @click="emit('close')">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -410,7 +419,7 @@ function playArtworkFlight(): void {
           ref="artwork"
           @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"
           class="np__art"
-          :class="{ 'is-spinning': player.playing, 'is-flying': artworkFlying }"
+          :class="{ 'is-spinning': player.playing, 'is-flying': artworkFlying, 'has-reflection': !!cover }"
         >
           <img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer" />
           <svg v-else width="72" height="72" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -425,8 +434,6 @@ function playArtworkFlight(): void {
             <circle cx="16.5" cy="16" r="2.5" stroke="currentColor" stroke-width="1.2" />
           </svg>
         </div>
-
-        <SpectrumVisualizer v-if="library.settings.showSpectrum" class="np__spectrum" />
       </section>
 
       <!--
@@ -575,13 +582,27 @@ function playArtworkFlight(): void {
 
 /* ---------------- backdrop ---------------- */
 
+/*
+ * The cover blown up behind everything.
+ *
+ * This used to be `opacity: 0.5` under a scrim that reached 92 % opaque in its
+ * middle, which is why the page read as flat dark grey with the artwork's colour
+ * barely present. The reference look is the opposite: the jacket's own palette is
+ * the room the lyrics sit in. So the layer is now opaque and it is the *artwork*
+ * that is dimmed (brightness on the blurred copy), with the scrim left to do what
+ * a scrim is for — hold back the top and bottom strips where small text lives,
+ * and stop the middle from competing with the lyric line.
+ *
+ * Dimming through `brightness` rather than `opacity` matters: opacity would let
+ * the near-black page background wash the colour out towards grey, which is the
+ * exact flatness this is meant to get rid of.
+ */
 .np__backdrop {
   position: absolute;
   inset: -10%;
   background-size: cover;
   background-position: center;
-  filter: blur(64px) saturate(1.6);
-  opacity: 0.5;
+  filter: blur(72px) saturate(1.65) brightness(0.78);
   transform: scale(1.1);
   transition: background-image var(--dur-slow) var(--ease-out);
 }
@@ -591,8 +612,9 @@ function playArtworkFlight(): void {
   inset: 0;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--bg-base) 72%, transparent) 0%,
-    color-mix(in srgb, var(--bg-base) 92%, transparent) 60%,
+    color-mix(in srgb, var(--bg-base) 46%, transparent) 0%,
+    color-mix(in srgb, var(--bg-base) 54%, transparent) 45%,
+    color-mix(in srgb, var(--bg-base) 88%, transparent) 88%,
     var(--bg-base) 100%
   );
 }
@@ -668,6 +690,9 @@ function playArtworkFlight(): void {
  */
 
 .np__left {
+  /* One definition of the cover's size, shared by the square and compact rules
+     and by the short-window media query below. */
+  --art-size: min(100%, 420px, 46vh);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -677,7 +702,7 @@ function playArtworkFlight(): void {
 }
 
 .np__art {
-  width: min(100%, 420px, 46vh);
+  width: var(--art-size);
   aspect-ratio: 1;
   border-radius: var(--radius-xl);
   overflow: hidden;
@@ -696,6 +721,31 @@ function playArtworkFlight(): void {
 }
 
 /*
+ * The mirror under the cover.
+ *
+ * `-webkit-box-reflect` is the engine's own reflection feature: it paints a
+ * flipped copy of the element's rendered box, so it follows the rounded corners,
+ * the circular-disc variant and the spinning record without a second `<img>` to
+ * keep in sync.
+ *
+ * The mask's direction is the trap. Its gradient runs from the *far* end of the
+ * copy toward the cover, not the other way round — writing the opaque stop at
+ * `0%` puts the visible sliver at the bottom of the band, leaving a detached
+ * mirror an artwork-height away from the cover it came from. So the stops climb:
+ * transparent at the far end, strongest at 100% where the copy meets the cover.
+ * Measured, not assumed: the first build of this looked exactly like a second,
+ * smaller album jacket sitting under the first.
+ *
+ * Only with real artwork — mirroring the placeholder glyph would be a copy of an
+ * icon. Nothing reserves space for this: a reflection is paint, not layout, and
+ * the only thing under the cover now is the spectrum band, which it is meant to
+ * overlap.
+ */
+.np__art.has-reflection {
+  -webkit-box-reflect: below 10px linear-gradient(transparent 64%, rgba(0, 0, 0, 0.16) 82%, rgba(0, 0, 0, 0.45) 100%);
+}
+
+/*
  * Artwork flight from the toolbar thumbnail.
  *
  * The transform is set inline by `playArtworkFlight()` (it is a FLIP, so the
@@ -710,10 +760,24 @@ function playArtworkFlight(): void {
   z-index: 2;
 }
 
-.np__spectrum {
-  width: min(100%, 420px);
-  height: 44px;
-  margin-top: 22px;
+/*
+ * The spectrum band. Its bottom edge is the progress line, so the silhouette
+ * looks like it is coming out of the scrubber; it stops there rather than
+ * continuing under the play bar, because the bar is an opaque surface and a
+ * partial shape peeking from behind it reads as a clipping bug.
+ *
+ * It sits at z-index 1 — behind the artwork, its reflection and the lyrics — and
+ * `pointer-events` is off, because a full-width layer across the bottom of the
+ * page would otherwise swallow clicks meant for the lyric column's lower half.
+ */
+.np__spectrum-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--playbar-height);
+  height: clamp(140px, 28vh, 240px);
+  z-index: 1;
+  pointer-events: none;
 }
 
 /* ---------------- transport ---------------- */
@@ -894,10 +958,6 @@ code {
     gap: 20px;
     padding: 48px 28px 24px;
   }
-
-  .np__spectrum {
-    display: none;
-  }
 }
 /*
   The bar’s info line, which this view supplies through PlayerBar’s slot.
@@ -909,9 +969,9 @@ code {
 .np{--bg-base:#191b23;--bg-panel:#252832;--text-primary:#f5f5f7;--text-secondary:#b2b4c0;--text-tertiary:#777a89;color:var(--text-primary)}
 .np__caption{position:absolute;top:21px;left:64px;font-size:12px;z-index:3;-webkit-app-region:drag;width:calc(100% - 280px)}.np__caption span{margin-left:16px;color:var(--text-tertiary);font-size:11px}.np__window-actions{position:absolute;right:0;top:0;z-index:3;display:flex;height:var(--titlebar-height);-webkit-app-region:no-drag}
 .np__body{grid-template-columns:minmax(280px, 4fr) minmax(320px, 5fr);grid-template-rows:minmax(0, 1fr);padding:52px 56px 24px;gap:48px}
-.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:min(100%,420px,46vh);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;line-height:var(--lyric-line-height);padding:calc(var(--lyric-size) * (var(--lyric-line-height) - 1) / 2) 4px;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative}
+.np__left{align-items:center;justify-content:center;height:100%}.np__art{width:var(--art-size);flex-shrink:0;border-radius:14px}.circle-cover .np__art{border-radius:50%}.np__right{padding:8px 0}.np__line{font-size:var(--lyric-size);text-align:var(--lyric-align);font-weight:550;line-height:var(--lyric-line-height);padding:calc(var(--lyric-size) * (var(--lyric-line-height) - 1) / 2) 4px;transform-origin:center;color:#777a89}.np__line.is-active{color:#fff;transform:scale(1.02)}.np__line-translation{font-size:.48em;line-height:1.8}.blur-lyrics .np__line:not(.is-active){filter:blur(1.2px)}.np__lyrics{position:relative}
 
-@media(max-height:700px){.np__body{padding:44px 40px 16px;gap:34px}.np__art{width:min(100%,300px,38vh)}}
+@media(max-height:700px){.np__body{padding:44px 40px 16px;gap:34px}.np__left{--art-size:min(100%,300px,38vh)}}
 .np{color-scheme:dark;--bg-hover:#303340;--bg-active:#353947;--border-subtle:#ffffff10;--border-strong:#ffffff20;--bg-input:#191b23}
 /* Multi-source lyric picker. Sits above the panels so a choice is never
    obscured by the EQ/queue layer that may already be open. */

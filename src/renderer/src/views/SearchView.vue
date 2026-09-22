@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { isLocalTrack, type OnlineMusicInfo, type PlayableTrack, type SourceId } from '@shared/types'
+import { isLocalTrack, type HotWord, type OnlineMusicInfo, type PlayableTrack, type SourceId } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
+import { useUiStore } from '../stores/ui'
 import TrackList from '../components/TrackList.vue'
+import SearchSuggest from '../components/SearchSuggest.vue'
+import { useSearchSuggest } from '../composables/use-search-suggest'
 
-const library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore()
+const library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore(), ui = useUiStore()
 const router = useRouter(), route = useRoute()
 // `all` and `local` are this view's own scopes, not platforms. Everything else
 // is asked of the main process: the list used to be a literal copy of the search
@@ -42,47 +45,28 @@ const resultMeta = computed(() => {
 const hasSources = computed(() => library.playableSources.length > 0)
 
 /*
- * Type-ahead over the local library.
- *
- * Shown only while the box holds something *other* than what was last searched:
- * once the search runs, the result list is the answer and a dropdown repeating the
- * top of it is noise. Suggestions are local-only by design — an online search costs
- * a request per keystroke and the platforms throttle that shape of traffic.
+ * Type-ahead over the local library — the same index and keyboard model the title
+ * bar uses (see `use-search-suggest`). Suggestions are local-only by design: an
+ * online search costs a request per keystroke and the platforms throttle that
+ * shape of traffic.
  */
-const focused = ref(false), highlight = ref(-1)
-const suggestions = computed(() => {
-  const query = keyword.value.trim()
-  if (!query || query === submittedQuery.value) return []
-  return library.searchTracks(query).slice(0, 8)
+const focused = ref(false)
+const { suggestions, highlight, onKey, pick } = useSearchSuggest({
+  query: () => keyword.value,
+  unchanged: () => keyword.value.trim() === submittedQuery.value,
+  onPick: () => void runSearch()
 })
-watch(suggestions, () => { highlight.value = -1 })
-
-function onSuggestionKey(event: KeyboardEvent): void {
-  if (!suggestions.value.length) return
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault()
-    const last = suggestions.value.length - 1
-    highlight.value = event.key === 'ArrowDown'
-      ? highlight.value >= last ? 0 : highlight.value + 1
-      : highlight.value <= 0 ? last : highlight.value - 1
-    return
-  }
-  if (event.key === 'Escape') { highlight.value = -1; return }
-  if (event.key === 'Enter' && highlight.value >= 0) {
-    // The list wins over the form: the user aimed at a suggestion, not at a search.
-    event.preventDefault()
-    pickSuggestion(suggestions.value[highlight.value])
-  }
-}
 
 function pickSuggestion(track: PlayableTrack): void {
   keyword.value = track.name
-  highlight.value = -1
-  void runSearch()
+  pick(track)
 }
 
 async function runSearch(targetPage = 1): Promise<void> {
   const query = keyword.value.trim(), request = ++generation
+  // Recorded before the search itself: a query that finds nothing is still
+  // something the user typed and may want again.
+  if (query && query !== submittedQuery.value) rememberWord(query)
   submittedQuery.value = query
   onlineResults.value = []; total.value = 0; allPage.value = 1; page.value = targetPage; searchError.value = ''
   searched.value = !!query
@@ -122,30 +106,95 @@ onMounted(() => {
   if (keyword.value) void runSearch()
 })
 watch(() => route.query.q, value => { keyword.value=typeof value==='string'?value:'';void runSearch() })
+
+/* ------------------------------------------------------------------ *
+ * 搜索历史与热门搜索词 — what the page offers before you have typed anything.
+ *
+ * Both are switches in 设置·搜索, and both are hidden rather than shown empty:
+ * a heading over nothing reads as a broken feature, not as an absence.
+ * ------------------------------------------------------------------ */
+const HISTORY_LIMIT = 12
+const history = computed(() => library.settings.showSearchHistory ? library.settings.searchHistory ?? [] : [])
+const hotWords = ref<HotWord[]>([])
+/**
+ * The tab the in-flight request was made for. Switching 全部 → QQ → 网易云 quickly
+ * must not let the first answer land last and label itself as the current tab's.
+ */
+let hotScope: SourceId | 'all' | '' = ''
+
+async function loadHotWords(): Promise<void> {
+  if (!library.settings.showSearchHotWords) { hotWords.value = []; hotScope = ''; return }
+  const scope = activeSource.value
+  hotScope = scope
+  try {
+    const words = await window.jj.music.hotWords(scope)
+    if (hotScope === scope) hotWords.value = words
+  } catch {
+    if (hotScope === scope) hotWords.value = []
+  }
+}
+/**
+ * The hints live or die by what is in the box, not by whether a search has run:
+ * clearing the field is how you get back to "what should I search for", and a
+ * page that hides its own history until you reload answers a question nobody
+ * asked.
+ */
+const boxEmpty = computed(() => !keyword.value.trim())
+watch([activeSource, boxEmpty, () => library.settings.showSearchHotWords], () => {
+  void (boxEmpty.value ? loadHotWords() : (hotWords.value = [], Promise.resolve()))
+}, { immediate: true })
+
+/** Only a genuinely new query is recorded — a tab switch or a page turn is not. */
+function rememberWord(query: string): void {
+  if (!library.settings.showSearchHistory || !query) return
+  const next = [query, ...history.value.filter(word => word !== query)].slice(0, HISTORY_LIMIT)
+  void library.updateSettings({ searchHistory: next })
+}
+
+function clearHistory(): void {
+  void library.updateSettings({ searchHistory: [] })
+}
+
+function removeHistoryWord(word: string): void {
+  void library.updateSettings({ searchHistory: history.value.filter(item => item !== word) })
+}
+
+/** Right-click is how the rest of this app deletes one thing out of a list. */
+function historyMenu(word: string, event: MouseEvent): void {
+  ui.openMenu(event, [{ label: '从历史删除', icon: 'trash', danger: true, action: () => removeHistoryWord(word) }])
+}
+
+function searchFor(word: string): void {
+  keyword.value = word
+  void runSearch()
+}
+
+function platformName(source: SourceId): string {
+  return platforms.value.find(platform => platform.id === source)?.name ?? source
+}
 </script>
 <template>
   <div class="view search-view">
     <header class="view__header"><div><h1 class="view__title">全局搜索</h1><p class="view__subtitle">搜索本地曲库与在线音乐，切换平台可只看该来源的结果</p></div></header>
     <form class="searchbar" @submit.prevent="runSearch()">
       <div class="searchbar__field">
-        <input v-model="keyword" class="input searchbar__input" type="search" placeholder="搜索歌曲、歌手、专辑，或拼音首字母…" aria-label="全局搜索关键词" role="combobox" :aria-expanded="suggestions.length > 0" aria-autocomplete="list" @focus="focused = true" @blur="focused = false" @keydown="onSuggestionKey"/>
-        <div v-if="focused && suggestions.length" class="suggest" role="listbox" aria-label="本地曲库联想">
-          <button
-            v-for="(track, index) in suggestions"
-            :key="track.id"
-            type="button"
-            role="option"
-            :aria-selected="index === highlight"
-            class="suggest__item"
-            :class="{ 'is-active': index === highlight }"
-            @mousedown.prevent="pickSuggestion(track)"
-            @mouseenter="highlight = index"
-          ><strong>{{ track.name }}</strong><small>{{ track.singer }} · {{ track.albumName || '未知专辑' }}</small></button>
-        </div>
+        <input v-model="keyword" class="input searchbar__input" type="search" placeholder="搜索歌曲、歌手、专辑，或拼音首字母…" aria-label="全局搜索关键词" role="combobox" :aria-expanded="suggestions.length > 0" aria-autocomplete="list" @focus="focused = true" @blur="focused = false" @keydown="onKey"/>
+        <SearchSuggest v-if="focused && suggestions.length" :items="suggestions" :highlight="highlight" @pick="pickSuggestion" @hover="highlight = $event"/>
       </div>
       <button class="btn btn--primary" type="submit">搜索</button>
     </form>
     <div class="platforms"><button v-for="platform in platforms" :key="platform.id" class="platform" :class="{ 'is-active': activeSource === platform.id }" @click="switchSource(platform.id)">{{ platform.name }}</button></div>
+    <div v-if="boxEmpty && (history.length > 0 || hotWords.length > 0)" class="hints">
+      <div v-if="history.length" class="hints__row">
+        <span class="hints__label">搜索历史</span>
+        <button v-for="word in history" :key="word" class="chip" type="button" @click="searchFor(word)" @contextmenu.prevent="historyMenu(word, $event)">{{ word }}</button>
+        <button class="hints__clear" type="button" @click="clearHistory">清空</button>
+      </div>
+      <div v-if="hotWords.length" class="hints__row">
+        <span class="hints__label">{{ activeSource === 'all' ? '热门搜索 · 各家汇总' : `热门搜索 · ${platformName(activeSource)}` }}</span>
+        <button v-for="word in hotWords" :key="`${word.source}-${word.text}`" class="chip" type="button" @click="searchFor(word.text)">{{ word.text }}<small v-if="activeSource === 'all'">{{ platformName(word.source) }}</small></button>
+      </div>
+    </div>
     <div v-if="searchError" class="search-status">{{ searchError }} · 本地曲库不受影响</div>
     <div v-if="!hasSources && searched && activeSource !== 'local'" class="notice"><span>本地音乐可直接播放，在线音乐需启用音源。</span><button class="btn btn--ghost" @click="router.push('/sources')">音源管理</button></div>
     <div v-if="searched" class="result-meta">{{ resultMeta }}<span v-if="searching" class="search-pending"><i class="spinner"/>正在搜索在线音乐…</span></div>
@@ -228,6 +277,74 @@ watch(() => route.query.q, value => { keyword.value=typeof value==='string'?valu
 .suggest__item:hover,
 .suggest__item.is-active {
   background: var(--bg-hover);
+}
+
+/*
+ * 搜索历史与热门搜索词. Chips rather than a list: they are one-tap shortcuts, and a
+ * row that reads as a table invites scrolling instead of clicking. The label sits
+ * on the same line so the two rows never stack into a wall of text.
+ */
+.hints {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.hints__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hints__label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.chip small {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.hints__clear {
+  border: 0;
+  background: none;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.hints__clear:hover {
+  color: var(--text-primary);
 }
 
 .platforms {

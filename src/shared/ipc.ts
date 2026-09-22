@@ -62,6 +62,8 @@ export const IPC = {
   musicSearchAll: 'music:search-all',
   /** Platforms that have a built-in search adapter. */
   musicSearchProviders: 'music:search-providers',
+  /** What each platform's users are searching right now, for the search page. */
+  musicHotWords: 'music:hot-words',
   musicUrl: 'music:url',
   musicLyric: 'music:lyric',
   musicPic: 'music:pic',

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { useUiStore } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
+import { toMediaUrl } from '@shared/media-url'
 const route = useRoute(), router = useRouter(), library = useLibraryStore(), ui = useUiStore()
 
 /**
@@ -39,6 +40,17 @@ const orderedPlaylists = computed(() => library.orderedPlaylists)
 const draggingId = ref('')
 const dropId = ref('')
 const dropAfter = ref(false)
+
+/**
+ * Cover files live beside the playlist rather than inside its record, so
+ * 清空封面 caches can leave `coverPath` dangling. Keyed on the path because
+ * that is what the `<img>` errored on, and what changes when a new cover is
+ * picked.
+ */
+const brokenCovers = ref<Record<string, boolean>>({})
+function markCoverBroken(path?: string | null): void {
+  if (path) brokenCovers.value[path] = true
+}
 
 function onDragStart(event: DragEvent, id: string): void {
   draggingId.value = id
@@ -117,7 +129,7 @@ function playlistMenu(event: MouseEvent, id: string, name: string): void {
     which reads as a broken version of the playlist reordering right below.
   -->
   <nav ref="navEl" @scroll.passive="onNavScroll"><div class="nav-group"><RouterLink v-for="item in browse" :key="item.to" :to="item.to" class="nav-item" :draggable="false"><AppIcon :name="item.icon"/><span>{{ item.label }}</span><small v-if="counts[item.to] !== undefined">{{ counts[item.to] }}</small></RouterLink></div>
-  <div class="nav-group"><div class="nav-row"><RouterLink to="/playlists" class="nav-item nav-playlists" :draggable="false"><AppIcon name="library"/><span>歌单管理</span></RouterLink><button class="nav-add" title="新建歌单" aria-label="新建歌单" @click="createPlaylist"><AppIcon name="add" :size="15"/></button></div><RouterLink v-for="tool in playlistTools" :key="tool.to" :to="tool.to" class="nav-item" :draggable="false"><AppIcon :name="tool.icon"/><span>{{ tool.label }}</span></RouterLink><RouterLink v-for="list in orderedPlaylists" :key="list.id" :to="'/playlist/' + list.id" class="nav-item playlist-link" :class="{ 'is-dragging': draggingId === list.id, 'is-over-top': dropId === list.id && !dropAfter, 'is-over-bottom': dropId === list.id && dropAfter }" :draggable="!pinnedLists.includes(list.id)" @dragstart="onDragStart($event, list.id)" @dragover="onDragOver($event, list.id)" @drop="onDrop($event, list.id)" @dragend="onDragEnd" @contextmenu="playlistMenu($event, list.id, list.name)"><AppIcon :name="list.id === 'favorites' ? 'heart' : 'list'" :size="18"/><span>{{ list.name }}</span><small>{{ list.trackCount ?? 0 }}</small></RouterLink></div></nav>
+  <div class="nav-group"><div class="nav-row"><RouterLink to="/playlists" class="nav-item nav-playlists" :draggable="false"><AppIcon name="library"/><span>歌单管理</span></RouterLink><button class="nav-add" title="新建歌单" aria-label="新建歌单" @click="createPlaylist"><AppIcon name="add" :size="15"/></button></div><RouterLink v-for="tool in playlistTools" :key="tool.to" :to="tool.to" class="nav-item" :draggable="false"><AppIcon :name="tool.icon"/><span>{{ tool.label }}</span></RouterLink><RouterLink v-for="list in orderedPlaylists" :key="list.id" :to="'/playlist/' + list.id" class="nav-item playlist-link" :class="{ 'is-dragging': draggingId === list.id, 'is-over-top': dropId === list.id && !dropAfter, 'is-over-bottom': dropId === list.id && dropAfter }" :draggable="!pinnedLists.includes(list.id)" @dragstart="onDragStart($event, list.id)" @dragover="onDragOver($event, list.id)" @drop="onDrop($event, list.id)" @dragend="onDragEnd" @contextmenu="playlistMenu($event, list.id, list.name)"><img v-if="list.coverPath && !brokenCovers[list.coverPath]" class="playlist-cover" :src="toMediaUrl(list.coverPath)" draggable="false" alt="" @error="markCoverBroken(list.coverPath)"/><AppIcon v-else :name="list.id === 'favorites' ? 'heart' : 'list'" :size="18"/><span>{{ list.name }}</span><small>{{ list.trackCount ?? 0 }}</small></RouterLink></div></nav>
   <div class="sidebar-pin">
     <RouterLink v-for="item in pinned" :key="item.to" :to="item.to" class="sidebar-bottom" :draggable="false"><AppIcon :name="item.icon" :size="17"/><span>{{ item.label }}</span></RouterLink>
     <button class="sidebar-bottom" :class="{ active: route.path.startsWith('/settings') }" @click="router.push('/settings')"><AppIcon name="settings" :size="17"/><span>设置</span></button>
@@ -130,7 +142,12 @@ function playlistMenu(event: MouseEvent, id: string, name: string): void {
 .nav-row{position:relative}.nav-add{position:absolute;right:10px;top:50%;transform:translateY(-50%);width:26px;height:26px;display:grid;place-items:center;opacity:0;color:var(--text-secondary);background:none;border:0;border-radius:var(--radius-sm);cursor:pointer;transition:opacity var(--dur-fast) var(--ease-out),background-color var(--dur-fast) var(--ease-out)}.nav-row:hover .nav-add,.nav-add:focus-visible{opacity:1}.nav-add:hover{color:var(--text-primary);background:var(--bg-hover)}.playlist-link{color:var(--text-secondary);font-size:13px;min-height:39px}/* Only the user lists carry `draggable`; the built-in pair keeps the normal
    pointer so it reads as fixed. The line is an inset shadow rather than a
    border so a row never jumps while being pointed at. */
-.playlist-link[draggable="true"]{cursor:grab}.playlist-link[draggable="true"]:active{cursor:grabbing}.playlist-link.is-dragging{opacity:.4}.playlist-link.is-over-top{box-shadow:inset 0 2px 0 var(--accent)}.playlist-link.is-over-bottom{box-shadow:inset 0 -2px 0 var(--accent)}.sidebar-pin{flex:none;padding-top:6px;border-top:1px solid var(--divider)}/* The pinned rows are nav rows: same box, radius and active bar, so selecting
+.playlist-link[draggable="true"]{cursor:grab}.playlist-link[draggable="true"]:active{cursor:grabbing}.playlist-link.is-dragging{opacity:.4}.playlist-link.is-over-top{box-shadow:inset 0 2px 0 var(--accent)}.playlist-link.is-over-bottom{box-shadow:inset 0 -2px 0 var(--accent)}/* The cover takes exactly the box the fallback glyph takes, so names line up
+   whether or not a list has art — unsized it kept its intrinsic 1200px and
+   shoved the name out of the rail. `draggable="false"` in the template is
+   load-bearing too: an `<img>` is its own drag source, so a built-in row's
+   picture would otherwise drop onto the import zone. */
+.playlist-cover{width:18px;height:18px;flex:none;border-radius:var(--radius-xs);object-fit:cover;background:var(--bg-panel)}.sidebar-pin{flex:none;padding-top:6px;border-top:1px solid var(--divider)}/* The pinned rows are nav rows: same box, radius and active bar, so selecting
    设置 highlights exactly like selecting 歌曲 above it. */
 .sidebar-bottom{position:relative;display:flex;align-items:center;gap:15px;min-height:43px;margin:2px 0;padding:9px 14px;width:100%;color:var(--text-primary);background:none;border:0;border-radius:6px;font:inherit;font-size:14px;text-decoration:none;text-align:left;cursor:pointer}.sidebar-bottom span{flex:1}.sidebar-bottom:hover{background:var(--bg-hover)}.sidebar-bottom.active,.sidebar-bottom.router-link-active{background:var(--bg-hover)}.sidebar-bottom.active:before,.sidebar-bottom.router-link-active:before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:3px;background:var(--accent);border-radius:4px}
 </style>

@@ -10,6 +10,7 @@ import type { AppSettings } from '@shared/types'
 export const DEFAULT_SETTINGS: AppSettings = {
   ...UI_DEFAULTS,
   recentPlayed: [],
+  searchHistory: [],
   playQuality: 'flac24bit',
   libraryFolders: [],
   scanExtensions: [],

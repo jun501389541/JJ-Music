@@ -18,6 +18,7 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
     link('音乐库', '/music-library', 'library', '管理文件夹与本地音乐'),
     link('音源管理', '/sources', 'cloud', '导入、启用与校验 LX 音源脚本'),
     link('在线音乐', 'online', 'cloud', '音源、在线音质与本地优先'),
+    link('搜索', 'search', 'search', '搜索历史与热门搜索词'),
     link('下载', 'downloads', 'folder', '保存目录、歌词、翻译、罗马音与封面'),
     link('标签与文件', 'assets', 'edit', '封面与歌词写到哪、可改写的格式、待写入列表'),
     link('键盘快捷键', 'shortcuts', 'keyboard', '通过键盘控制播放'),
@@ -71,6 +72,10 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
   assets: { title: '标签与文件', icon: 'edit', description: '封面与歌词写到哪、哪些文件可以被改写、还有什么等着写入', items: [
     select('写入位置', 'assetWriteTarget', [['写入音频文件标签', 'embedded'], ['保存为同名文件', 'sidecar'], ['两者都写', 'both']], '「写入封面与歌词」与标签匹配落盘的位置。选「写入文件标签」时，遇到不能改写的格式会自动改存同名文件并告诉你'),
     flags('可改写的格式', 'tagWritableFormats', [['MP3', '.mp3'], ['FLAC', '.flac']], '只有勾上的格式会被修改；取消勾选只会让它改存同名文件——标题等文本字段本来就只写得进文件标签')
+  ] },
+  search: { title: '搜索', icon: 'search', description: '全局搜索页在你输入之前显示什么', items: [
+    toggle('记录搜索历史', 'showSearchHistory', '最近搜过的关键词显示在搜索页顶部，可逐条删除或一键清空。关掉后不再记录，并已存的记录一并清掉——这个开关的意思就是"别留"'),
+    toggle('显示热门搜索词', 'showSearchHotWords', '向平台问一次"现在大家在搜什么"，按当前页签切换来源，「全部」把各家的前几条并起来。实测只有 QQ 与网易云给公开的端点，其余平台这一栏不出现')
   ] },
   playback: { title: '播放', icon: 'play', items: [select('播放模式', 'playMode', [['顺序播放', 'list'], ['列表循环', 'repeat'], ['单曲循环', 'single'], ['随机播放', 'random']]), select('播放速度', 'playbackRate', [['0.5 ×', .5], ['0.75 ×', .75], ['1 ×', 1], ['1.25 ×', 1.25], ['1.5 ×', 1.5], ['2 ×', 2]]), toggle('桌面歌词', 'desktopLyric', '在窗口之外置顶显示当前歌词，拖动它可改位置'), toggle('锁定桌面歌词位置', 'desktopLyricLocked', '锁定后鼠标点击穿透到下面的窗口，需要解锁才能再拖动'), select('桌面歌词字号', 'desktopLyricFontSize', [['小', 22], ['中', 28], ['大', 36], ['特大', 46]]), toggle('关闭窗口时最小化到托盘', 'minimizeToTray', '关闭主窗口后继续播放，可从托盘图标恢复窗口或退出')] },
   online: { title: '在线音乐', icon: 'cloud', description: '兼容 LX Music 自定义音源协议', items: [link('音源管理', '/sources', 'cloud', '导入、启用与诊断音源脚本'), select('在线音质', 'playQuality', [['标准 · 128K', '128k'], ['高品质 · 320K', '320k'], ['无损 · FLAC', 'flac'], ['高解析 · FLAC 24bit', 'flac24bit']]), toggle('优先播放本地文件', 'preferLocal', '同名、同艺术家且时长接近时，优先使用曲库中的文件'), { label: '自动降级与备用平台', kind: 'info', description: '优先请求选定音质，失败后降级；跨平台只匹配同一录音版本。' }] },

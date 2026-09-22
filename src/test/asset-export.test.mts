@@ -253,6 +253,25 @@ check('删除指定条目后只剩别的', (await reopened.load()).length === 1)
 const reread = new PendingAssetStore(libraryDir)
 check('删除真的落盘了', (await reread.load()).length === 1)
 
+/* ---------------- 丢弃之后同一条不再回来 ---------------- */
+
+const dismissed = new PendingAssetStore(libraryDir)
+const sample = await dismissed.load()
+await dismissed.dismissEntries(sample.filter((entry) => entry.trackId === 't2'))
+const t2 = sample.find((entry) => entry.trackId === 't2')
+check('丢弃过的那条被认出来', await dismissed.isDismissed('t2', 'lyric', t2.lyric))
+check('同一条词换个行尾与尾随空白仍算同一条', await dismissed.isDismissed('t2', 'lyric', `${t2.lyric.replace(/\n/g, '\r\n')}   \n\n`))
+check('另一条词照旧会给出来', !(await dismissed.isDismissed('t2', 'lyric', '完全不同的另一条')))
+check('别的歌不受影响', !(await dismissed.isDismissed('other-track', 'lyric', t2.lyric)))
+check('丢弃不改动队列本身', (await dismissed.load()).length === 1)
+
+const dismissedReopened = new PendingAssetStore(libraryDir)
+await dismissedReopened.load()
+check('这个"不要了"活得过重启', await dismissedReopened.isDismissed('t2', 'lyric', t2.lyric))
+// 写盘的是 { entries, dismissed } 两段；旧的裸数组文件必须在下一行的小测试里照样读得出来
+const queueFile = JSON.parse(readFileSync(join(libraryDir, 'library', 'pending-assets.json'), 'utf8'))
+check('队列文件带上了被丢弃记录', Array.isArray(queueFile.entries) && Array.isArray(queueFile.dismissed) && queueFile.dismissed.length === 1, JSON.stringify(queueFile.dismissed).slice(0, 80))
+
 // Garbage on disk must not be trusted.
 put(join(libraryDir, 'library', 'pending-assets.json'), JSON.stringify([
   { trackId: 'ok', kind: 'lyric', name: 'n', singer: 's', path: audio, lyric: '词', origin: 'remote', at: 1 },

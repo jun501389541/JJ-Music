@@ -40,6 +40,7 @@ await build({
     join(repoRoot, 'src', 'main', 'downloads', 'download-manager.ts'),
     join(repoRoot, 'src', 'main', 'online', 'playlist-import.ts'),
     join(repoRoot, 'src', 'main', 'online', 'artist-image.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'hot-words.ts'),
     join(repoRoot, 'src', 'main', 'library', 'artist-images.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'platform-probe.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'source-store.ts'),

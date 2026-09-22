@@ -33,6 +33,7 @@ import { SourceEngine } from './sources/source-engine'
 import { MusicLibrary } from './library/music-library'
 import { PlaylistStore, SettingsStore } from './store/settings-store'
 import { searchAll, searchOnline, searchProviders } from './online/search'
+import { HotWordSource } from './online/hot-words'
 import { fetchOnlineLyric } from './online/lyrics'
 import {
   clearLyricCache,
@@ -221,6 +222,8 @@ interface Services {
   playlists: PlaylistStore
   library: MusicLibrary
   artistImages: ArtistImageStore
+  /** "What is being searched now", per platform, with its own short-lived cache. */
+  hotWords: HotWordSource
   /** Lyrics/covers fetched for local tracks and not yet written to disk. */
   pendingAssets: PendingAssetStore
   sourceStore: SourceStore
@@ -250,6 +253,7 @@ async function createServices(): Promise<Services> {
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
   const artistImages = new ArtistImageStore(dataDir, { saveCover: (data, format) => library.saveCover(data, format) })
+  const hotWords = new HotWordSource()
   const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
   // Sources run in a forked child process, so they can be killed without
@@ -293,7 +297,7 @@ async function createServices(): Promise<Services> {
       : Promise.reject(new Error('下载不接受非字符串地址'))
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, pendingAssets, sourceStore, sourceEngine, downloads, onlineLyric }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, downloads, onlineLyric }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -731,9 +735,15 @@ async function commitAssetWrite(
  * Picard, Kid3, Yate — settled on the same stage-then-save shape for the same
  * reason: the app's guess at a lyric is often right, and when it is wrong the
  * user must be able to walk it back before it becomes their file.
+ *
+ * Saying no is remembered per song and per text, so the suggestion the user
+ * already rejected does not come back on the next play — a different one still
+ * does, because the first match may have been the wrong recording. The lyric
+ * itself keeps playing either way: this queue is about writing files.
  */
 async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric): Promise<ResolvedLyric> {
   if (resolved.source !== 'online' || !resolved.lyric.trim()) return resolved
+  if (await requireServices().pendingAssets.isDismissed(track.id, 'lyric', resolved.lyric)) return resolved
   const asset: AssetRef = { ...(resolved.asset ?? { origin: 'remote' }), pending: true }
   await requireServices().pendingAssets.add({
     trackId: track.id,
@@ -1199,6 +1209,10 @@ function registerIpc(): void {
      * so the renderer's copy is corrected by the same call.
      */
     const { libraryFolders: _libraryFolders, downloadFolder: _downloadFolder, ...writable } = patch
+    // 关掉「记录搜索历史」就把已存的也清掉，而且此后任何补丁想写历史都写不进去。
+    // 只看这一次补丁不够：渲染层手里那份设置可能比主进程旧，而这个开关的意思就是
+    // "别留"。同一份补丁里把它打开（快照恢复、重置）仍然允许带着列表进来。
+    if (!(writable.showSearchHistory ?? settings.get().showSearchHistory)) writable.searchHistory = []
     const after = await settings.update(writable)
     if (patch.displayScale !== undefined) mainWindow?.webContents.setZoomFactor(Math.min(1.25, Math.max(0.85, after.displayScale / 100)))
     if (patch.alwaysOnTop !== undefined) mainWindow?.setAlwaysOnTop(after.alwaysOnTop)
@@ -1506,6 +1520,18 @@ function registerIpc(): void {
 
   /** Platforms with a built-in adapter, for the search UI's tab list. */
   handle(IPC.musicSearchProviders, () => searchProviders())
+
+  /**
+   * What each platform's users are searching right now, for the empty search page.
+   *
+   * An unrecognised `scope` answers with an empty list instead of throwing: this
+   * row is decoration on top of the search page, and a caller bug should not turn
+   * into a page that cannot be used.
+   */
+  handle(IPC.musicHotWords, async (scope: unknown) => {
+    const wanted = typeof scope === 'string' && scope.length <= 12 ? scope : 'all'
+    return requireServices().hotWords.words(wanted === 'all' ? 'all' : (wanted as SourceId))
+  })
 
   /**
    * Aggregate search.
@@ -1907,6 +1933,9 @@ function registerIpc(): void {
     const staged = await pendingAssets.load()
     const dropped = pendingSelection(staged, bulkTrackIds(trackIds))
     await pendingAssets.removeEntries(dropped)
+    // Remember what was refused, so the next play of that song does not offer the
+    // very same text again.
+    await pendingAssets.dismissEntries(dropped)
     // The badge reads the resolver's cache, not the queue: a discarded lyric
     // stays decorated as 「待写入」 there until it is re-resolved, so 全部丢弃
     // looked like it had done nothing until the user played the song again.

@@ -35,6 +35,14 @@ export const UI_DEFAULTS = {
    */
   fontSize: 100,
   playbackRate: 1,
+  /**
+   * The 全局搜索 page's two helpers. Separate switches because they are separate
+   * asks: one keeps a record of what *this machine* searched, the other asks a
+   * platform what *everyone* is searching — and a user who is happy with the first
+   * may not want an outside list deciding what they see before they type.
+   */
+  showSearchHistory: true,
+  showSearchHotWords: true,
   equalizerGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   equalizerName: '平坦'
 }

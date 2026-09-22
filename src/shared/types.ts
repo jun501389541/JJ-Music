@@ -515,6 +515,15 @@ export interface AppSettings extends UiPreferences {
    * writer snapshots patches through JSON, which drops undefined.
    */
   lastSession?: LastSession | null
+  /**
+   * Search keywords the user has run, newest first, capped.
+   *
+   * Lives with the other things the app remembers rather than in a file of its
+   * own because it is exactly the same shape of data: short strings, written
+   * often, worthless if lost, and cleared by the same switch that hides it.
+   * `showSearchHistory` decides whether they are recorded at all.
+   */
+  searchHistory: string[]
   /** Preferred online quality; the engine falls back when unavailable. */
   playQuality: Quality
   /** Music library folders. */
@@ -664,6 +673,17 @@ export interface DownloadTask {
   warnings: string[]
   createdAt: number
 }
+/**
+ * One entry of "what is being searched right now" on a platform.
+ *
+ * Lives here rather than beside the fetcher because the preload bridge and the
+ * search page both need it, and neither may import from `src/main`.
+ */
+export interface HotWord {
+  text: string
+  source: SourceId
+}
+
 export interface ImportedPlaylist {
   name: string
   source: SourceId

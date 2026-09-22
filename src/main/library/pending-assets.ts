@@ -19,6 +19,7 @@
  * can ask about directly. So the queue is the record of what waits, and
  * `describeAsset` gets its 待写入 wording from the resolver, which knows it.
  */
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AssetKind, PendingAsset } from '@shared/types'
@@ -39,7 +40,15 @@ export function pendingKey(trackId: string, kind: PendingAsset['kind']): string 
 const MAX_ENTRIES = 500
 
 /**
- * How much lyric text the whole queue may hold, whatever the entry count.
+ * How many dismissed fingerprints are remembered.
+ *
+ * One record per (track, kind, distinct text), oldest dropped first. It is a
+ * bounded cache, not a library of decisions: the point is to stop the *same*
+ * suggestion coming back after the user said no to it, not to archive every no.
+ */
+const MAX_DISMISSED = 2000
+
+/** How much lyric text the whole queue may hold, whatever the entry count.
  *
  * `MAX_ENTRIES` alone does not bound the file: 500 entries at the per-lyric
  * ceiling is a hundred megabytes, and `persist()` rewrites the entire file on
@@ -53,6 +62,13 @@ const MAX_LYRIC_CHARS = 200_000
 export class PendingAssetStore {
   private readonly filePath: string
   private readonly items = new Map<string, PendingAsset>()
+  /**
+   * Lyrics the user discarded, by fingerprint. Keyed `track\0kind\0hash` so a
+   * repeat of the *same* suggestion can be recognised while a different one for
+   * the same song still gets offered — the first match may well have been the
+   * wrong song, which is the whole reason these are suggestions.
+   */
+  private readonly dismissed = new Map<string, DismissedRecord>()
   private loaded = false
 
   constructor(dataDir: string) {
@@ -64,8 +80,23 @@ export class PendingAssetStore {
     this.loaded = true
     try {
       const stored = parseJsonLoose<unknown>(await readFile(this.filePath, 'utf8'))
-      if (Array.isArray(stored)) {
-        for (const entry of stored) if (usable(entry)) this.items.set(pendingKey(entry.trackId, entry.kind), entry)
+      // Two shapes: this file used to be a bare array of entries, and it still
+      // reads as one, so a queue written by the previous build is not lost.
+      const entries = Array.isArray(stored) ? stored : (stored as { entries?: unknown[] })?.entries
+      const remembered = (stored as { dismissed?: unknown[] })?.dismissed
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        if (usable(entry)) this.items.set(pendingKey(entry.trackId, entry.kind), entry)
+      }
+      for (const record of Array.isArray(remembered) ? remembered : []) {
+        if (!record || typeof record !== 'object') continue
+        const value = record as Partial<DismissedRecord>
+        if (typeof value.trackId !== 'string' || !value.trackId) continue
+        if (value.kind !== 'lyric' && value.kind !== 'cover') continue
+        if (typeof value.hash !== 'string' || !/^[0-9a-f]{16,64}$/.test(value.hash)) continue
+        if (typeof value.at !== 'number' || !Number.isFinite(value.at)) continue
+        this.dismissed.set(dismissKey(value.trackId, value.kind, value.hash), {
+          trackId: value.trackId, kind: value.kind, hash: value.hash, at: value.at
+        })
       }
     } catch {
       // No file, or an unreadable one: an empty queue is the honest state, and a
@@ -139,9 +170,66 @@ export class PendingAssetStore {
     await this.persist()
   }
 
-  private async persist(): Promise<void> {
-    await writeJsonAtomic(this.filePath, this.list())
+  /**
+   * Remember that the user said no to these.
+   *
+   * Called on 丢弃 only. A write that consumed an entry must not land here, or
+   * confirming a lyric would also stop the app from ever noticing that the file
+   * it just wrote has since been deleted.
+   */
+  async dismissEntries(entries: PendingAsset[]): Promise<void> {
+    if (!Array.isArray(entries) || entries.length === 0) return
+    await this.load()
+    const at = Date.now()
+    for (const entry of entries) {
+      // Covers are not staged today; the shape is here so the day they are does
+      // not need this function rewritten.
+      const text = entry.kind === 'lyric' ? entry.lyric : undefined
+      if (typeof text !== 'string' || !text.trim()) continue
+      const hash = lyricFingerprint(text)
+      this.dismissed.set(dismissKey(entry.trackId, entry.kind, hash), {
+        trackId: entry.trackId, kind: entry.kind, hash, at
+      })
+    }
+    if (this.dismissed.size > MAX_DISMISSED) {
+      for (const key of [...this.dismissed.keys()].slice(0, this.dismissed.size - MAX_DISMISSED)) this.dismissed.delete(key)
+    }
+    await this.persist()
   }
+
+  /** Has this exact text already been thrown away for this track? */
+  async isDismissed(trackId: string, kind: AssetKind, text: string): Promise<boolean> {
+    if (!text.trim()) return false
+    await this.load()
+    return this.dismissed.has(dismissKey(trackId, kind, lyricFingerprint(text)))
+  }
+
+  private async persist(): Promise<void> {
+    await writeJsonAtomic(this.filePath, { entries: this.list(), dismissed: [...this.dismissed.values()] })
+  }
+}
+
+interface DismissedRecord {
+  trackId: string
+  kind: AssetKind
+  hash: string
+  at: number
+}
+
+function dismissKey(trackId: string, kind: AssetKind, hash: string): string {
+  return `${pendingKey(trackId, kind)}\u0000${hash}`
+}
+
+/**
+ * Fingerprint of a lyric as content, not as bytes.
+ *
+ * The same text arrives from different platforms with different line endings and
+ * a different number of trailing blank lines, and all of those are the same
+ * suggestion as far as the user is concerned.
+ */
+export function lyricFingerprint(text: string): string {
+  const normalised = text.replace(/\r\n?/g, '\n').replace(/\s+$/, '').trimStart()
+  return createHash('sha256').update(normalised, 'utf8').digest('hex')
 }
 
 /**

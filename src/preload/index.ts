@@ -13,6 +13,7 @@ import type {
   AssetKind,
   AssetRef,
   DownloadTask,
+  HotWord,
   ImportedPlaylist,
   IpcResult,
   LocalMusicInfo,
@@ -215,6 +216,14 @@ const api = {
       }>(IPC.musicSearchAll, keyword, page),
     /** Platforms with a built-in search adapter, for the UI's tab list. */
     providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.musicSearchProviders),
+    /**
+     * What is being searched right now, for the empty search page.
+     *
+     * `scope` is a platform id or `all`, which aggregates. An empty array means
+     * "this platform publishes no such list" — the row is hidden rather than
+     * showing a placeholder, so the absence is honest.
+     */
+    hotWords: (scope: SourceId | 'all') => invoke<HotWord[]>(IPC.musicHotWords, scope),
     url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) =>
       invoke<{ url: string; quality: Quality }>(IPC.musicUrl, source, musicInfo, quality),
     lyric: (source: SourceId, musicInfo: OnlineMusicInfo) =>

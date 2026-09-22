@@ -6,6 +6,9 @@ import { useLibraryStore } from '../stores/library'
 import { useUiStore } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
 import WindowControls from './WindowControls.vue'
+import SearchSuggest from './SearchSuggest.vue'
+import { useSearchSuggest } from '../composables/use-search-suggest'
+import type { PlayableTrack } from '@shared/types'
 const emit = defineEmits<{ toggleNowPlaying: [] }>()
 const router = useRouter(), player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
 const jj = window.jj
@@ -24,11 +27,24 @@ const offNavigation = router.afterEach(() => {
   navFlags.value = { back: Boolean(state.back), forward: Boolean(state.forward) }
 })
 
-/** Quick search: the field expands to the right of the magnifier on demand. */
+/**
+ * Quick search: the field expands to the right of the magnifier on demand, and
+ * suggests from the same local index the 全局搜索 page uses — pinyin and initials
+ * included. It used to be a field that only accepted an Enter, which made the two
+ * search boxes feel like two different features.
+ */
 const searchOpen = ref(false)
 const searchField = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
 const searchBox = ref<HTMLElement | null>(null)
+const { suggestions, highlight, onKey, pick } = useSearchSuggest({
+  query: () => searchField.value,
+  onSubmit: runSearch,
+  onPick: (track: PlayableTrack) => {
+    void router.push({ path: '/search', query: { q: track.name } })
+    closeSearch()
+  }
+})
 
 /**
  * Any press outside the pill collapses it. Capture phase, because a click on a
@@ -79,9 +95,12 @@ function systemMenu(event: MouseEvent): void { ui.openMenu(event, [
 <template><header class="titlebar" @dblclick.self="jj.window.maximize()" @contextmenu="systemMenu">
   <div class="brand"><span class="brand-mark">J</span><span>JJ Music</span><small>{{ version }}</small></div>
   <button class="nav-arrow icon-btn" :class="{ live: navFlags.back }" title="返回" aria-label="返回" :disabled="!navFlags.back" @click="router.back()"><AppIcon name="back" :size="17"/></button><button class="nav-arrow icon-btn" :class="{ live: navFlags.forward }" title="前进" aria-label="前进" :disabled="!navFlags.forward" @click="router.forward()"><AppIcon name="next" :size="17"/></button>
-  <div ref="searchBox" class="search-box" :class="{ open: searchOpen }">
-    <button class="search-toggle icon-btn" title="搜索" aria-label="搜索" :aria-expanded="searchOpen" @click="toggleSearch"><AppIcon name="search" :size="16"/></button>
-    <input ref="searchInput" v-model="searchField" class="title-search" :tabindex="searchOpen ? 0 : -1" :aria-hidden="!searchOpen" placeholder="搜索歌曲、歌手、专辑" @keyup.enter="runSearch" @keyup.esc="closeSearch">
+  <div class="search-slot">
+    <div ref="searchBox" class="search-box" :class="{ open: searchOpen }">
+      <button class="search-toggle icon-btn" title="搜索" aria-label="搜索" :aria-expanded="searchOpen" @click="toggleSearch"><AppIcon name="search" :size="16"/></button>
+      <input ref="searchInput" v-model="searchField" class="title-search" :tabindex="searchOpen ? 0 : -1" :aria-hidden="!searchOpen" placeholder="搜索歌曲、歌手、专辑，或拼音首字母…" role="combobox" aria-label="快速搜索" aria-autocomplete="list" @keydown="onKey" @keyup.esc="closeSearch">
+    </div>
+    <SearchSuggest v-if="searchOpen && suggestions.length" :items="suggestions" :highlight="highlight" @pick="pick" @hover="highlight = $event"/>
   </div>
   <button class="caption-track" @click="emit('toggleNowPlaying')">{{ player.currentTrack?.name || '让音乐回归纯粹' }}<span v-if="player.currentTrack"> · {{ player.currentTrack.singer }}</span></button>
   <div class="caption-controls"><WindowControls /></div>
@@ -94,6 +113,22 @@ function systemMenu(event: MouseEvent): void { ui.openMenu(event, [
  * and back. The width transition is the animation; the input fades in only
  * once there is room for it.
  */
+/*
+ * The pill itself clips (`overflow:hidden` is what makes the width animation
+ * work), so the suggestion panel hangs off a wrapper instead — otherwise it would
+ * be cut off at the pill's edge. It is left-aligned and wider than the field:
+ * rows carry "歌名 + 歌手 · 专辑", and at 260 px the album half never fits.
+ *
+ * The lift goes on the panel and nowhere else. A `z-index` on the bar put the
+ * whole title bar above the now-playing overlay (which paints its own brand
+ * caption in the same corner, so the window showed both), and a `z-index` on this
+ * wrapper was the same mistake one level down — the magnifier poked through the
+ * overlay. The wrapper stays unlifted, so the pill is covered like the rest of
+ * the bar; only the open panel, which is `position:absolute` with no stacking
+ * context of its own to be trapped in, escapes upward.
+ */
+.search-slot{position:relative;flex:none;-webkit-app-region:no-drag}
+.search-slot :deep(.suggest){left:0;right:auto;width:min(420px,46vw);z-index:1200}
 .search-box{display:flex;align-items:center;flex:none;width:32px;height:30px;padding:0 1px;overflow:hidden;border:1px solid transparent;border-radius:var(--radius-pill);background-color:transparent;-webkit-app-region:no-drag;transition:width var(--dur-base) var(--ease-out),background-color var(--dur-fast) linear,border-color var(--dur-fast) linear}
 /* At rest the pill carries no fill and no outline — it only materialises under
    the pointer, or while it is open. The glyph inside it, though, stays lit:

@@ -79,13 +79,17 @@ async function shuffleAll(): Promise<void> {
         <span class="stat__hint">
           {{ library.folders.length }} 个文件夹
           <template v-if="totalDuration > 0"> · 约 {{ totalDuration }} 小时</template>
+          <template v-if="losslessCount > 0"> · {{ losslessCount }} 首无损</template>
         </span>
       </button>
 
-      <button class="stat" type="button" @click="router.push('/albums')">
-        <span class="stat__value tnum">{{ library.albums.length }}</span>
-        <span class="stat__label">专辑</span>
-        <span class="stat__hint">{{ losslessCount }} 首无损</span>
+      <!-- 艺术家而不是专辑：专辑数在这台机器上是 1242，其中大半只是"每首歌各一张"，
+           看的人得再点进去才知道有没有内容；艺术家 472 位才是能直接感知的规模。
+           专辑仍然在侧栏里，没有从界面上消失。 -->
+      <button class="stat" type="button" @click="router.push('/artists')">
+        <span class="stat__value tnum">{{ library.artists.length }}</span>
+        <span class="stat__label">艺术家</span>
+        <span class="stat__hint">按文件里的歌手标签归并</span>
       </button>
 
       <button

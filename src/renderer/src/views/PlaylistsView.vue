@@ -160,6 +160,16 @@ async function remove(id: string, name: string): Promise<void> {
   transition: transform var(--dur-base) var(--ease-out);
 }
 
+/* An `<img>` with no size keeps its intrinsic box — measured 1200×1200 for a
+   full-size cover — so the 152px tile clipped a window out of the middle of the
+   picture and only that part was visible. Same three properties the album and
+   artist tiles use. */
+.plcard__art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .plcard__body:hover .plcard__art {
   transform: translateY(-3px);
   box-shadow: var(--shadow-md);

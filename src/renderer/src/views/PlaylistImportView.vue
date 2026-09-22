@@ -43,26 +43,35 @@ async function save():Promise<void>{if(!preview.value||!rows.value.length)return
   <section v-if="preview" class="preview">
     <div class="preview__head">
       <span class="preview__cover"><img v-if="preview.coverUrl" :src="preview.coverUrl" alt="" referrerpolicy="no-referrer"/></span>
-      <div class="preview__title"><h2>{{ preview.name }}</h2><p>待导入 {{ rows.length }} 首 / 已读取 {{ preview.tracks.length }} 首 / 平台共 {{ preview.total }} 首</p><p v-for="warning in preview.warnings" :key="warning" class="warning">{{ warning }}</p></div>
+      <div class="preview__title">
+        <h2>{{ preview.name }}</h2>
+        <p>待导入 {{ rows.length }} 首 / 已读取 {{ preview.tracks.length }} 首 / 平台共 {{ preview.total }} 首<small>拖动行可调顺序，勾选可批量移除；私密或受限歌曲可能缺失。</small></p>
+        <p v-for="warning in preview.warnings" :key="warning" class="warning">{{ warning }}</p>
+      </div>
       <div class="preview__buttons">
         <button v-if="removed.length" class="btn" :disabled="busy" @click="restore">恢复全部（{{ removed.length }} 首已移除）</button>
         <button class="btn btn--primary" :disabled="busy||!rows.length" @click="save">{{ edited?'按当前列表导入':'导入为新歌单' }}</button>
       </div>
     </div>
-    <p class="preview__hint">拖动行可调整顺序，勾选后可批量移除；导入前请先确认列表，私密或受限歌曲可能缺失。</p>
     <TrackList :tracks="rows" :reorderable="true" :extra-actions="importActions" :show-source="true" empty-text="待导入列表已空，点「恢复全部」找回" @reorder="reorder"/>
   </section>
-  <p class="note">导入保存歌曲信息，不会自动下载音频。播放和下载需要启用对应平台的音源；私密歌单或平台限制可能导致部分歌曲无法读取。</p>
+  <p class="note">导入只保存歌曲信息，不会自动下载音频；播放与下载需要启用对应平台的音源。</p>
 </div></template>
 <style scoped>
 /* 列表要占满剩余高度：TrackList 自带的 `calc(100vh - 290px)` 是给整页只有它的歌单页用的，
-   这里上方还有表单和预览头，照抄会把末尾几行推到播放条底下点不到。 */
-.import-view{display:flex;flex-direction:column;overflow:hidden}
-.import-form{flex:none;display:flex;gap:16px;align-items:end;flex-wrap:wrap;padding:24px;background:var(--bg-elevated);border-radius:12px}.import-form label{display:flex;flex-direction:column;gap:10px;font-size:13px}.import-form label:nth-child(2){flex:1;min-width:240px}
-.preview{margin-top:24px;padding:24px;background:var(--bg-elevated);border-radius:12px;display:flex;flex-direction:column;gap:14px;flex:1;min-height:0}
+   这里上方还有表单和预览头，照抄会把末尾几行推到播放条底下点不到。
+   上方每一像素都是从列表身上扣的，所以这块整体压到一行高：小封面、计数与提示同一段落、
+   按钮右对齐。实测 116 首的歌单从只看得见 2 行变成看得见 6 行以上。 */
+.import-view{display:flex;flex-direction:column;overflow:hidden;gap:10px;padding-bottom:10px}
+.import-form{flex:none;display:flex;gap:12px;align-items:end;flex-wrap:wrap;padding:12px 16px;background:var(--bg-elevated);border-radius:12px}.import-form label{display:flex;flex-direction:column;gap:4px;font-size:12px}.import-form label:nth-child(2){flex:1;min-width:240px}
+.preview{margin-top:0;padding:12px 16px 16px;background:var(--bg-elevated);border-radius:12px;display:flex;flex-direction:column;gap:10px;flex:1;min-height:0}
 .preview :deep(.tracklist){flex:1;min-height:0;height:auto}
-.preview__head{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;flex:none}.preview__title{flex:1;min-width:220px}.preview__title h2{font-size:17px}.preview__title p{font-size:12px;color:var(--text-secondary);margin-top:6px}
-.preview__cover{width:84px;height:84px;border-radius:8px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden;flex:none}.preview__cover img{width:100%;height:100%;object-fit:cover}
-.preview__buttons{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.preview__hint{font-size:12px;color:var(--text-secondary);flex:none}
-.error{color:#f18d8d;flex:none}.warning{color:#eab66f}.note{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-top:24px;flex:none}
+.preview__head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;flex:none}
+/* h2 与 p 的默认外边距是这块高度的主要来源（浏览器给 h2 留了上下各 ~0.8em）；
+   清掉之后这一行就只剩内容本身的高度，列表因此多出一整行。 */
+.preview__title{flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px}.preview__title h2{margin:0;font-size:15px;line-height:1.3}.preview__title p{margin:0;font-size:12px;color:var(--text-secondary);display:flex;gap:10px;flex-wrap:wrap}
+.preview__title small{color:var(--text-tertiary)}
+.preview__cover{width:40px;height:40px;border-radius:6px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden;flex:none}.preview__cover img{width:100%;height:100%;object-fit:cover}
+.preview__buttons{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.error{color:#f18d8d;flex:none}.warning{color:#eab66f}.note{font-size:12px;color:var(--text-secondary);line-height:1.6;flex:none}
 </style>

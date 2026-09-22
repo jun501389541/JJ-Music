@@ -15,6 +15,7 @@ import { parseJsonLoose, writeJsonAtomic } from './json-file'
 export const DEFAULT_SETTINGS: AppSettings = {
   ...UI_DEFAULTS,
   recentPlayed: [],
+  searchHistory: [],
   playQuality: 'flac24bit',
   libraryFolders: [],
   scanExtensions: [],

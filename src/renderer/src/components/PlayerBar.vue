@@ -187,18 +187,23 @@ const timeLabel = computed(() => {
    hugging the cover. */
 .mini-lyric{flex:1 1 auto;min-width:0;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:none;border:0;color:var(--text-secondary);font:inherit;font-size:12px;cursor:pointer;text-align:center}
 .mini-time{flex:none;font-size:11px;color:var(--text-secondary);opacity:.85}
-.mini-right{display:flex;align-items:center;gap:12px;flex:none}
 /*
- * The 更多 and 音量 glyphs sit ~7 px inside their 32 px buttons, so a 5 px box
- * gap reads as 12 px of air around them while text neighbours show 5. Pull each
- * button's box in by its own slack: the spacing becomes even and the click
- * targets stay 32 px.
+ * The cluster breathes at 14 px, but the volume group is one object: its own
+ * parts sit at 8 px so the mute button, the slider and the readout still read
+ * as a single control rather than three more items in the row.
+ */
+.mini-right{display:flex;align-items:center;gap:14px;flex:none}
+/*
+ * The 更多 and 音量 glyphs sit ~7 px inside their 32 px boxes, so a bare 14 px
+ * gap would read as 21 px of air around those two and 14 px around the text
+ * neighbours. Pull each box back by its own slack: the visible air then equals
+ * the gap value everywhere, and the click targets stay 32 px.
  */
 .mini-right > .icon-btn{margin-inline:-7px}
 .mini-volume .icon-btn{margin-inline:-7px}
 .output-spec{display:flex;align-items:center;flex-direction:column;gap:4px;color:var(--text-secondary)}
 .output-spec small{font-size:9px}
-.mini-volume{display:flex;align-items:center;gap:12px}
+.mini-volume{display:flex;align-items:center;gap:8px}
 .mini-volume small{width:26px;font-size:11px;color:var(--text-secondary)}
 .volume-slider{width:65px}
 /*

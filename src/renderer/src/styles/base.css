@@ -84,25 +84,39 @@ img {
 }
 
 /*
- * Auto-hiding thumb: transparent until the pointer is over the scrollable
- * element, so a resting page shows no bar at all. `:hover` on the container is
- * the only signal CSS has, and it covers the case that matters — you are
- * hovering the list exactly when you are about to scroll it.
+ * Scroll-revealed thumb: nothing shows while a page rests, the thumb wakes when
+ * that element actually scrolls, and it fades out ~0.9 s after the last scroll
+ * (see utils/scroll-reveal.ts, which puts `.is-scrolling` on the scroller).
+ *
+ * Two earlier attempts read as broken, which is why this is JS-driven:
+ * hovering the *container* kept the thumb up over a page you were merely
+ * reading, and it hid the thumb while you wheel-scrolled a nested list you were
+ * not hovering — so some pages showed a slider and some never did. Hovering the
+ * 10 px gutter is not how anyone scrolls, so the `:hover` rule on the thumb
+ * itself stays only for the case where you go looking for it by hand.
+ *
+ * `min-height` exists because the thumb is proportional to visible/total: 歌曲
+ * lists 3368 rows in a ~500px window, which measured a 9px thumb — present in
+ * the DOM, invisible on screen. Six of those 34px go to the transparent border
+ * on each end, so the pill that actually paints is ~28px.
  */
 ::-webkit-scrollbar-thumb {
   background-color: transparent;
   border-radius: var(--radius-pill);
   border: 3px solid transparent;
   background-clip: content-box;
+  min-height: 34px;
+  min-width: 34px;
   transition: background-color var(--dur-base) linear;
 }
 
-:hover::-webkit-scrollbar-thumb {
+.is-scrolling::-webkit-scrollbar-thumb {
   background-color: var(--border-strong);
   background-clip: content-box;
 }
 
-:hover::-webkit-scrollbar-thumb:hover {
+/* Last, so grabbing the thumb always beats the fading-out state in colour. */
+::-webkit-scrollbar-thumb:hover {
   background-color: var(--text-tertiary);
   background-clip: content-box;
 }
@@ -237,7 +251,10 @@ img {
 }
 
 .view {
-  padding: 24px 28px 32px;
+  /* TrackList reads this to push its own scrollbar out to the same edge this
+     element's scrollbar lands on, so one screen never shows two rails. */
+  --view-pad-x: 28px;
+  padding: 24px var(--view-pad-x) 32px;
   height: 100%;
   overflow-y: auto;
 }

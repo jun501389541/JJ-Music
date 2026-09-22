@@ -125,7 +125,10 @@ try {
  await sleep(2500)
  await evaluate(`window.uiTestStores = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s; window.uiTestLibrary = uiTestStores.get('library'); window.uiTestPlayer = uiTestStores.get('player'); window.uiTestUi = uiTestStores.get('ui')`)
  original = await evaluate('JSON.stringify(uiTestLibrary.settings)')
- const check = (name, ok) => { console.log(`${ok ? 'PASS' : 'FAIL'} ${name}`); if(!ok) failed++ }
+ // `detail` is optional and only printed when given: a bare FAIL says what broke
+ // but not how far off it was, which is how a slow-but-fine shutdown got read as a
+ // regression of whatever had been edited last.
+ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? `  → ${detail}` : ''}`); if(!ok) failed++ }
  check('production test hooks are inaccessible',await evaluate('typeof window.__jj_player === "undefined"'))
  check('UI version matches release manifest',await evaluate('document.querySelector(".brand small").textContent')===JSON.parse(readFileSync(join(repoRoot,'package.json'),'utf8')).version)
  const screenshot = async name => { await sleep(350); const shot = await send('Page.captureScreenshot', {format:'png'}); writeFileSync(join(screenshotDir, name + '.png'), Buffer.from(shot.data, 'base64')) }
@@ -334,8 +337,34 @@ try {
    await screenshot('17-download-management')
  }
  await evaluate(`uiTestLibrary.updateSettings(JSON.parse(${JSON.stringify(original)}))`)
- await evaluate('window.jj.window.close()').catch(()=>undefined)
- check('application shuts down cleanly',await Promise.race([childExit,sleep(10000).then(()=> 'timeout')])===0)
+ /*
+  * What is still running when we ask the window to close, measured *before* the
+  * close: a slow exit has several possible causes (an active audio device, an
+  * unfinished download, a settings flush) and they are indistinguishable from the
+  * outside, which is what made this check's reds un-argueable. Reading it after
+  * the window is gone returns nothing at all — an earlier version of this block did
+  * exactly that and reported 状态读不到 with a 0 ms exit.
+  */
+ const inFlight = await evaluate(`(async () => ({
+   playing: uiTestPlayer.playing,
+   activeDownloads: (await window.jj.downloads.list()).filter(t => !['completed','failed','cancelled'].includes(t.status)).length
+ }))()`).catch((error) => ({ error: String(error).slice(0, 80) }))
+ const shutdownStart = Date.now()
+ await evaluate(`window.jj.window.close()`).catch(()=>undefined)
+ /*
+  * Report how long the quit actually took, and keep watching past the 10 s budget
+  * rather than walking away: a 16 s exit and a hang are different problems, and the
+  * old check reported them identically. The assertion is unchanged — over 10 s is
+  * still a failure.
+  */
+ let shutdown = await Promise.race([childExit.then((code) => ({ code })), sleep(10000).then(() => null)])
+ let late = 0
+ if (!shutdown) { shutdown = await Promise.race([childExit.then((code) => ({ code })), sleep(35000).then(() => null)]); late = 1 }
+ const flight = inFlight && !inFlight.error
+   ? `playing=${inFlight.playing} 未完成任务=${inFlight.activeDownloads}`
+   : `状态读不到（${(inFlight && inFlight.error) || 'evaluate 返回空'}）`
+ check('application shuts down cleanly', shutdown ? shutdown.code === 0 : false,
+  shutdown ? `${flight}，退出码 ${shutdown.code}，用时 ${Date.now() - shutdownStart}ms${late ? '（超过 10000ms 预算，但确实退了）' : ''}` : `${flight}，等了 45000ms 仍没退（可能是挂住）`)
  console.log(`UI smoke failures: ${failed}; screenshots: ${screenshotDir}`)
 } catch(error) { console.error(error); failed++; }
 finally {

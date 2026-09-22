@@ -12,11 +12,34 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const DEBUG_PORT = 9223
+
+/**
+ * Ask the OS for a port rather than assuming 9223 is free.
+ *
+ * A fixed number here once failed with `bind() … (0x271D)` / `Cannot start http
+ * server for devtools` because the previous run's DevTools endpoint had not
+ * finished letting go of it. That reads as "the app never started", which is a
+ * lie — the app started fine and simply had no port to answer on. `tools/e2e-verify.mjs`
+ * already asks this way; the two probes should not disagree about it.
+ */
+function findFreePort() {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer()
+    server.unref()
+    server.on('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(() => resolvePort(port))
+    })
+  })
+}
+
+const DEBUG_PORT = Number(process.env.JJ_DEBUG_PORT ?? (await findFreePort()))
 const packaged = process.argv.includes('--packaged')
 const electronBin = packaged ? join(repoRoot, 'release', 'win-unpacked', 'JJ Music.exe') : join(
   repoRoot,
@@ -80,46 +103,75 @@ function connect(url) {
 }
 
 // Report the environment the clean build actually carries.
-const target = await (async () => {
-  const child = spawn(electronBin, packaged ? [] : ['.'], {
+async function main() {
+  /*
+   * Its own profile, for two reasons. The app takes a single-instance lock per
+   * data directory, so launching against the default one while any other JJ
+   * Music window is open makes this copy exit before it ever creates a
+   * renderer — the probe then has nothing to read. And this probe has no
+   * business writing to the user's real library, settings or resume point just
+   * to look at two window properties.
+   */
+  const profile = join(repoRoot, '.cache', 'hook-probe-profile')
+  const child = spawn(electronBin, packaged ? [] : ['.', `--user-data-dir=${profile}`], {
     cwd: repoRoot,
     stdio: 'inherit',
     env: { ...process.env, JJ_DEBUG_PORT: String(DEBUG_PORT), ELECTRON_RUN_AS_NODE: undefined }
   })
+  let page
   try {
-    return { child, page: await waitForTarget() }
+    page = await waitForTarget()
   } catch (error) {
     child.kill()
     throw error
   }
-})()
 
-const send = await connect(target.page.webSocketDebuggerUrl)
-await send('Runtime.enable')
-await sleep(3500)
+  const send = await connect(page.webSocketDebuggerUrl)
+  await send('Runtime.enable')
+  await sleep(3500)
 
-const result = await send('Runtime.evaluate', {
-  // `import.meta` is not valid in a classic script evaluation, so only the
-  // window probes are included.
-  expression: `JSON.stringify({
+  const result = await send('Runtime.evaluate', {
+    // `import.meta` is not valid in a classic script evaluation, so only the
+    // window probes are included.
+    expression: `JSON.stringify({
     hookPlayer: typeof window.__jj_player,
     hookLibrary: typeof window.__jj_library,
     bridge: typeof window.jj,
     shellReady: !!document.querySelector('.shell'),
     heading: document.querySelector('h1')?.textContent
   })`,
-  returnByValue: true
-})
+    returnByValue: true
+  })
 
-const parsed = JSON.parse(result.result.value)
-console.log('runtime probe of the built app:')
-console.log(`  typeof window.__jj_player  = ${parsed.hookPlayer}`)
-console.log(`  typeof window.__jj_library = ${parsed.hookLibrary}`)
+  const parsed = JSON.parse(result.result.value)
+  console.log('runtime probe of the built app:')
+  console.log(`  typeof window.__jj_player  = ${parsed.hookPlayer}`)
+  console.log(`  typeof window.__jj_library = ${parsed.hookLibrary}`)
 
-console.log(`  app UI: ${parsed.shellReady ? 'ready' : 'missing'}, bridge: ${parsed.bridge}, heading: ${parsed.heading}`)
-const reachable = parsed.hookPlayer !== 'undefined' || parsed.hookLibrary !== 'undefined'
-console.log(`\nE2E hook reachable in this build: ${reachable ? 'YES (test build)' : 'NO (clean build)'}`)
+  console.log(`  app UI: ${parsed.shellReady ? 'ready' : 'missing'}, bridge: ${parsed.bridge}, heading: ${parsed.heading}`)
+  const reachable = parsed.hookPlayer !== 'undefined' || parsed.hookLibrary !== 'undefined'
+  console.log(`\nE2E hook reachable in this build: ${reachable ? 'YES (test build)' : 'NO (clean build)'}`)
 
-target.child.kill()
-await sleep(400)
-process.exit(reachable || !parsed.shellReady || parsed.bridge !== 'object' ? 1 : 0)
+  child.kill()
+  await sleep(400)
+  return reachable || !parsed.shellReady || parsed.bridge !== 'object' ? 1 : 0
+}
+
+/**
+ * Exit codes: 0 = clean build, 1 = the hook really is reachable, 2 = nothing was
+ * judged.
+ *
+ * Those two failures used to share code 1, so "the app never started" was
+ * reported as "the shipping build leaks a test hook" — a security-flavoured
+ * conclusion drawn from a launch problem. The common launch problem is another
+ * JJ Music window already being open: the single-instance lock makes this
+ * copy exit at once, and no renderer target ever appears on the port.
+ */
+main().then(
+  (code) => process.exit(code),
+  (error) => {
+    console.error(`\n无法判断生产构建里有没有测试钩子：${error.message}`)
+    console.error('（这不代表钩子存在。先确认没有别的 JJ Music 窗口开着，再重跑。）')
+    process.exit(2)
+  }
+)

@@ -139,7 +139,7 @@ export function clampToDisplays(
 }
 
 /** Zero when the point is inside the box, otherwise its distance to the nearest edge. */
-function distanceToBox(point: { x: number; y: number }, box: Box): number {
+export function distanceToBox(point: { x: number; y: number }, box: Box): number {
   const dx = Math.max(box.x - point.x, 0, point.x - (box.x + box.width))
   const dy = Math.max(box.y - point.y, 0, point.y - (box.y + box.height))
   return Math.hypot(dx, dy)

@@ -24,7 +24,9 @@ import { IPC } from '@shared/ipc'
 import {
   DESKTOP_LYRIC_FONTS,
   clampToDisplays,
+  distanceToBox,
   restingPosition,
+  type Box,
   type DesktopLyricCommand,
   type DesktopLyricPayload
 } from '@shared/desktop-lyric'
@@ -47,14 +49,31 @@ const HEIGHT = 104
  */
 const MOVE_SETTLE_MS = 260
 
-/** How often a held drag re-reads the cursor. One step per frame at 60 Hz. */
-const DRAG_STEP_MS = 16
-
 /**
- * The largest cursor movement a step can plausibly carry. A violent flick is
- * around 50 DIP per frame; anything past this is a coordinate remap, not a hand.
+ * How often a held drag re-reads the cursor.
+ *
+ * Asked for 8 ms, measured 114 polls/s at a 13.9 ms median gap (p95 17.5, max
+ * 18.2) — that floor is the Windows clock tick, not this loop: a `setInterval`
+ * cannot be serviced faster than the system resolves time. Asking for half a
+ * frame is still worth it, because it keeps the loop off the floor's other side.
+ *
+ * The drag cannot be handed to the OS instead (`-webkit-app-region: drag` moves
+ * a window in the message loop, at the display's own rate), because measured
+ * with a real right-click on a strip wearing that property, the page receives
+ * `contextmenu` zero times and what pops up is the *window system menu* — the
+ * strip would lose the one way to reach 锁定位置 and 关闭.
  */
-const DRAG_MAX_STEP = 120
+const DRAG_STEP_MS = 8
+
+/** The strip's size, so the drag loop does not ask the window for it per frame. */
+const STRIP_SIZE = { width: WIDTH, height: HEIGHT }
+
+/** Desktop geometry, as far as one gesture is concerned. */
+interface DragDisplay {
+  bounds: Box
+  workArea: Box
+  scale: number
+}
 
 export interface DesktopLyricsHooks {
   /** The main window, or null while it is closed to the tray. */
@@ -69,8 +88,24 @@ export class DesktopLyrics {
   private window: BrowserWindow | null = null
   private last: DesktopLyricPayload | null = null
   private moveTimer: ReturnType<typeof setTimeout> | undefined
-  /** Where the cursor was at the last drag step, in this process's coordinates. */
+  /** Where the cursor was when the drag began, in this process's coordinates. */
   private dragPointer: { x: number; y: number } | null = null
+  /** Where the window was when the drag began. The whole offset is measured from here. */
+  private dragOrigin: { x: number; y: number } | null = null
+  /** The position last asked for, so a step never has to re-read the window's bounds. */
+  private dragPosition: { x: number; y: number } | null = null
+  /**
+   * The desktop, read once per gesture.
+   *
+   * `screen.getAllDisplays()` is a synchronous trip out of the main process, and
+   * doing it 125 times a second was a third of what made a drag feel cheap. A
+   * monitor cannot plausibly change resolution between two frames of one drag;
+   * if it does, the next gesture sees it.
+   */
+  private dragDisplays: DragDisplay[] = []
+  private dragAreas: Box[] = []
+  /** The scale factor the cursor was on when the gesture was last re-based. */
+  private dragScale = 1
   private dragTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(private readonly hooks: DesktopLyricsHooks) {}
@@ -254,7 +289,18 @@ export class DesktopLyrics {
       return
     }
     if (message?.phase === 'start') {
+      const window = this.window
+      if (!window) return
       this.dragPointer = screen.getCursorScreenPoint()
+      // The window's position at the start of the gesture, not its position at
+      // each step: see `stepDrag`.
+      const { x, y } = window.getBounds()
+      this.dragOrigin = { x, y }
+      this.dragPosition = { x, y }
+      const displays = screen.getAllDisplays()
+      this.dragDisplays = displays.map(display => ({ bounds: display.bounds, workArea: display.workArea, scale: display.scaleFactor }))
+      this.dragAreas = displays.map(display => display.workArea)
+      this.dragScale = this.scaleUnderCursor(this.dragPointer)
       this.stopDragTimer()
       // Polling rather than one IPC per pointer event also means a 1000 Hz mouse
       // cannot queue more window moves than the screen can show.
@@ -265,19 +311,26 @@ export class DesktopLyrics {
   }
 
   /**
-   * Follow the cursor one step at a time, always from where the window is now.
+   * Follow the cursor by measuring the gesture, not by chaining steps.
    *
-   * Measured on a 200% + 100% desktop: a drag whose *cursor* crossed the seam slid
-   * the strip 544 DIP sideways while the cursor travelled straight up, and reversed
-   * its vertical motion by 22px in the same step. The cause is not the page's
-   * coordinates and not the window changing owner — `getCursorScreenPoint()` itself
-   * discontinuously remaps when the cursor moves onto a monitor with a different
-   * scale factor, because Windows defines the desktop's DIP space by the primary
-   * monitor. No coordinate source in Electron is continuous across that seam, so
-   * the drag treats a one-step jump far beyond any hand movement as the remap it
-   * is, re-baselines, and keeps going in the new space. What is left is the strip
-   * following the pointer at the new monitor's own pixel ratio, which is how every
-   * other Electron window behaves there.
+   * The first version did `setPosition(getBounds() + cursorDelta)` once per
+   * frame. That accumulates everything the round trip is not exact about: at a
+   * non-100% scale factor `getBounds()` reports device-independent pixels that
+   * `setPosition()` rounds back to physical ones, so each frame can lose a
+   * fraction of a pixel. Now the position is always
+   * `anchor + (cursor − cursorAtAnchor)`, so a frame can be wrong but cannot make
+   * the next frame wrong, and a closed gesture returns the strip to where it
+   * started.
+   *
+   * The second version also threw away any frame whose cursor moved more than
+   * 120 DIP, on the theory that such a step must be a DPI remap rather than a
+   * hand. It was wrong twice over: a fast drag really does move that far in 8 ms,
+   * and *discarding* it is what put the strip permanently behind the pointer —
+   * every eaten frame widened the gap, which is the "越拖越偏" the drag felt like.
+   * A large step is now simply a large step. The remap is detected for what it
+   * actually is, geometrically: the cursor has moved onto a display with a
+   * different scale factor. Only then is the anchor re-based, and the re-basing
+   * uses the position we last *asked for*, not a fresh `getBounds()`.
    */
   private stepDrag(): void {
     if (!this.window || this.window.isDestroyed()) {
@@ -290,29 +343,61 @@ export class DesktopLyrics {
       this.endDrag()
       return
     }
-    if (!this.dragPointer) return
+    if (!this.dragPointer || !this.dragOrigin) return
     const pointer = screen.getCursorScreenPoint()
-    const delta = { x: pointer.x - this.dragPointer.x, y: pointer.y - this.dragPointer.y }
-    this.dragPointer = pointer
-    if (Math.abs(delta.x) > DRAG_MAX_STEP || Math.abs(delta.y) > DRAG_MAX_STEP) return
-    const bounds = this.window.getBounds()
-    if (delta.x === 0 && delta.y === 0) return
+    const scale = this.scaleUnderCursor(pointer)
+    if (scale !== this.dragScale) {
+      // `getCursorScreenPoint()` is discontinuous at a mixed-DPI seam: measured on
+      // a 200% + 100% desktop, a cursor travelling straight down across the
+      // boundary reported a 544 DIP sideways jump. Re-baseline in the new space.
+      this.dragScale = scale
+      this.dragPointer = pointer
+      if (this.dragPosition) this.dragOrigin = this.dragPosition
+      return
+    }
+    const position = clampToDisplays(
+      {
+        x: this.dragOrigin.x + pointer.x - this.dragPointer.x,
+        y: this.dragOrigin.y + pointer.y - this.dragPointer.y
+      },
+      STRIP_SIZE,
+      this.dragAreas
+    )
     // Clamped, not just bounded: dragging to the far edge would otherwise park an
     // 820px strip almost entirely off screen, where it cannot be grabbed again for
     // the rest of the session.
-    const position = clampToDisplays(
-      { x: bounds.x + delta.x, y: bounds.y + delta.y },
-      { width: WIDTH, height: HEIGHT },
-      screen.getAllDisplays().map((display) => display.workArea)
-    )
-    if (position.x === bounds.x && position.y === bounds.y) return
+    if (this.dragPosition && position.x === this.dragPosition.x && position.y === this.dragPosition.y) return
     this.window.setPosition(position.x, position.y)
+    this.dragPosition = position
     this.persistPosition(this.window)
+  }
+
+  /**
+   * The scale factor of the display under a point, from the cached geometry.
+   *
+   * Computed here rather than with `screen.getDisplayNearestPoint()` because that
+   * is another synchronous trip out of the main process on every frame of a drag.
+   */
+  private scaleUnderCursor(point: { x: number; y: number }): number {
+    const inside = this.dragDisplays.find(display =>
+      point.x >= display.bounds.x && point.x < display.bounds.x + display.bounds.width &&
+      point.y >= display.bounds.y && point.y < display.bounds.y + display.bounds.height)
+    if (inside) return inside.scale
+    if (this.dragDisplays.length === 0) return 1
+    // Between two displays' rounded edges the cursor is on neither; the nearest
+    // one is what Windows itself would report.
+    const nearest = this.dragDisplays.reduce((best, display) =>
+      distanceToBox(point, display.bounds) < distanceToBox(point, best.bounds) ? display : best)
+    return nearest.scale
   }
 
   private endDrag(): void {
     this.stopDragTimer()
     this.dragPointer = null
+    this.dragOrigin = null
+    this.dragPosition = null
+    this.dragDisplays = []
+    this.dragAreas = []
   }
 
   private stopDragTimer(): void {

@@ -180,11 +180,25 @@ export const useLibraryStore = defineStore('library', () => {
       if (payload?.done) {
         scanning.value = false
         scanProgress.value = null
-        void refreshLibrary()
+        void refreshLibrary().then(prefetchPortraits)
         return
       }
       scanProgress.value = payload
     })
+  }
+
+  /**
+   * An import is where the portrait lookups belong: one per artist name, ever.
+   *
+   * Main answers only the names it has never seen — hit or miss both count as
+   * seen — so this costs nothing on every scan after the first, and it means the
+   * artist page no longer has to be scrolled through before anything is fetched.
+   * Removals deliberately leave the records alone, which is what makes a
+   * re-imported album show its artist at once.
+   */
+  function prefetchPortraits(): void {
+    const names = artists.value.map(artist => artist.name)
+    if (names.length) void window.jj.artists.prefetch(names).catch(() => undefined)
   }
 
   let sourceRefreshGeneration = 0
@@ -322,6 +336,7 @@ export const useLibraryStore = defineStore('library', () => {
     try {
       await window.jj.library.scan()
       await refreshLibrary()
+      prefetchPortraits()
     } finally {
       scanning.value = false
       scanProgress.value = null

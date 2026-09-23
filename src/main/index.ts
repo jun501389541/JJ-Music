@@ -20,27 +20,31 @@ import { applyImportOrder, fetchImportCover, importPlaylist } from './online/pla
 import type { ImportedPlaylist } from '@shared/types'
 import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path'
 import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { cp, readFile } from 'node:fs/promises'
+import { cp, mkdir, readFile } from 'node:fs/promises'
 import { resolveDataDir, migrationSource, pointerPath, relocationProblem, type DataDirChoice } from './data-location'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
+import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
-import { fail, ok, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
+import type { TaskbarState, TransportCommand } from '@shared/ipc'
+import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
 import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
 import { MusicLibrary } from './library/music-library'
 import { PlaylistStore, SettingsStore } from './store/settings-store'
-import { searchAll, searchOnline, searchProviders } from './online/search'
+import { searchAll, searchOnline, searchProviders, fetchNeteaseDetails } from './online/search'
 import { HotWordSource } from './online/hot-words'
 import { fetchOnlineLyric } from './online/lyrics'
+import { fetchCoverBytes, shouldFetchCover } from './online/cover-fetch'
 import {
   clearLyricCache,
   lyricCandidates,
   primeLyricCache,
   lyricFromOtherPlatforms,
   lyricSourceOrder,
+  looksSynchronized,
   readLyricFile,
   resolveLocalLyric,
   resolveOnlineLyricByOrder,
@@ -51,7 +55,7 @@ import { exportAssets, mergeAssets } from './library/asset-export'
 import { imageMimeFor } from './library/asset-files'
 import { PendingAssetStore, pendingKey } from './library/pending-assets'
 import type { TagPatch } from './library/tag-writer'
-import type { AssetExportInput, AssetExportResult, ResolvedLyric } from '@shared/library-types'
+import type { AssetExportInput, AssetExportResult, ChosenLyric, MatchApplyOptions, ResolvedLyric } from '@shared/library-types'
 import { DesktopLyrics } from './desktop-lyrics'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 
@@ -294,7 +298,10 @@ async function createServices(): Promise<Services> {
     // could point the app at loopback or a cloud metadata address.
     fetch: (input, init) => typeof input === 'string'
       ? safeFetchResponse(input, { init })
-      : Promise.reject(new Error('下载不接受非字符串地址'))
+      : Promise.reject(new Error('下载不接受非字符串地址')),
+    // 回收站，不是永久删除。回收站不收这个路径时（网络盘、某些可移动盘）
+    // `trashItem` 会 reject，remove() 把它原样报给界面并且保留记录。
+    trash: (path) => shell.trashItem(path)
   })
   await downloads.load()
   const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, downloads, onlineLyric }
@@ -382,6 +389,15 @@ function createWindow(): BrowserWindow {
   if (process.platform === 'win32') window.setBackgroundMaterial(requireServices().settings.get().windowMaterial)
   window.webContents.on('did-finish-load', () => window.webContents.setZoomFactor(Math.min(1.25, Math.max(0.85, requireServices().settings.get().displayScale / 100))))
   window.on('ready-to-show', () => window.show())
+  /*
+   * The taskbar thumbnail toolbar can only be attached to a window that already has
+   * a taskbar button, so the first show is what arms it — and it replays whatever
+   * playback state the renderer pushed while the window was still hidden.
+   */
+  window.once('show', () => {
+    taskbarWindowReady = true
+    if (pendingTaskbarState) updateTaskbarButtons(pendingTaskbarState)
+  })
 
   // Open external links in the real browser, never inside the app shell.
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -484,7 +500,7 @@ function ensureTray(): void {
       },
       {
         label: '播放 / 暂停',
-        click: () => mainWindow?.webContents.send(IPC.trayCommand, 'toggle')
+        click: () => sendTransport('toggle')
       },
       { type: 'separator' },
       {
@@ -542,6 +558,37 @@ function assetIcon(name: string): Electron.NativeImage {
 }
 
 /**
+ * Hand a transport request to the renderer.
+ *
+ * The tray menu and every thumbar button want the same thing, and only the
+ * renderer owns playback state. Routing the literals through one typed function
+ * is also what makes a typo in a command name a compile error — the channel
+ * itself is `string[]` arguments, so nothing else would notice.
+ */
+function sendTransport(command: TransportCommand): void {
+  mainWindow?.webContents.send(IPC.trayCommand, command)
+}
+
+/*
+ * A tag write replaces the audio file with a renamed temp copy, and on Windows
+ * that last step fails while anything holds the file open — most often this app,
+ * streaming the very song the user just asked to re-tag. Main closes its own
+ * descriptors; the renderer has to put its player down, which is what this hook
+ * asks for. See `media/file-release.ts`.
+ */
+setPlaybackReleaser(path => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.playerReleaseFile, path)
+})
+
+/**
+ * Has the window been shown at least once, i.e. does it have a taskbar button for
+ * the thumbnail toolbar to attach to?
+ */
+let taskbarWindowReady = false
+/** The state pushed while that button did not exist yet, replayed on first show. */
+let pendingTaskbarState: TaskbarState | null = null
+
+/**
  * Keep the taskbar thumbnail toolbar in sync with playback.
  *
  * ## Why the renderer drives this
@@ -559,29 +606,70 @@ function assetIcon(name: string): Electron.NativeImage {
  * Rebuilding on every state change (rather than once at startup) is what keeps
  * them correct — including while the window is hidden in the tray, which is
  * exactly when they are most visible.
+ *
+ * A favourite flip is a state change too, so it travels on the same push, and
+ * the heart is the reason this signature is a `TaskbarState` rather than two
+ * booleans inlined in three places.
  */
-function updateTaskbarButtons(state: { hasTrack: boolean; playing: boolean }): void {
+function updateTaskbarButtons(state: TaskbarState): void {
   if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) return
+  /*
+   * Before the window has ever been shown it has no taskbar button, and handing
+   * Windows an empty array at that moment kills the toolbar for the life of the
+   * window: every later set is accepted, changes nothing, and throws nothing. The
+   * renderer's `immediate: true` watcher does exactly that on startup, which is why
+   * the card used to stay empty here however many buttons we asked for. Measured A/B
+   * in a bare window: with that one early empty push the row never appears, without
+   * it the same sequence draws all four. So the state is parked until the first show
+   * replays it — and once the window has been shown, hiding it to the tray again is
+   * fine, because the button still exists.
+   */
+  if (!taskbarWindowReady) {
+    pendingTaskbarState = state
+    return
+  }
+  pendingTaskbarState = null
   try {
     if (!state.hasTrack) {
       mainWindow.setThumbarButtons([])
       return
     }
+    const heart = assetIcon(`taskbar-favorite-${state.favorite ? 'on' : 'off'}`)
     mainWindow.setThumbarButtons([
+      /*
+       * The heart is the one button that shows what *is* rather than what a click
+       * *does*: filled means the track is already in 我喜欢的, and the verb lives
+       * in the tooltip. Leftmost, because it belongs to the track rather than to
+       * the transport.
+       *
+       * Only added when its PNG actually loaded. `createFromPath` returns an empty
+       * image instead of throwing, and a null HBITMAP is rejected by
+       * `ThumbBarAddButtons` for the *whole* set — a missing heart would otherwise
+       * take the three transport buttons down with it.
+       */
+      ...(heart.isEmpty()
+        ? []
+        : [
+            {
+              tooltip: state.favorite ? '取消喜爱' : '喜爱',
+              icon: heart,
+              click: () => sendTransport('favorite')
+            }
+          ]),
       {
         tooltip: '上一首',
         icon: assetIcon('taskbar-previous'),
-        click: () => mainWindow?.webContents.send(IPC.trayCommand, 'previous')
+        click: () => sendTransport('previous')
       },
       {
         tooltip: state.playing ? '暂停' : '播放',
         icon: assetIcon(state.playing ? 'taskbar-pause' : 'taskbar-play'),
-        click: () => mainWindow?.webContents.send(IPC.trayCommand, 'toggle')
+        click: () => sendTransport('toggle')
       },
       {
         tooltip: '下一首',
         icon: assetIcon('taskbar-next'),
-        click: () => mainWindow?.webContents.send(IPC.trayCommand, 'next')
+        click: () => sendTransport('next')
       }
     ])
   } catch {
@@ -1022,6 +1110,7 @@ function registerIpc(): void {
     if (fromMainWindow(event)) desktopLyrics?.push(payload)
   })
   ipcMain.on(IPC.desktopLyricMenu, event => desktopLyrics?.openMenu(event))
+  ipcMain.on(IPC.desktopLyricRequest, (event, command: unknown) => desktopLyrics?.request(event, command))
   ipcMain.on(IPC.desktopLyricDrag, (event, action: unknown) => desktopLyrics?.drag(event, action))
 
   /* ---------------- window controls ---------------- */
@@ -1047,7 +1136,7 @@ function registerIpc(): void {
   })
 
   /** The renderer reports playback state; the taskbar buttons follow it. */
-  handle(IPC.taskbarState, (state: { hasTrack: boolean; playing: boolean }) => {
+  handle(IPC.taskbarState, (state: TaskbarState) => {
     updateTaskbarButtons(state)
   })
 
@@ -1700,7 +1789,25 @@ function registerIpc(): void {
   handle(IPC.downloadsAdd, (tracks: OnlineMusicInfo[], quality: Quality) => requireServices().downloads.add(tracks, quality))
   handle(IPC.downloadsCancel, (id: string) => requireServices().downloads.cancel(id))
   handle(IPC.downloadsRetry, (id: string) => requireServices().downloads.retry(id))
-  handle(IPC.downloadsFolder, () => requireServices().settings.get().downloadFolder || join(app.getPath('downloads'), 'JJ Music'))
+  handle(IPC.downloadsRemove, (id: string, deleteFile: boolean) => requireServices().downloads.remove(id, deleteFile))
+  // One resolution of "where downloads go", shared by the label in settings and the
+  // button that opens the folder — if they ever disagreed, the button would open a
+  // different directory than the one displayed.
+  const resolveDownloadFolder = () => requireServices().settings.get().downloadFolder || join(app.getPath('downloads'), 'JJ Music')
+  handle(IPC.downloadsFolder, resolveDownloadFolder)
+  /**
+   * 「打开下载文件夹」。两步缺一不可：
+   * ①`mkdir(recursive)` —— 这个目录很可能从来没建过（`download-manager` 只在任务真正
+   *   开跑时才建），不建就直接开是给"还没下载过"的用户一个报错；
+   * ②判断 `shell.openPath` 的**返回值** —— 它失败时是返回一句错误字符串而不抛异常，
+   *   不读返回值就只能报"打开成功"，而屏幕上什么都没发生。
+   */
+  handle(IPC.downloadsOpenFolder, async () => {
+    const folder = resolveDownloadFolder()
+    await mkdir(folder, { recursive: true })
+    const failure = await shell.openPath(folder)
+    if (failure) throw new Error(failure)
+  })
 
   /*
    * The picker runs here, and so does the write. `downloadFolder` is where
@@ -1768,6 +1875,40 @@ function registerIpc(): void {
   handle(IPC.playlistReorder, (id: string, trackIds: string[]) =>
     requireServices().playlists.reorder(id, trackIds)
   )
+  /**
+   * 补一个歌单里"不知道有哪些音质档"的在线曲目。
+   *
+   * 只碰 wy：用户那 776 首缺数据的歌全是网易云（kw/kg/mg 导入时就带了），而 tx 的详情
+   * 接口是另一套，第一版不碰它 —— 少写一个没实测过的接口，比"看起来完整"值钱。
+   *
+   * 一次 100 个 id 走 `/api/song/detail`，与搜索页取封面用的是同一个端点、同一个批量
+   * 口径（实测 660 首 = 7 个请求 ≈ 2.3 秒）。任何一次失败都只让那一批补不上，
+   * 不报错、不打断列表 —— 这是给界面加一个徽标，不是一次用户请求的操作。
+   */
+  handle(IPC.playlistBackfillQualitys, async (listId: unknown) => {
+    if (typeof listId !== 'string' || !listId) return []
+    const tracks = await requireServices().playlists.getItems(listId)
+    const wanted = tracks
+      .filter((track) => !isLocalTrack(track) && track.source === 'wy' && !(track.meta?.qualitys?.length))
+      .map((track) => {
+        // `filter` does not carry the type guard through, so narrow again here rather
+        // than reaching for a cast that would hide a real shape change later.
+        if (isLocalTrack(track)) return { id: track.id, num: Number.NaN }
+        return { id: track.id, num: Number(track.meta?.songmid ?? String(track.id).replace(/^\w+_/, '')) }
+      })
+      .filter((entry) => Number.isFinite(entry.num) && entry.num > 0)
+    if (!wanted.length) return []
+    const numbers = wanted.map((entry) => entry.num)
+    // 分批 100 个 id 是 `fetchNeteaseDetails` 自己的事，这里不再套一层循环：
+    // 上限放在唯一的那个入口，才不会出现"某条调用路径忘了切"的情况。
+    const details = await fetchNeteaseDetails(numbers)
+    const found: Array<{ id: string; qualitys: Array<{ type: string; size?: string }> }> = []
+    for (const [num, detail] of details) {
+      if (detail.qualitys.length) found.push({ id: `wy_${num}`, qualitys: detail.qualitys })
+    }
+    if (found.length) await requireServices().playlists.patchQualitys(listId, found)
+    return found
+  })
 
   /*
    * The picker runs here and the chosen image is copied into the content-addressed
@@ -1827,8 +1968,7 @@ function registerIpc(): void {
   handle(IPC.lyricCandidates, (trackId: string) => lyricCandidates(indexedTrack(trackId)))
 
   /**
-   * Write a lyric the user chose themselves — a candidate from the picker, an
-   * edit, a file they pointed at.
+   * Write a lyric the user produced themselves — an edit, a file they pointed at.
    *
    * The sidecar is always among the destinations, whatever the setting says:
    * resolution prefers a sidecar, so a choice that only reached the tag could
@@ -1844,13 +1984,66 @@ function registerIpc(): void {
     return result
   }
 
-  // The three channels below take a track id, not a path: a chosen lyric can end
-  // up written *into* the audio file, and the renderer naming which file to
-  // modify is the one thing this layer must not allow.
+  // The channels below take a track id, not a path: a chosen lyric can end up
+  // written *into* the audio file, and the renderer naming which file to modify
+  // is the one thing this layer must not allow.
   handle(IPC.lyricApplyCandidate, async (trackId: string, lyric: string) => {
     if (typeof lyric !== 'string' || !lyric.trim()) throw new Error('歌词内容为空')
     const track = indexedTrack(trackId)
     return saveChosenLyric(track.path, lyric)
+  })
+
+  /**
+   * A lyric the user picked from the online matches: show it, hold it, write nothing.
+   *
+   * Picking a row out of a list is a stronger signal than the resolver taking the
+   * top score on its own, but it is still the app's guess at someone else's words
+   * — so it goes through the same 待写入 queue as an automatic fetch, and 「导出歌词」
+   * stays the only way to put a matched lyric into a file without pressing 全部写入.
+   *
+   * `source: 'online'` is what makes `stageFetchedLyric` accept the record at all;
+   * the translations ride along because the queue stores a single body while the
+   * cache holds the whole resolution — dropping them here would make 翻译 and 音译
+   * vanish from the pane the moment the choice is applied.
+   */
+  handle(IPC.lyricStageCandidate, async (trackId: string, chosen: ChosenLyric) => {
+    const lyric = typeof chosen?.lyric === 'string' ? chosen.lyric : ''
+    if (!lyric.trim()) throw new Error('歌词内容为空')
+    const extra = (value: unknown): string | undefined =>
+      typeof value === 'string' && value.trim() ? value : undefined
+    const tlyric = extra(chosen.tlyric)
+    const rlyric = extra(chosen.rlyric)
+    return stageFetchedLyric(indexedTrack(trackId), {
+      lyric,
+      ...(tlyric ? { tlyric } : {}),
+      ...(rlyric ? { rlyric } : {}),
+      source: 'online',
+      synchronized: looksSynchronized(lyric),
+      asset: { origin: 'remote', provider: 'search', at: Date.now() }
+    })
+  })
+
+  /**
+   * 「导出歌词」: a `.lrc` beside the track, and the audio file untouched.
+   *
+   * `to` is fixed rather than read from 设置·写入位置 on purpose — following the
+   * setting would make this button change tags too, which is exactly what the one
+   * next to it already does. The patch carries `lyrics` and nothing else, because
+   * `hasMetadataFields` would pull the embedded write back in for a title.
+   * Like the editor's save, this overwrites a same-named `.lrc`.
+   */
+  handle(IPC.lyricExportFile, async (trackId: string, text: string) => {
+    if (typeof text !== 'string' || !text.trim()) throw new Error('歌词内容为空')
+    const track = indexedTrack(trackId)
+    const { writableFormats } = assetWriteTargets()
+    const result = await exportAssets({
+      audioPath: track.path,
+      patch: { lyrics: text },
+      to: ['sidecar'],
+      writableFormats
+    })
+    clearLyricCache(track.id)
+    return result
   })
 
   handle(IPC.lyricImport, async (trackId: string) => {
@@ -1977,7 +2170,7 @@ function registerIpc(): void {
     async (
       track: LocalMusicInfo,
       patch: TagPatch,
-      options?: { withLyrics?: boolean; lyricFrom?: OnlineMusicInfo; dryRun?: boolean }
+      options?: MatchApplyOptions
     ) => {
       // `track` arrives as a renderer-built object, so nothing about its `path` is
       // taken on trust: the id selects the index record, and that record owns the
@@ -1993,20 +2186,38 @@ function registerIpc(): void {
         if (lyric.trim()) effective.lyrics = lyric
       }
 
+      /*
+       * The cover rides the same shape as the branch above, and the two stay
+       * independent: a file whose cover must not be touched still gets its
+       * lyrics. `Boolean(target.coverPath)` is the index's fact rather than the
+       * dialog's snapshot — that is why the switch is honoured here and not
+       * simply trusted from the renderer.
+       *
+       * Anything the renderer put in `patch.cover` is dropped first: on this
+       * channel the picture has exactly one route in, the two switches below.
+       * `buildPatch()` never produces one and the dialog never sends one, so a
+       * patch that arrives carrying art has bypassed 覆盖已有封面 — which is the
+       * one field on this dialog that cannot be un-changed afterwards. (Writes
+       * that *do* bring their own bytes, i.e. 「写入封面与歌词」, come through
+       * `assetsExport` and are unaffected.)
+       */
+      delete effective.cover
+      if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))) {
+        const cover = await fetchCoverBytes(options?.coverFrom)
+        if (cover) effective.cover = cover
+      }
+
       return commitAssetWrite(target, effective, { dryRun: options?.dryRun === true })
     }
   )
 
   /** Fetch a cover image for a matched track, returned as a data URL. */
   handle(IPC.matchCover, async (music: OnlineMusicInfo) => {
-    const url = music.picUrl
-    if (!url) return null
-    try {
-      const { body, contentType } = await safeFetchBytes(url, { maxBytes: 8 * 1024 * 1024, timeoutMs: 10_000 })
-      const mime = contentType ?? 'image/jpeg'
-      return { dataUrl: `data:${mime};base64,${body.toString('base64')}`, mime }
-    } catch {
-      return null
+    const cover = await fetchCoverBytes(music)
+    if (!cover) return null
+    return {
+      dataUrl: `data:${cover.mimeType};base64,${Buffer.from(cover.data).toString('base64')}`,
+      mime: cover.mimeType
     }
   })
 

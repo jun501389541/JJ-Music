@@ -29,8 +29,9 @@ import type {
   PlatformProbeResult,
   UserApiMeta
 } from '@shared/types'
-import type { LyricCandidate, AssetExportResult, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
+import type { ChosenLyric, LyricCandidate, AssetExportResult, MatchApplyOptions, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
+import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import type { ValidationReport, SourceToggleResult } from '@shared/validation'
 
 /** Unwrap the `{ ok, data, error }` envelope, throwing on failure. */
@@ -46,7 +47,9 @@ const api = {
     add: (tracks: OnlineMusicInfo[], quality: Quality) => invoke<string[]>(IPC.downloadsAdd, tracks, quality),
     cancel: (id: string) => invoke<void>(IPC.downloadsCancel, id),
     retry: (id: string) => invoke<void>(IPC.downloadsRetry, id),
+    remove: (id: string, deleteFile: boolean) => invoke<void>(IPC.downloadsRemove, id, deleteFile),
     folder: () => invoke<string>(IPC.downloadsFolder),
+    openFolder: () => invoke<void>(IPC.downloadsOpenFolder),
     /**
      * Pick the download directory. Takes no path and returns the stored result:
      * the main process shows the picker and writes the setting, because this
@@ -101,16 +104,23 @@ const api = {
    */
   shell: {
     /** Push playback state so the taskbar buttons stay accurate. */
-    setTaskbarState: (state: { hasTrack: boolean; playing: boolean }) =>
-      invoke<void>(IPC.taskbarState, state),
+    setTaskbarState: (state: TaskbarState) => invoke<void>(IPC.taskbarState, state),
     /** Subscribe to tray/thumbar transport commands; returns an unsubscribe. */
-    onTransportCommand: (
-      handler: (command: 'toggle' | 'previous' | 'next') => void
-    ) => {
-      const listener = (_event: unknown, command: 'toggle' | 'previous' | 'next'): void =>
-        handler(command)
+    onTransportCommand: (handler: (command: TransportCommand) => void) => {
+      const listener = (_event: unknown, command: TransportCommand): void => handler(command)
       ipcRenderer.on(IPC.trayCommand, listener)
       return () => ipcRenderer.removeListener(IPC.trayCommand, listener)
+    },
+    /**
+     * Subscribe to "stop using this file": main is about to replace it and the
+     * player's own stream is what would make the write fail. Returns an unsubscribe.
+     */
+    onReleaseFile: (handler: (path: string) => void) => {
+      const listener = (_event: unknown, path: unknown): void => {
+        if (typeof path === 'string' && path) handler(path)
+      }
+      ipcRenderer.on(IPC.playerReleaseFile, listener)
+      return () => ipcRenderer.removeListener(IPC.playerReleaseFile, listener)
     },
     /**
      * Resolve a dropped `File` to its absolute path.
@@ -299,7 +309,12 @@ const api = {
       invoke<number>(IPC.playlistAddTracks, id, tracks),
     removeTracks: (id: string, trackIds: string[]) =>
       invoke<number>(IPC.playlistRemoveTracks, id, trackIds),
-    reorder: (id: string, trackIds: string[]) => invoke<void>(IPC.playlistReorder, id, trackIds)
+    reorder: (id: string, trackIds: string[]) => invoke<void>(IPC.playlistReorder, id, trackIds),
+    backfillQualitys: (id: string) =>
+      invoke<Array<{ id: string; qualitys: Array<{ type: string; size?: string }> }>>(
+        IPC.playlistBackfillQualitys,
+        id
+      )
   },
 
   lyric: {
@@ -328,7 +343,17 @@ const api = {
     candidates: (trackId: string) =>
       invoke<LyricCandidate[]>(IPC.lyricCandidates, trackId),
     /**
-     * Write the lyric the user chose for one track.
+     * Show the lyric the user picked from the matches and hold it in 待写入.
+     * Writes nothing; `applyCandidate` and `exportFile` are the ones that do.
+     */
+    stageCandidate: (trackId: string, chosen: ChosenLyric) =>
+      invoke<ResolvedLyric>(IPC.lyricStageCandidate, trackId, chosen),
+    /**
+     * Write a lyric straight to disk, in one step.
+     *
+     * The picker no longer calls it — a matched lyric goes through `stageCandidate`
+     * and waits in 待写入 — and the editor's 保存 uses `save`, which is this same
+     * destination with 设置·写入位置 deciding the target.
      *
      * Id, not path: this can end up writing *into* the audio file.
      */
@@ -337,8 +362,11 @@ const api = {
     /** Pick a `.lrc` file and attach it to a local track. */
     importFile: (trackId: string) =>
       invoke<{ text: string; saved: AssetExportResult } | null>(IPC.lyricImport, trackId),
-    /** Save edited lyrics for one track. */
-    save: (trackId: string, text: string) => invoke<AssetExportResult>(IPC.lyricSave, trackId, text)
+    /** Save edited lyrics for one track, where 设置·写入位置 says. */
+    save: (trackId: string, text: string) => invoke<AssetExportResult>(IPC.lyricSave, trackId, text),
+    /** Save edited lyrics as a `.lrc` beside the track, leaving the audio file alone. */
+    exportFile: (trackId: string, text: string) =>
+      invoke<AssetExportResult>(IPC.lyricExportFile, trackId, text)
   },
 
   /**
@@ -367,12 +395,13 @@ const api = {
     ) => invoke<MatchCandidate[]>(IPC.matchMetadata, track, options),
     /**
      * Apply a chosen candidate to the file. Always preceded by a preview in the
-     * UI; `dryRun` reports the intended change without writing.
+     * UI; `dryRun` reports the intended change without writing — or downloading
+     * a cover, which is a side effect `dryRun` cannot otherwise contain.
      */
     apply: (
       track: LocalMusicInfo,
       patch: TagPatch,
-      options?: { withLyrics?: boolean; lyricFrom?: OnlineMusicInfo; dryRun?: boolean }
+      options?: MatchApplyOptions
     ) => invoke<AssetExportResult>(
       IPC.matchApply,
       track,
@@ -419,7 +448,13 @@ const lyricBridge = {
    */
   dragStart: (): void => ipcRenderer.send(IPC.desktopLyricDrag, { phase: 'start' }),
   dragEnd: (): void => ipcRenderer.send(IPC.desktopLyricDrag, { phase: 'end' }),
-  openMenu: (): void => ipcRenderer.send(IPC.desktopLyricMenu)
+  openMenu: (): void => ipcRenderer.send(IPC.desktopLyricMenu),
+  /**
+   * The card's controls. Routed through main, which validates the request and
+   * re-emits it to the main window — the strip still holds no state and reaches
+   * nothing of its own.
+   */
+  command: (command: DesktopLyricCommand): void => ipcRenderer.send(IPC.desktopLyricRequest, command)
 }
 
 if (process.argv.includes('--jj-desktop-lyric')) {

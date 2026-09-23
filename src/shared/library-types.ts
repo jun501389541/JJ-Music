@@ -67,6 +67,19 @@ export interface LyricCandidate {
   music: OnlineMusicInfo
 }
 
+/**
+ * The part of a candidate the picker sends back when the user chooses it.
+ *
+ * The three text fields only: the id, the score and the matched row are the
+ * main process's own answers, and `synchronized` is re-derived from the body so
+ * a renderer cannot report a lyric as per-line that is not.
+ */
+export interface ChosenLyric {
+  lyric: string
+  tlyric?: string
+  rlyric?: string
+}
+
 /** Fields a metadata match can fill in. */
 export interface TagPatch {
   title?: string
@@ -174,6 +187,37 @@ export interface MatchOptions {
   overwrite?: boolean
   /** Also fetch lyrics for the chosen candidate. */
   withLyrics?: boolean
+}
+
+/**
+ * Options for `matchApply` — writing the candidate the user picked.
+ *
+ * A named type rather than the inline object it used to be, because the same
+ * shape is written out in `src/main/index.ts` and `src/preload/index.ts`, and a
+ * field added to one of them silently does nothing in the other two.
+ *
+ * `withLyrics` / `withCover` are the *renderer's* intent and are only honoured
+ * by the main process if the indexed record allows it: the file's existing
+ * cover is read from the index here, not from the snapshot the dialog opened
+ * with. See `IPC.matchApply`.
+ */
+export interface MatchApplyOptions {
+  /** Pull the lyric text from `lyricFrom` and embed it. */
+  withLyrics?: boolean
+  /** Candidate whose platform is the lyric source. */
+  lyricFrom?: OnlineMusicInfo
+  /** Fetch and embed the candidate's cover art. */
+  withCover?: boolean
+  /** Candidate whose `picUrl` is the cover. Usually the same object as `lyricFrom`. */
+  coverFrom?: OnlineMusicInfo
+  /**
+   * Replace a cover the file already has. Deliberately **not** the same switch
+   * as `MatchOptions.overwrite`: text fields can be matched again, an embedded
+   * 1200×1200 jacket swapped for a 300×300 thumbnail cannot.
+   */
+  overwriteCover?: boolean
+  /** Report what would happen without writing — or downloading — anything. */
+  dryRun?: boolean
 }
 
 /** Re-exported for convenience so callers need one import. */

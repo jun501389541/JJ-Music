@@ -9,7 +9,21 @@ export const IPC = {
   downloadsAdd: 'downloads:add',
   downloadsCancel: 'downloads:cancel',
   downloadsRetry: 'downloads:retry',
+  /**
+   * Drop one record, optionally sending the files it produced to the recycle bin.
+   *
+   * Only the id travels: the path comes from this process's own task record, because
+   * a path from the renderer is a claim about a file rather than evidence of one.
+   */
+  downloadsRemove: 'downloads:remove',
   downloadsFolder: 'downloads:folder',
+  /**
+   * Open the download folder in Explorer, creating it first if nothing has ever been
+   * downloaded there. `fileReveal` cannot stand in for it: that channel throws
+   * 「文件不存在」 on a path that has not been created yet, and a brand-new install has
+   * never written one.
+   */
+  downloadsOpenFolder: 'downloads:open-folder',
   downloadsChooseFolder: 'downloads:choose-folder',
   playlistImportPreview: 'playlist:import-preview',
   playlistImportSave: 'playlist:import-save',
@@ -23,14 +37,37 @@ export const IPC = {
   fileReveal: 'file:reveal',
   /** Main → renderer: a tray menu item asked for a transport action. */
   trayCommand: 'tray:command',
+  /**
+   * Main → renderer: put this file down, a tag write is about to replace it.
+   *
+   * Not a command the user can issue — the writer in main asks only when it has
+   * already decided to touch that exact path, and the renderer's job is to stop
+   * playing it so the rename is not fighting its own audio stream.
+   */
+  playerReleaseFile: 'player:release-file',
   /** Renderer → main: keep the taskbar thumbnail buttons in sync. */
   taskbarState: 'taskbar:state',
   /** Renderer → main: files were dropped onto the window. */
   filesDropped: 'files:dropped',
   /** List every credible online lyric match, so the user can pick one. */
   lyricCandidates: 'lyric:candidates',
-  /** Save a chosen candidate as the track's sidecar lyric. */
+  /**
+   * Show a picked candidate now and hold it in 待写入; it writes nothing.
+   *
+   * The picker used to share `lyricApplyCandidate`, which committed to disk on
+   * click. An online match is still the app's guess, so it waits for a yes.
+   */
+  lyricStageCandidate: 'lyric:stage-candidate',
+  /**
+   * Write one lyric straight to disk: tags per settings, plus the sidecar.
+   *
+   * Kept because it is the primitive behind that destination, though the app
+   * reaches it through `lyricSave` today — the picker stopped using it when 采用
+   * became a staging action.
+   */
   lyricApplyCandidate: 'lyric:apply-candidate',
+  /** Write a sidecar `.lrc` beside the track and leave the audio file alone. */
+  lyricExportFile: 'lyric:export-file',
 
   // Settings
   settingsGet: 'settings:get',
@@ -101,6 +138,13 @@ export const IPC = {
   playlistAddTracks: 'playlist:add-tracks',
   playlistRemoveTracks: 'playlist:remove-tracks',
   playlistReorder: 'playlist:reorder',
+  /**
+   * Ask the platform what tiers the tracks of one list actually have, for the ones
+   * imported before that was recorded. Takes a list id only — the renderer never
+   * names a file or a URL — and answers with what was found so the view can merge
+   * without re-fetching the whole list.
+   */
+  playlistBackfillQualitys: 'playlist:backfill-qualitys',
 
   // Lyrics
   lyricReadFile: 'lyric:read-file',
@@ -137,6 +181,14 @@ export const IPC = {
   desktopLyricCommand: 'desktop-lyric:command',
   /** The overlay asks for its right-click menu, which only main can build. */
   desktopLyricMenu: 'desktop-lyric:menu',
+  /**
+   * The overlay's card asks for something: playback, 字号, lock, close.
+   *
+   * Overlay → main, and main re-emits it to the main window as an ordinary
+   * `desktopLyricCommand`. The strip never talks to the player directly, so there
+   * is still exactly one writer of settings and one owner of the audio graph.
+   */
+  desktopLyricRequest: 'desktop-lyric:request',
   /** The overlay drags itself: `{ phase: 'start' | 'end' }`, main follows the cursor between them. */
   desktopLyricDrag: 'desktop-lyric:drag',
 
@@ -148,3 +200,26 @@ export const IPC = {
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
+
+/**
+ * What the taskbar thumbnail buttons should show right now.
+ *
+ * `favorite` is the track's *state*, not an action: the heart is drawn filled
+ * when the current track is already in 我喜欢的. The two transport glyphs are
+ * drawn as the action they trigger, so this is the one field that reads
+ * backwards from its neighbours — see `updateTaskbarButtons`.
+ */
+export interface TaskbarState {
+  hasTrack: boolean
+  playing: boolean
+  favorite: boolean
+}
+
+/**
+ * A transport request from the tray menu or a taskbar thumbnail button.
+ *
+ * Named here rather than spelled out in the preload because both ends and the
+ * renderer's handler have to agree on the set; a command added on one side and
+ * missing on another is otherwise a silent no-op on the taskbar.
+ */
+export type TransportCommand = 'toggle' | 'previous' | 'next' | 'favorite'

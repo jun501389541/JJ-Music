@@ -499,6 +499,27 @@ export interface LastSession {
   at: number
 }
 
+/**
+ * One playback queue the user has played recently, kept so the panel can page
+ * back to it.
+ *
+ * A snapshot of `queue` plus when it was started, and a `label` because a list
+ * of 300 rows is otherwise indistinguishable from the next 300 rows — the panel
+ * header names the album, playlist or search that produced it.
+ *
+ * The tracks are stored whole, exactly as `LastSession` stores its queue. A
+ * partial record (id + name + duration) cannot be played again: an online
+ * track's whole identity lives in `meta` (`songmid`, `hash`, `copyrightId`),
+ * which is what the platform resolvers read.
+ */
+export interface QueueSnapshot {
+  /** What this list was, e.g. 「歌单 · 忆」 or 「搜索 · 陈奕迅」. */
+  label: string
+  queue: PlayableTrack[]
+  /** When it started playing, so the panel can order and age them. */
+  at: number
+}
+
 export interface AppSettings extends UiPreferences {
   /** Most recently played tracks, newest first, bounded to 100 entries. */
   recentPlayed: PlayableTrack[]
@@ -515,6 +536,19 @@ export interface AppSettings extends UiPreferences {
    * writer snapshots patches through JSON, which drops undefined.
    */
   lastSession?: LastSession | null
+  /**
+   * The queues played most recently, newest first, at most two of them.
+   *
+   * The panel shows these as pages beside the live queue — three pages in
+   * total, which is the user's spec ("连当前队列共 3 页"). Two stored snapshots
+   * plus the queue that is playing now.
+   *
+   * Written when a whole list starts playing, not on a timer: unlike
+   * `lastSession`, whose position changes every second, this changes once per
+   * user action, so there is nothing to throttle and no 600 KB write riding on
+   * every playback tick.
+   */
+  queueHistory?: QueueSnapshot[]
   /**
    * Search keywords the user has run, newest first, capped.
    *
@@ -669,6 +703,14 @@ export interface DownloadTask {
    */
   remoteSize?: number
   path?: string
+  /**
+   * The `.lrc` this download wrote next to `path`, and only that one.
+   *
+   * The sidecar is written with 不覆盖, so a `.lrc` sitting beside the audio may be
+   * one the user wrote by hand. 「移除记录 + 删除文件」 has to be able to tell the two
+   * apart, and after a restart there is no other way to know who made that file.
+   */
+  lyricPath?: string
   error?: string
   warnings: string[]
   createdAt: number

@@ -10,6 +10,8 @@
 import { computed, onMounted, ref, watch, toRaw } from 'vue'
 import type { LocalMusicInfo } from '@shared/types'
 import type { MatchCandidate } from '@shared/library-types'
+import { toMediaUrl } from '@shared/media-url'
+import { formatBytes } from '../utils/format'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 
@@ -37,9 +39,26 @@ const candidates = ref<MatchCandidate[]>([])
 const selectedIndex = ref(0)
 const overwrite = ref(false)
 const withLyrics = ref(true)
+/**
+ * Cover art gets **two** switches, not one more state on the text one.
+ *
+ * `overwrite` is about text: a wrong title can be matched again tomorrow. A
+ * cover is an image asset — replacing the 1200×1200 jacket a user embedded by
+ * hand with the 300×300 thumbnail the search adapter returns (see
+ * `main/online/search.ts`, the `param=300y300` suffix) is not undoable by
+ * re-running the match, and the `.bak` is a whole-file backup nobody is going to
+ * dig through field by field. So the risky half is opt-in on its own, and
+ * `withCover` defaults to on only because 标签匹配 is about completing metadata.
+ */
+const withCover = ref(true)
+const overwriteCover = ref(false)
 const error = ref<string | null>(null)
 /** Cover previews keyed by candidate id, fetched lazily. */
 const covers = ref<Record<string, string>>({})
+/** Pixel size of the cover the file already has, read off the `<img>`. */
+const currentCover = ref<{ w: number; h: number } | null>(null)
+/** Pixel size and byte count of the candidate's cover, read off its data URL. */
+const newCover = ref<{ w: number; h: number; bytes: number } | null>(null)
 
 const selected = computed(() => candidates.value[selectedIndex.value] ?? null)
 
@@ -107,6 +126,62 @@ async function loadCovers(): Promise<void> {
   }
 }
 
+/** The selected candidate's preview bytes, if they were ever fetched. */
+const selectedCoverUrl = computed(() => {
+  const music = selected.value?.music
+  return music ? covers.value[music.id] ?? '' : ''
+})
+
+const currentCoverUrl = computed(() => (props.track.coverPath ? toMediaUrl(props.track.coverPath) : ''))
+
+/**
+ * Bytes in a data URL, without downloading it again.
+ *
+ * The base64 text is already in hand, and `4 chars → 3 bytes` is exact bar the
+ * one or two padding characters. The number is shown so a size *drop* is
+ * visible, not to be a file listing — an estimate is the right trade here,
+ * because reading the real length would mean a new IPC channel or widening the
+ * page's `connect-src` to let the renderer fetch `jjmedia:`.
+ */
+function estimateBytes(dataUrl: string): number {
+  const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+  const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((b64.length * 3) / 4) - padding)
+}
+
+function measureNewCover(dataUrl: string): void {
+  newCover.value = null
+  if (!dataUrl) return
+  const image = new Image()
+  image.onload = () => {
+    newCover.value = { w: image.naturalWidth, h: image.naturalHeight, bytes: estimateBytes(dataUrl) }
+  }
+  image.src = dataUrl
+}
+
+/** What the cover row tells the user, given both switches and what is known. */
+const coverPlan = computed(() => {
+  const music = selected.value?.music
+  const hasCurrent = Boolean(props.track.coverPath)
+  const keep = hasCurrent && !overwriteCover.value
+  return {
+    hasCurrent,
+    keep,
+    /** Nothing to compare with: no `picUrl` at all, or a candidate beyond the six previews. */
+    unknown: !selectedCoverUrl.value,
+    noArt: Boolean(music && !music.picUrl),
+    /** A smaller picture is allowed to land — the switch says the user asked for it. It just has to be labelled. */
+    smaller:
+      hasCurrent && !keep && currentCover.value !== null && newCover.value !== null &&
+      currentCover.value.w * currentCover.value.h > newCover.value.w * newCover.value.h
+  }
+})
+
+function onCurrentCoverLoad(event: Event): void {
+  const image = event.target as HTMLImageElement
+  currentCover.value = { w: image.naturalWidth, h: image.naturalHeight }
+}
+
 async function apply(): Promise<void> {
   const candidate = selected.value
   if (!candidate) return
@@ -118,7 +193,12 @@ async function apply(): Promise<void> {
       toIpcPayload(candidate.patch),
       {
         withLyrics: withLyrics.value,
-        lyricFrom: toIpcPayload(candidate.music)
+        lyricFrom: toIpcPayload(candidate.music),
+        withCover: withCover.value,
+        // Same candidate the lyric came from; the field is its own so the main
+        // process never has to guess which intent belongs to which asset.
+        coverFrom: toIpcPayload(candidate.music),
+        overwriteCover: overwriteCover.value
       }
     )
     if (result.written) {
@@ -140,6 +220,10 @@ async function apply(): Promise<void> {
 // Re-run the search when the overwrite policy changes: it alters which fields
 // each candidate proposes.
 watch(overwrite, () => void search())
+
+// The preview row needs the incoming picture's pixel size, and the only place
+// that is knowable is the data URL already fetched for the list thumbnail.
+watch(selectedCoverUrl, measureNewCover, { immediate: true })
 
 onMounted(search)
 </script>
@@ -167,6 +251,15 @@ onMounted(search)
           <label class="toggle">
             <input v-model="withLyrics" type="checkbox" />
             <span>同时写入在线歌词</span>
+          </label>
+          <label class="toggle">
+            <input v-model="withCover" type="checkbox" />
+            <span>同时写入封面</span>
+          </label>
+          <!-- 没有封面可覆盖时不摆这个框：一个点了没作用的开关比不显示更糟。 -->
+          <label v-if="withCover && track.coverPath" class="toggle">
+            <input v-model="overwriteCover" type="checkbox" />
+            <span>覆盖已有封面</span>
           </label>
           <button class="btn" type="button" :disabled="loading" @click="search">
             <span v-if="loading" class="spinner" />
@@ -244,6 +337,51 @@ onMounted(search)
                 </tr>
               </tbody>
             </table>
+
+            <!--
+              The cover row is the whole argument for `覆盖已有封面` existing: a
+              300×300 thumbnail from the search adapter replacing the jacket
+              already in the file is the one change here that re-running the
+              match cannot undo, so both pictures are put in front of the user
+              with their pixel sizes, and a downgrade is labelled rather than
+              silently skipped. Cover art deliberately stays out of the table
+              above — `fields` is the text diff, and a `cover` entry in it would
+              make a correctly-tagged file suddenly "have changes".
+            -->
+            <div v-if="withCover && selected" class="cover">
+              <span class="cover__label">封面</span>
+              <div class="cover__pair">
+                <span v-if="coverPlan.hasCurrent" class="cover__side">
+                  <img
+                    class="cover__art"
+                    :src="currentCoverUrl"
+                    alt=""
+                    @load="onCurrentCoverLoad"
+                    @error="currentCover = null"
+                  />
+                  <small>当前{{ currentCover ? ` ${currentCover.w}×${currentCover.h}` : '' }}</small>
+                </span>
+                <span v-else class="cover__side">
+                  <span class="cover__art cover__art--empty">♪</span>
+                  <small>当前：无封面</small>
+                </span>
+
+                <span class="cover__arrow">→</span>
+
+                <span class="cover__side">
+                  <small v-if="coverPlan.keep" class="cover__keep">将保留原有封面（勾选「覆盖已有封面」才会替换）</small>
+                  <small v-else-if="coverPlan.noArt">该候选没有封面，不写入</small>
+                  <small v-else-if="coverPlan.unknown">将写入该平台封面（列表只预取前 6 张，这张没有预览）</small>
+                  <template v-else>
+                    <img class="cover__art" :src="selectedCoverUrl" alt="" />
+                    <small>
+                      将写入{{ newCover ? ` ${newCover.w}×${newCover.h} · ${formatBytes(newCover.bytes)}` : '' }}
+                      <em v-if="coverPlan.smaller" class="cover__smaller">（比现有封面更小）</em>
+                    </small>
+                  </template>
+                </span>
+              </div>
+            </div>
 
             <p class="preview__reasons">
               匹配依据：{{ selected.reasons.join(' · ') }}
@@ -558,6 +696,74 @@ onMounted(search)
   color: var(--text-tertiary);
   text-align: center;
   padding: 14px 0;
+}
+
+/* ---------------- cover row ---------------- */
+
+.cover {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--divider);
+  font-size: var(--text-sm);
+}
+
+.cover__label {
+  flex: none;
+  width: 64px;
+  color: var(--text-secondary);
+}
+
+.cover__pair {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.cover__side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cover__side small {
+  color: var(--text-tertiary);
+}
+
+.cover__art {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+}
+
+.cover__art--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+
+.cover__arrow {
+  color: var(--text-tertiary);
+}
+
+.cover__keep {
+  color: var(--text-secondary);
+}
+
+/* A downgrade is the one thing on this row the user must not miss. */
+.cover__smaller {
+  color: var(--danger);
+  font-style: normal;
+  font-weight: 600;
 }
 
 .preview__reasons,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 })
+withDefaults(defineProps<{ name: string; size?: number; filled?: boolean }>(), { size: 20, filled: false })
 const paths: Record<string, string> = {
   music: 'M9 18V5l11-2v13M9 8l11-2M9 18c0 3-6 4-6 1s6-4 6-1m11-2c0 3-6 4-6 1s6-4 6-1',
   genre: 'M4 5h6v6H4zM14 5h6v6h-6zM4 15h6v6H4zM14 15h6v6h-6z',
@@ -37,5 +37,13 @@ const paths: Record<string, string> = {
   link: 'm9 15 6-6M8 16l-2 2a4 4 0 0 1-5-5l5-5a4 4 0 0 1 6 0m0 8a4 4 0 0 0 6 0l5-5a4 4 0 0 0-5-5l-2 2',
   locate: 'M12 5a7 7 0 1 0 0 14 7 7 0 0 0 0-14M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5M12 1v3m0 16v3M1 12h3m16 0h3'
 }
+
+/**
+ * `filled` is opt-in per call site, and the default stays `fill="none"`: most of
+ * `paths` are open line work (list, sort, search, volume, lyrics), and giving
+ * those a fill colour would blob them into solid shapes. The stroke is kept even
+ * when filled, so a filled heart has the same outline as an empty one — the
+ * state changes without the icon appearing to grow.
+ */
 </script>
-<template><svg :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" :stroke-width="name === 'more' ? 3.5 : 1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] || paths.music" /></svg></template>
+<template><svg :width="size" :height="size" viewBox="0 0 24 24" :fill="filled ? 'currentColor' : 'none'" stroke="currentColor" :stroke-width="name === 'more' ? 3.5 : 1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] || paths.music" /></svg></template>

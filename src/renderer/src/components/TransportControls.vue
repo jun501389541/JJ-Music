@@ -107,17 +107,26 @@ function toggleFavorite(): void {
 
 <template>
   <div class="transport">
+    <!--
+      The state has to be legible, not just correct: a 17px heart that changes
+      from grey outline to pink outline was read as "nothing happened". So the
+      outline fills in as well as recolours, and the tooltip carries the verb —
+      which is the rule this app already set for the Windows taskbar heart
+      (`tools/make-icons.mjs`: filled means the track is in 我喜欢的) and for the
+      context-menu item (`utils/track-actions.ts`).
+    -->
     <button
       v-if="showFavorite"
       class="icon-btn"
       type="button"
       :class="{ liked: favorite }"
-      title="喜爱"
-      aria-label="喜爱"
+      :title="favorite ? '取消喜爱' : '喜爱'"
+      :aria-label="favorite ? '取消喜爱' : '喜爱'"
+      :aria-pressed="favorite"
       :disabled="!player.currentTrack"
       @click="toggleFavorite"
     >
-      <AppIcon name="heart" :size="dims.small" />
+      <AppIcon name="heart" :size="dims.small" :filled="favorite" />
     </button>
 
     <span class="transport__mode">

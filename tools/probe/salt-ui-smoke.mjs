@@ -343,6 +343,37 @@ try {
   * 这条由 .cache/panel-s-check.mjs 的 S5/S9 量：主页与播放页两处点开的是同一个组件、
   * 都不跳页 —— 冒烟这里不再重复点一次底栏（overlay 退场后底栏的可见时机不稳定）。
   */
+ /*
+  * W 轮：底栏那颗心。此前探针从来没点过它，所以「点了到底有没有反应」这件事
+  * 一直只有人工验收 —— 而用户报的正是「看不出有没有收藏成功」。
+  * 量的不是 class，是**画出来的东西**：path 的 computed fill、aria-pressed、tooltip 动词。
+  */
+ const heartState = () => evaluate(`(() => {
+   const b = document.querySelector('.playbar button[aria-label="喜爱"], .playbar button[aria-label="取消喜爱"]')
+   if (!b) return 'null'
+   const p = b.querySelector('svg path')
+   return JSON.stringify({ pressed: b.getAttribute('aria-pressed'), label: b.getAttribute('aria-label'),
+     fill: p ? getComputedStyle(p).fill : '(没有 path)', color: getComputedStyle(b).color,
+     favs: uiTestLibrary.favorites.length })
+ })()`)
+ const heartBefore = JSON.parse(await heartState())
+ await click('.playbar button[aria-label="喜爱"]', '喜爱')
+ await sleep(700)
+ const heartOn = JSON.parse(await heartState())
+ await click('.playbar button[aria-label="取消喜爱"]', '取消喜爱')
+ await sleep(700)
+ const heartOff = JSON.parse(await heartState())
+ check('收藏按钮点一下真的换状态：fill 从 none 变填充色、aria-pressed 与 tooltip 跟着翻',
+   !!heartBefore && heartBefore.fill === 'none' && heartBefore.pressed === 'false' && heartBefore.label === '喜爱' &&
+   heartOn.fill !== 'none' && heartOn.pressed === 'true' && heartOn.label === '取消喜爱' &&
+   heartOn.favs === heartBefore.favs + 1,
+   JSON.stringify({ 前: heartBefore, 点后: heartOn }))
+ check('再点一下翻回空心（不是一去不回），收藏数也跟着减回来',
+   heartOff.fill === 'none' && heartOff.pressed === 'false' && heartOff.label === '喜爱' &&
+   heartOff.favs === heartBefore.favs, JSON.stringify(heartOff))
+ check('filled 只作用在这一颗心：底栏其它图标的 path 仍然是 fill:none',
+   (await evaluate(`[...document.querySelectorAll('.playbar .icon-btn svg path')].filter(p => getComputedStyle(p).fill !== 'none').length`)) <= 1,
+   '底栏里被填充的 path 数 ≤ 1（就是那颗心）')
  await sleep(300)
  /*
   * Desktop lyrics. This has shipped as a setting that did nothing twice, so the

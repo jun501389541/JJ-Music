@@ -109,7 +109,45 @@ function canvas(size = 32) {
       }
     }
   }
-  return { pixels, set, rect, triangle, rounded, size }
+  /**
+   * A heart: solid, or as a rim of `rim` pixels.
+   *
+   * Outlined from a field rather than a path because this canvas has no curve
+   * primitive — `(x² + y² − 1)³ = x²y³` is the usual implicit heart, with the
+   * unit axes scaled so the ink lands in the same ~21×19 box the transport
+   * glyphs occupy.
+   *
+   * The rim is found by probing outward (`inside(x,y)` but not
+   * `inside(x + rim·dir)`) instead of by thresholding the field value, which is
+   * the tempting version: the field steepens away from the centre, so a constant
+   * band in field space draws a fat ring on the lobes and a hairline at the tip.
+   * A distance probe is flat in pixel space by construction, and unlike a
+   * `-f/|∇f|` estimate it survives the two places where that gradient vanishes —
+   * the dip between the lobes and the point at the bottom.
+   */
+  const heart = (colour, { solid = false, rim = 2.6 } = {}) => {
+    const k = size * 0.29 // pixels per unit; the shape is 2.26 × 2 units
+    const c0 = (size - 1) / 2
+    const value = (px, py) => {
+      const x = (px - c0) / k
+      const y = (c0 - py) / k // screen y grows downwards, the curve's does not
+      const a = x * x + y * y - 1
+      return a * a * a - x * x * y * y * y
+    }
+    const inside = (px, py) => value(px, py) <= 0
+    const DIRECTIONS = [
+      [1, 0], [-1, 0], [0, 1], [0, -1],
+      [0.707, 0.707], [-0.707, 0.707], [0.707, -0.707], [-0.707, -0.707]
+    ]
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        if (!inside(x, y)) continue
+        if (!solid && !DIRECTIONS.some(([dx, dy]) => !inside(x + dx * rim, y + dy * rim))) continue
+        set(x, y, colour)
+      }
+    }
+  }
+  return { pixels, set, rect, triangle, rounded, heart, size }
 }
 
 const WHITE = [255, 255, 255]
@@ -130,7 +168,16 @@ const glyphs = {
   next: (c) => {
     c.triangle(8, 7, 12, 18, WHITE)
     c.rect(21, 7, 3, 18, WHITE)
-  }
+  },
+  /*
+   * Two states rather than two actions. The transport glyphs above show what a
+   * click *does* (a playing track shows ❚❚); the heart shows what *is* — a filled
+   * heart means the track is already in 我喜欢的, so the button reads as the
+   * track's state and the tooltip carries the verb (`喜爱` / `取消喜爱`, matching
+   * the context menu in `utils/track-actions.ts`).
+   */
+  'favorite-off': (c) => c.heart(WHITE, { solid: false }),
+  'favorite-on': (c) => c.heart(WHITE, { solid: true })
 }
 
 for (const [name, draw] of Object.entries(glyphs)) {

@@ -24,10 +24,10 @@
  * serves both surfaces; there is no second size to fork the cluster for.
  */
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { RouterLink } from 'vue-router'
 import type { PlayMode } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
+import { useUiStore } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
 import TransportIcon from './TransportIcon.vue'
 
@@ -42,6 +42,7 @@ withDefaults(defineProps<{
 
 const player = usePlayerStore()
 const library = useLibraryStore()
+const ui = useUiStore()
 
 function toggleDesktopLyric(): void {
   void library.updateSettings({ desktopLyric: !library.settings.desktopLyric })
@@ -167,26 +168,22 @@ function toggleFavorite(): void {
 
     <!--
       The queue button sits inside the cluster per the reference design, right
-      of next. `RouterLink` keeps the toolbar's behaviour of navigating to the
-      queue page.
+      of next. It opens the playback panel in place rather than navigating to a
+      page: the queue is a thing you check while listening, and replacing the
+      page you were on cost you your place in it.
     -->
     <slot name="trailing">
-      <RouterLink
+      <button
         v-if="showQueue"
-        v-slot="{ navigate, href }"
-        to="/queue"
-        custom
+        class="icon-btn"
+        type="button"
+        title="播放队列"
+        aria-label="播放队列"
+        :aria-expanded="ui.playbackPanel === 'queue'"
+        @click="ui.playbackPanel = ui.playbackPanel === 'queue' ? null : 'queue'"
       >
-        <a
-          class="icon-btn"
-          :href
-          title="播放队列"
-          aria-label="播放队列"
-          @click="navigate($event)"
-        >
-          <AppIcon name="list" :size="dims.small" />
-        </a>
-      </RouterLink>
+        <AppIcon name="list" :size="dims.small" />
+      </button>
     </slot>
 
     <!--

@@ -130,12 +130,27 @@ async function main() {
   await send('Runtime.enable')
   await sleep(3500)
 
+  /*
+   * `__jj_search` lives in SearchView, and that route chunk is lazily loaded — on a
+   * freshly launched app the component has never mounted, so the global is absent even
+   * in a fully instrumented build. Asking about it before navigating would let an
+   * instrumented build pass as "clean", which is the one mistake this check must not
+   * make. So mount the view first, then ask.
+   */
+  await send('Runtime.evaluate', {
+    expression: `document.querySelector('#app').__vue_app__.config.globalProperties.$router.push('/search')`,
+    returnByValue: true
+  })
+  await sleep(1500)
+
   const result = await send('Runtime.evaluate', {
     // `import.meta` is not valid in a classic script evaluation, so only the
     // window probes are included.
     expression: `JSON.stringify({
     hookPlayer: typeof window.__jj_player,
     hookLibrary: typeof window.__jj_library,
+    hookSearch: typeof window.__jj_search,
+    searchMounted: !!document.querySelector('.search-view'),
     bridge: typeof window.jj,
     shellReady: !!document.querySelector('.shell'),
     heading: document.querySelector('h1')?.textContent
@@ -147,14 +162,17 @@ async function main() {
   console.log('runtime probe of the built app:')
   console.log(`  typeof window.__jj_player  = ${parsed.hookPlayer}`)
   console.log(`  typeof window.__jj_library = ${parsed.hookLibrary}`)
+  console.log(`  typeof window.__jj_search  = ${parsed.hookSearch}  (搜索视图已挂载=${parsed.searchMounted})`)
 
   console.log(`  app UI: ${parsed.shellReady ? 'ready' : 'missing'}, bridge: ${parsed.bridge}, heading: ${parsed.heading}`)
-  const reachable = parsed.hookPlayer !== 'undefined' || parsed.hookLibrary !== 'undefined'
+  // `searchMounted` is part of the verdict: if the view never came up, the absence of
+  // `__jj_search` proves nothing about the build and must not be read as "clean".
+  const reachable = parsed.hookPlayer !== 'undefined' || parsed.hookLibrary !== 'undefined' || parsed.hookSearch !== 'undefined'
   console.log(`\nE2E hook reachable in this build: ${reachable ? 'YES (test build)' : 'NO (clean build)'}`)
 
   child.kill()
   await sleep(400)
-  return reachable || !parsed.shellReady || parsed.bridge !== 'object' ? 1 : 0
+  return reachable || !parsed.shellReady || !parsed.searchMounted || parsed.bridge !== 'object' ? 1 : 0
 }
 
 /**

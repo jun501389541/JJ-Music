@@ -41,13 +41,13 @@ function build(env, label) {
   }
 }
 
-/** Cheap pre-check: is the guarded assignment emitted at all? */
+/** Cheap pre-check: is any guarded hook assignment emitted at all? */
+const HOOKS = ['__jj_player', '__jj_library', '__jj_search']
 function hookEmitted() {
   const assets = join(repoRoot, 'out', 'renderer', 'assets')
   if (!existsSync(assets)) return false
-  return readdirSync(assets)
-    .filter((name) => name.endsWith('.js'))
-    .some((name) => readFileSync(join(assets, name), 'utf8').includes('__jj_player'))
+  const bodies = readdirSync(assets).filter((name) => name.endsWith('.js')).map((name) => readFileSync(join(assets, name), 'utf8'))
+  return HOOKS.some((hook) => bodies.some((body) => body.includes(hook)))
 }
 
 /**

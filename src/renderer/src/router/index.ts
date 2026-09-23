@@ -72,12 +72,6 @@ export const router = createRouter({
       meta: { title: '歌单' }
     },
     {
-      path: '/queue',
-      name: 'queue',
-      component: () => import('../views/QueueView.vue'),
-      meta: { title: '播放队列' }
-    },
-    {
       path: '/sources',
       name: 'sources',
       component: () => import('../views/SourcesView.vue'),

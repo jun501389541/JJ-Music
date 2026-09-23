@@ -10,11 +10,13 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AppSettings, PlayableTrack, Playlist } from '@shared/types'
+import { isLocalTrack } from '@shared/types'
 import { parseJsonLoose, writeJsonAtomic } from './json-file'
 
 export const DEFAULT_SETTINGS: AppSettings = {
   ...UI_DEFAULTS,
   recentPlayed: [],
+  queueHistory: [],
   searchHistory: [],
   playQuality: 'flac24bit',
   libraryFolders: [],
@@ -211,6 +213,40 @@ export class PlaylistStore {
     this.items.set(id, existing)
     await this.persist()
     return added
+  }
+
+  /**
+   * Fill in `meta.qualitys` for tracks already in a list, without touching anything
+   * else about them.
+   *
+   * `addTracks` skips ids it already has, so a list imported before we learned to
+   * read quality availability has no way to gain it — this is that missing write.
+   *
+   * Two things it deliberately cannot do: replace `meta` (every platform's resolver
+   * needs `songmid` / `hash` / `albumId` / `copyrightId`, so the merge is per-key),
+   * and reorder (the list is rebuilt with `map`, never filter+push, because a
+   * playlist's order is user data — see the persistence regression suite).
+   */
+  async patchQualitys(
+    id: string,
+    qualitys: Array<{ id: string; qualitys: Array<{ type: string; size?: string }> }>
+  ): Promise<number> {
+    await this.load()
+    const existing = this.items.get(id) ?? []
+    if (!existing.length || !qualitys.length) return 0
+    const byId = new Map(qualitys.map((entry) => [entry.id, entry.qualitys]))
+    let touched = 0
+    const next = existing.map((track) => {
+      const tiers = byId.get(track.id)
+      if (!tiers || isLocalTrack(track)) return track
+      if (JSON.stringify(tiers) === JSON.stringify(track.meta?.qualitys ?? [])) return track
+      touched += 1
+      return { ...track, meta: { ...track.meta, qualitys: tiers } }
+    })
+    if (!touched) return 0
+    this.items.set(id, next)
+    await this.persist()
+    return touched
   }
 
   /** Drop entries by track id. Returns how many actually left the list. */

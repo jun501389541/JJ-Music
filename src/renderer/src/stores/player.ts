@@ -19,6 +19,7 @@ import type {
   PlayableTrack,
   PlayMode,
   Quality,
+  QueueSnapshot,
   SourceId
 } from '@shared/types'
 import { isLocalTrack, ONLINE_SOURCE_IDS } from '@shared/types'
@@ -56,10 +57,23 @@ function sameRecording(a: OnlineMusicInfo, b: OnlineMusicInfo): boolean {
   return left !== undefined && right !== undefined && Math.abs(left - right) <= 5
 }
 
+/** Stored snapshots beside the live queue: three pages in the panel, two on disk. */
+const QUEUE_HISTORY_LIMIT = 2
+
 export const usePlayerStore = defineStore('player', () => {
   const engine = shallowRef<AudioEngine | null>(null)
 
   const queue = ref<PlayableTrack[]>([])
+  /**
+   * The queues that were playing before this one, newest first.
+   *
+   * Two entries, not three: the live queue is the third page of the panel, so
+   * "3 个历史列表" means three pages you can look at, and only two of them are
+   * somewhere else.
+   */
+  const queueHistory = ref<QueueSnapshot[]>([])
+  /** The name the live queue was started under, so it can be filed correctly later. */
+  const queueLabel = ref('')
   const currentIndex = ref(-1)
   const playing = ref(false)
   const loading = ref(false)
@@ -589,12 +603,65 @@ export const usePlayerStore = defineStore('player', () => {
     return -1
   }
 
-  async function playQueue(tracks: PlayableTrack[], startIndex = 0): Promise<void> {
+  async function playQueue(tracks: PlayableTrack[], startIndex = 0, label = ''): Promise<void> {
+    rememberQueue(tracks)
     stop()
     queue.value = [...tracks]
     currentIndex.value = -1
+    queueLabel.value = label
     resetRandomPass()
     await playTrackAt(startIndex)
+  }
+
+  /**
+   * Park the queue that is about to be replaced, newest first, two deep.
+   *
+   * Two stored snapshots plus the live queue make the three pages the panel
+   * offers. A snapshot carries **the name it was started under** (`queueLabel`),
+   * not the name of the list replacing it — the page you page back to has to be
+   * the list you remember, and 「专辑 · 三」 over the tracks of 二 is a lie the
+   * panel would show forever.
+   *
+   * Replaying a list that is already one of the pages moves that page to the
+   * front rather than keeping a duplicate: the live queue and the page behind it
+   * holding the same list makes paging look broken.
+   */
+  function rememberQueue(incoming: PlayableTrack[]): void {
+    const signature = (list: PlayableTrack[]): string => list.map(track => track.id).join(',')
+    const outgoing = queue.value
+    const next = queueHistory.value.filter(entry => signature(entry.queue) !== signature(incoming))
+    if (outgoing.length > 0 && !next.some(entry => signature(entry.queue) === signature(outgoing))) {
+      next.unshift({ label: queueLabel.value, queue: JSON.parse(JSON.stringify(outgoing)) as PlayableTrack[], at: Date.now() })
+    }
+    queueHistory.value = next.slice(0, QUEUE_HISTORY_LIMIT)
+    // Written on this action alone, never on a timer: the list changes once per
+    // "play this whole list", so there is no repeated megabyte-scale write to
+    // throttle away. The queue is copied through JSON because a Vue proxy
+    // cannot cross IPC - the same reason `writeSession` does it.
+    void useLibraryStore().updateSettings({ queueHistory: queueHistory.value }).catch(() => undefined)
+  }
+
+  /**
+   * Reorder the queue, keeping the playing row playing.
+   *
+   * `to` is the index after the source has been lifted out, which is what
+   * `TrackList` emits and what the drag geometry actually says.
+   *
+   * The three-way `currentIndex` correction is the whole point of this function.
+   * Without it, dragging an unrelated row past the playing one makes the
+   * highlight - and the next 下一首 - jump to a different song.
+   */
+  function moveInQueue(from: number, to: number): void {
+    if (from === to || to < 0 || to >= queue.value.length || from < 0 || from >= queue.value.length) return
+    const list = [...queue.value]
+    const [item] = list.splice(from, 1)
+    if (!item) return
+    list.splice(to, 0, item)
+    // Replacing the array keeps reactivity predictable.
+    queue.value = list
+    if (currentIndex.value === from) currentIndex.value = to
+    else if (from < currentIndex.value && to >= currentIndex.value) currentIndex.value -= 1
+    else if (from > currentIndex.value && to <= currentIndex.value) currentIndex.value += 1
   }
 
   async function toggle(): Promise<void> {
@@ -929,6 +996,29 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  /**
+   * Take back the recent queues after a restart, so the panel's history pages
+   * survive closing the app.
+   *
+   * Validated rather than trusted: this arrives from a settings file, and a
+   * half-written entry would otherwise appear as a page that is empty and
+   * cannot be played.
+   */
+  function restoreQueueHistory(list: unknown): void {
+    if (!Array.isArray(list)) {
+      queueHistory.value = []
+      return
+    }
+    queueHistory.value = list
+      .filter((entry): entry is QueueSnapshot => !!entry && typeof entry === 'object' && Array.isArray(entry.queue) && entry.queue.length > 0)
+      .slice(0, QUEUE_HISTORY_LIMIT)
+      .map(entry => ({
+        label: typeof entry.label === 'string' ? entry.label : '',
+        queue: entry.queue,
+        at: Number.isFinite(entry.at) ? entry.at : 0
+      }))
+  }
+
   function stop(): void {
     // Capture the position before clearing state, or the resume point would
     // always be at zero.
@@ -1172,6 +1262,7 @@ export const usePlayerStore = defineStore('player', () => {
   return {
     // state
     queue,
+    queueHistory,
     currentIndex,
     playing,
     loading,
@@ -1226,6 +1317,8 @@ export const usePlayerStore = defineStore('player', () => {
     removeFromQueue,
     clearQueue,
     insertNext,
+    moveInQueue,
+    restoreQueueHistory,
     sleepAt,
     setSleepMinutes,
     stop,

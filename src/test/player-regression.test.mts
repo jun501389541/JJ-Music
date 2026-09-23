@@ -469,3 +469,102 @@ test('random plays a full shuffled pass before repeating, and steps back through
   await player.previous()
   assert.equal(player.currentTrack.id, back, 'stepping back twice agrees about where back is')
 })
+
+/* ------------------------------------------------------------------ *
+ * Queue editing and the three pages the playback panel shows
+ *
+ * Reordering used to live in the `/queue` page and nothing tested it, which is
+ * how "delete a route" could have deleted a feature silently. The history rules
+ * are the other half: what counts as starting a new list, and what does not.
+ * ------------------------------------------------------------------ */
+
+test('dragging a row keeps the playing song playing, whichever way it moves', async () => {
+  const player = setup()
+  await player.playQueue([local('a'), local('b'), local('c'), local('d')], 2)
+  assert.equal(player.currentTrack.id, 'c')
+
+  // 1. The current row itself moves: the highlight travels with it.
+  player.moveInQueue(2, 0)
+  assert.deepEqual(player.queue.map(t => t.id), ['c', 'a', 'b', 'd'])
+  assert.equal(player.currentIndex, 0)
+  assert.equal(player.currentTrack.id, 'c')
+
+  // 2. A later row dropped in front of it pushes the current index right.
+  player.moveInQueue(3, 0)
+  assert.deepEqual(player.queue.map(t => t.id), ['d', 'c', 'a', 'b'])
+  assert.equal(player.currentTrack.id, 'c')
+  assert.equal(player.currentIndex, 1)
+
+  // 3. A row from before the current one landing after it pushes current left.
+  player.moveInQueue(0, 2)
+  assert.deepEqual(player.queue.map(t => t.id), ['c', 'a', 'd', 'b'])
+  assert.equal(player.currentTrack.id, 'c')
+  assert.equal(player.currentIndex, 0)
+})
+
+test('a reorder that goes nowhere changes nothing, and an out-of-range one is refused', async () => {
+  const player = setup()
+  await player.playQueue([local('a'), local('b')], 1)
+  const before = player.queue.map(t => t.id).join()
+  player.moveInQueue(1, 1)
+  player.moveInQueue(1, 5)
+  player.moveInQueue(-1, 0)
+  assert.equal(player.queue.map(t => t.id).join(), before)
+  assert.equal(player.currentTrack.id, 'b')
+})
+
+test('starting a whole list pages back to the one it replaced, two deep', async () => {
+  const player = setup()
+  await player.playQueue([local('a'), local('b')], 0, '专辑 · 一')
+  assert.equal(player.queueHistory.length, 0, 'nothing was playing, so there is no history')
+
+  await player.playQueue([local('c')], 0, '专辑 · 二')
+  await player.playQueue([local('d')], 0, '专辑 · 三')
+  await player.playQueue([local('e')], 0, '专辑 · 四')
+  const labels = player.queueHistory.map(entry => entry.label)
+  assert.deepEqual(labels, ['专辑 · 三', '专辑 · 二'], 'newest first, and only two pages behind the live one')
+  assert.deepEqual(player.queueHistory[0].queue.map(t => t.id), ['d'])
+})
+
+test('replaying the same list is one event, and editing the queue is not a new list', async () => {
+  const player = setup()
+  await player.playQueue([local('a'), local('b')], 0, '歌单 · 忆')
+  await player.playQueue([local('z')], 0, '单曲')
+  // Back to the list that is already a page behind: it moves to the live queue,
+  // it does not leave a copy of itself in the history as well.
+  await player.playQueue([local('a'), local('b')], 0, '歌单 · 忆')
+  assert.deepEqual(player.queueHistory.map(entry => entry.label), ['单曲'])
+
+  // Editing the live queue must not push a page of its own.
+  await player.addToQueue([local('q')])
+  await player.insertNext([local('r')])
+  player.removeFromQueue('a')
+  assert.equal(player.queueHistory.length, 1, 'add / insert / remove are edits, not new lists')
+})
+
+test('the first row can be moved to the end, and the row count is preserved', async () => {
+  const player = setup()
+  await player.playQueue([local('a'), local('b'), local('c')], 0)
+  // The exact case the live panel hit: index 0 → 2 while row 0 is the playing one.
+  player.moveInQueue(0, 2)
+  assert.deepEqual(player.queue.map(t => t.id), ['b', 'c', 'a'])
+  assert.equal(player.currentIndex, 2, 'the playing row travelled with it')
+  assert.equal(player.currentTrack.id, 'a')
+  player.moveInQueue(2, 0)
+  assert.deepEqual(player.queue.map(t => t.id), ['a', 'b', 'c'])
+  assert.equal(player.currentIndex, 0)
+})
+
+test('a stored history that is half-written is dropped, not displayed', () => {
+  const player = setup()
+  player.restoreQueueHistory([
+    { label: '好的一页', queue: [local('a')], at: 1 },
+    { label: '空的', queue: [], at: 2 },
+    { label: '不是数组', queue: 'nope', at: 3 },
+    null,
+    'junk'
+  ])
+  assert.deepEqual(player.queueHistory.map(entry => entry.label), ['好的一页'])
+  player.restoreQueueHistory(undefined)
+  assert.equal(player.queueHistory.length, 0)
+})

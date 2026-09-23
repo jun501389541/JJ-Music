@@ -23,6 +23,17 @@ async function chooseDownloadFolder(): Promise<void> {
     toast.error(error instanceof Error ? error.message : '无法选择下载目录')
   }
 }
+/**
+ * 目录路径由主进程算，这里一个字符串都不拼 —— 渲染层这份 `settings` 可能比主进程的旧，
+ * 而且"打开哪个目录"这件事的权威答案在 `downloads:folder` 那一侧。
+ */
+async function openDownloadFolder(): Promise<void> {
+  try {
+    await window.jj.downloads.openFolder()
+  } catch (error) {
+    toast.error(error instanceof Error ? `打不开下载文件夹：${error.message}` : '打不开下载文件夹')
+  }
+}
 const section = computed(() => Array.isArray(route.params.section) ? route.params.section.join('/') : String(route.params.section || ''))
 const page = computed(() => SETTINGS_PAGES[section.value] || SETTINGS_PAGES[''])
 const crumbs = computed(() => section.value.split('/').filter(Boolean).map((_, i, parts) => { const key = parts.slice(0, i + 1).join('/'); return { key, title: SETTINGS_PAGES[key]?.title || key } }))
@@ -119,7 +130,10 @@ async function runPending(mode: 'write' | 'discard'): Promise<void> {
   }
 }
 
-watch(section, value => { if (value === 'audio/equalizer') { ui.nowPlaying = true; ui.playbackPanel = 'eq'; void router.replace('/settings/audio') } }, { immediate: true })
+// The panel is a window-level surface now, so this no longer has to open the
+// playback page to show it: the settings page stays underneath, and the EQ
+// arrives over it.
+watch(section, value => { if (value === 'audio/equalizer') { ui.playbackPanel = 'eq'; void router.replace('/settings/audio') } }, { immediate: true })
 
 /* ---------------------------------------------------------------- *
  * Audio output device
@@ -166,7 +180,11 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
   <header class="settings-heading"><button v-if="section" class="icon-btn" aria-label="返回上一级" @click="navigate(section.split('/').slice(0,-1).join('/'))"><AppIcon name="back" :size="25"/></button><div><h1>{{ search ? '搜索设置' : page.title }}</h1><p v-if="page.description && !search">{{ page.description }}</p></div></header>
   <div v-if="section === 'appearance' && !search" class="theme-previews"><button v-for="theme in ['light','dark','system'] as const" :key="theme" :class="['theme-preview', theme, { chosen: library.settings.theme === theme }]" @click="update({ theme })"><span class="mock-window"><i/><span><b/><b/><b/></span></span><span>{{ {light:'浅色',dark:'深色',system:'跟随系统'}[theme] }}<AppIcon v-if="library.settings.theme === theme" name="check" :size="14"/></span></button></div>
   <div class="settings-items">
-    <div v-if="section === 'downloads' && !search" class="setting-row"><span class="setting-label copyable"><strong>下载目录</strong><small>{{ library.settings.downloadFolder || defaultDownloadFolder }}</small></span><button class="btn" @click="chooseDownloadFolder">选择目录</button></div>
+    <!--
+      「打开下载文件夹」放在「选择目录」左边：先看见再去挑，顺序就是这个动作的顺序。
+      复用已有的 `.setting-buttons`（flex + gap + flex:none），不另造一个容器类。
+    -->
+    <div v-if="section === 'downloads' && !search" class="setting-row"><span class="setting-label copyable"><strong>下载目录</strong><small>{{ library.settings.downloadFolder || defaultDownloadFolder }}</small></span><span class="setting-buttons"><button class="btn" @click="openDownloadFolder">打开下载文件夹</button><button class="btn" @click="chooseDownloadFolder">选择目录</button></span></div>
     <template v-for="(item, index) in items" :key="index">
       <button v-if="item.to !== undefined" class="setting-row setting-link" @click="navigate(item.to)"><AppIcon :name="item.icon || 'settings'" :size="22"/><span class="setting-label"><strong>{{ item.label }}</strong><small v-if="item.description">{{ item.description }}</small></span><AppIcon name="next" :size="15"/></button>
       <div v-else class="setting-row"><span class="setting-label"><strong>{{ item.label }}</strong><small v-if="item.description">{{ item.description }}</small></span>

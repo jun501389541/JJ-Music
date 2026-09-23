@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, readFile, readdir, writeFile, copyFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, stat, writeFile, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseFile } from 'music-metadata'
@@ -22,8 +22,11 @@ function flac() {
 }
 async function setup(overrides={}) {
   const dir=await mkdtemp(join(tmpdir(),'jj-download-'))
-  const manager=new DownloadManager(dir,{settings:()=>({downloadFolder:dir,downloadLyric:true,downloadEmbedLyric:true,downloadTranslation:true,downloadRomanization:true,downloadEmbedCover:true}),defaultFolder:dir,resolve:async()=>({url:'https://audio.test/a',quality:'flac'}),lyrics:async()=>lyrics,cover:async()=> 'https://audio.test/cover',fetch:async url=>new Response(url.endsWith('/cover')?png:flac()),...overrides})
-  return {manager,dir}
+  // `trash` is recorded instead of performed: what the tests assert is which paths a
+  // removal asks the recycle bin for, and nothing may actually disappear.
+  const trashed=[]
+  const manager=new DownloadManager(dir,{settings:()=>({downloadFolder:dir,downloadLyric:true,downloadEmbedLyric:true,downloadTranslation:true,downloadRomanization:true,downloadEmbedCover:true}),defaultFolder:dir,resolve:async()=>({url:'https://audio.test/a',quality:'flac'}),lyrics:async()=>lyrics,cover:async()=> 'https://audio.test/cover',fetch:async url=>new Response(url.endsWith('/cover')?png:flac()),trash:async p=>{trashed.push(p)},...overrides})
+  return {manager,dir,trashed}
 }
 async function settled(manager,id) {
   for(let i=0;i<300;i++){const t=manager.list().find(t=>t.id===id);if(['failed','completed','cancelled'].includes(t.status)){await new Promise(r=>setTimeout(r,30));return t}await new Promise(r=>setTimeout(r,10))}
@@ -342,4 +345,154 @@ test('没有 ETag 的服务器改用长度判断文件有没有换过', async ()
   const after=await settled(manager,id)
   assert.equal(after.status,'failed',after.error)
   assert.match(after.error,/对不上/,after.error)
+})
+/*
+ * 「移除记录」这一组。断言的都是**它要求回收站删掉哪些路径**，而不是文件真的少了 ——
+ * setup 里的 `trash` 只记录不调用，所以任何一条跑完磁盘上都不会少东西，
+ * 也才敢在同一台机器上直接测「删除文件」这条路径。
+ */
+/**
+ * 等到 `downloads.json` 真的变成 count 条再返回它。
+ *
+ * `save()` 把自己的写挂在链条上（`this.saving = ...then(write)`），所以文件比内存里的
+ * 列表慢一拍。移除之后马上读，会读到一个还没落盘的旧快照，于是一条"记录确实少了"的
+ * 通过断言反而能红 —— 轮询到期望的条数，红的才真是产品的问题。
+ */
+async function recordWith(dir, count) {
+  const read = async () => JSON.parse(String(await readFile(join(dir, 'downloads.json'), 'utf8')))
+  for (let i = 0; i < 100; i++) {
+    const rows = await read()
+    if (rows.length === count) return rows
+    await new Promise(r => setTimeout(r, 20))
+  }
+  throw Error(`downloads.json 迟迟没有变成 ${count} 条`)
+}
+async function oneFinished() {
+  const { manager, dir, trashed } = await setup()
+  const [id] = manager.add([track], 'flac')
+  const task = await settled(manager, id)
+  assert.equal(task.status, 'completed', task.error)
+  return { manager, dir, trashed, task }
+}
+
+test('移除记录（仅记录）把条目拿掉，但一个文件都不碰', async () => {
+  const { manager, dir, trashed, task } = await oneFinished()
+  assert.ok(task.path)
+  assert.ok(await stat(task.path))
+  await manager.remove(task.id, false)
+  assert.deepEqual(manager.list().map(t => t.id), [])
+  assert.deepEqual(trashed, [], '只移除记录时不该碰回收站')
+  assert.ok(await stat(task.path), '歌曲文件必须还在')
+  assert.deepEqual((await recordWith(dir, 0)).map(t => t.id), [], 'downloads.json 也要跟着少一条')
+})
+
+/**
+ * 等到 sidecar 那一步真的记进任务里。
+ *
+ * `task.status='completed'` 在发布文件那一刻就写，而 `.lrc` 是在它**之后**才写的
+ * （还要过一遍 exportAssets）。所以 `settled()` 一看到 completed 就返回时，
+ * `lyricPath` 可以还是空的 —— 落盘的 `downloads.json` 由 pump 的 finally 在所有事
+ * 做完之后才写，不受影响；受影响的是"刚完成就立刻读"的这个测试。之前它靠运气过，
+ * 两个任务一起跑就没碰上。
+ */
+async function lyricRecorded(manager,id) {
+  for(let i=0;i<200;i++){const t=manager.list().find(t=>t.id===id);if(t.lyricPath)return t;await new Promise(r=>setTimeout(r,10))}
+  throw Error(`${id} 到最后也没有 lyricPath，sidecar 那一步没写出来`)
+}
+
+test('移除记录（同时删除文件）要求回收站收走音频和这次写出的那份 LRC', async () => {
+  const { manager, trashed } = await setup()
+  const [id] = manager.add([track], 'flac')
+  const task = await lyricRecorded(manager, id)
+  await manager.remove(task.id, true)
+  assert.deepEqual(trashed, [task.path, task.lyricPath])
+  assert.equal(manager.list().length, 0)
+})
+
+test('同一首歌的第二次下载：删第一条不会带走第二条的 LRC', async () => {
+  const { manager, trashed } = await setup()
+  // 两次 `add`，不是一次加两首：同一次调用里放两个相同 track 只会得到一个任务
+  // （`add` 自己就按"同一首同一音质且仍在进行"去重），而第二次必须在第一次
+  // 已经结束后再发，否则走的还是那条去重分支，测不到"同名不覆盖"。
+  const [a] = manager.add([track], 'flac')
+  await settled(manager, a)
+  const [b] = manager.add([track], 'flac')
+  await settled(manager, b)
+  const first = await lyricRecorded(manager, a), second = await lyricRecorded(manager, b)
+  assert.notEqual(first.path, second.path, '同名不覆盖，第二次应该落在 (1) 上')
+  assert.notEqual(first.lyricPath, second.lyricPath, '两份 sidecar 也必须各归各的，否则删一条会带走另一条的歌词')
+  await manager.remove(first.id, true)
+  assert.deepEqual(trashed.slice().sort(), [first.path, first.lyricPath].sort())
+  assert.ok(await stat(second.path), '第二条的音频不该被碰')
+  assert.ok(await stat(second.lyricPath), '同目录另一份 .lrc 是另一次下载产生的，不该被碰')
+  assert.equal(manager.list().length, 1)
+})
+
+test('回收站拒绝时：报错说清楚，记录原样留着', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jj-trashfail-'))
+  const { manager, trashed } = await setup({
+    settings: () => ({ downloadFolder: dir, downloadLyric: false, downloadEmbedLyric: false, downloadTranslation: false, downloadRomanization: false, downloadEmbedCover: false }),
+    defaultFolder: dir,
+    trash: async () => { throw Error('该路径不支持回收站') }
+  })
+  const [id] = manager.add([track], 'flac')
+  const task = await settled(manager, id)
+  assert.equal(task.status, 'completed', task.error)
+  await assert.rejects(() => manager.remove(id, true), /不支持回收站/)
+  assert.equal(manager.list().length, 1, '失败不能把记录一起吃掉')
+  assert.deepEqual(trashed, [])
+  assert.ok(await stat(task.path))
+})
+
+test('没有已下载文件的任务：deleteFile 也只是移除记录，不会凭空报错', async () => {
+  const { manager, trashed } = await setup({ resolve: async () => { throw Error('音源没有返回地址') } })
+  const [id] = manager.add([track], 'flac')
+  const task = await settled(manager, id)
+  assert.equal(task.status, 'failed')
+  assert.equal(task.path, undefined)
+  await manager.remove(id, true)
+  assert.deepEqual(trashed, [])
+  assert.equal(manager.list().length, 0)
+})
+
+test('移除进行中的任务会先停下它，并且不留 .jj-<id> 临时件', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jj-remove-running-'))
+  const body = flac()
+  let release = () => {}
+  const gate = new Promise(ok => { release = ok })
+  // 一个永远流不完的回答：第一块到手之后每次都等一个没人放开的门。
+  // 没有 gate，下载会在测试代码读到状态之前就跑完，那条"移除进行中"就测不到了。
+  //
+  // 它必须像真的 `fetch` 一样听 abort：undici 在信号触发时是把流**弄成 reject** 的，
+  // 而不是等下一次 `throwIfAborted()`。这里若不理会信号，remove() 等的是一个永远不会
+  // 结束的 run()，测的就不是"移除进行中"而是"卡死"了。
+  const slow = async (_url, init) => {
+    release()
+    const aborted = new Promise((_, reject) => {
+      const signal = init && init.signal
+      if (signal) signal.addEventListener('abort', () => reject(signal.reason || Error('aborted')), { once: true })
+    })
+    return {
+      ok: true, status: 200, headers: new Headers({ 'content-length': String(body.length) }),
+      body: (async function* () { for (;;) { await Promise.race([gate, aborted]); yield body } })()
+    }
+  }
+  const { manager, trashed } = await setup({
+    settings: () => ({ downloadFolder: dir, downloadLyric: false, downloadEmbedLyric: false, downloadTranslation: false, downloadRomanization: false, downloadEmbedCover: false }),
+    defaultFolder: dir, fetch: slow
+  })
+  const [id] = manager.add([track], 'flac')
+  for (let i = 0; i < 300; i++) {
+    const t = manager.list().find(t => t.id === id)
+    // The stream yields forever, so the only thing to wait for is that it got as far
+    // as opening the file — `downloading` is set right after the response is accepted.
+    if (t?.status === 'downloading') break
+    await new Promise(r => setTimeout(r, 10))
+  }
+  const running = manager.list().find(t => t.id === id)
+  assert.equal(running?.status, 'downloading', '没等到下载中，这一项就退化成移除已完成任务了')
+  await manager.remove(id, false)
+  assert.equal(manager.list().length, 0)
+  assert.deepEqual(trashed, [])
+  assert.deepEqual((await readdir(dir)).filter(f => f.startsWith('.jj-')), [], '移除之后不该留下 .part 或暂存件')
 })

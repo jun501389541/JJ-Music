@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rm, link, copyFile, rename, stat } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rm, link, copyFile, rename, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join } from 'node:path'
 import { parseFile } from 'music-metadata'
 import type { AppSettings, DownloadTask, LyricResult, OnlineMusicInfo, Quality } from '@shared/types'
 import { LX_QUALITIES } from '@shared/types'
@@ -64,10 +64,19 @@ interface Dependencies {
   lyrics: (track: OnlineMusicInfo) => Promise<LyricResult>
   cover: (track: OnlineMusicInfo) => Promise<string>
   fetch?: typeof fetch
+  /**
+   * Send one path to the system recycle bin. Injected rather than imported:
+   * `shell.trashItem` only exists in the main process, and this module is imported
+   * by the unit tests, which must be able to watch what a removal asks for without
+   * anything actually leaving the disk.
+   */
+  trash: (path: string) => Promise<void>
 }
 export class DownloadManager {
   private tasks: DownloadTask[] = []
   private controllers = new Map<string, AbortController>()
+  /** Per-task settle promise, so a removal can wait for its own download to stop. */
+  private settled = new Map<string, Promise<void>>()
   private active = 0
   private closing = false
   private running = new Set<Promise<void>>()
@@ -110,7 +119,7 @@ export class DownloadManager {
     if (this.closing) throw Error('播放器正在退出')
     const task = this.tasks.find(t => t.id === id)
     if (!task || !['failed','cancelled'].includes(task.status) || this.controllers.has(id)) throw Error('任务尚未停止或无需重试')
-    task.status='queued'; task.received=0; task.total=undefined; task.path=undefined; task.error=undefined; task.warnings=[]
+    task.status='queued'; task.received=0; task.total=undefined; task.path=undefined; task.lyricPath=undefined; task.error=undefined; task.warnings=[]
     this.save(); this.pump()
   }
   private pump(): void {
@@ -118,9 +127,73 @@ export class DownloadManager {
       const task = this.tasks.find(t => t.status === 'queued')
       if (!task) break
       task.status='resolving'; this.active++
-      const running=this.run(task).finally(() => { this.active--; this.controllers.delete(task.id); this.running.delete(running); this.save(); this.pump() })
-      this.running.add(running)
+      const running=this.run(task).finally(() => { this.active--; this.controllers.delete(task.id); this.settled.delete(task.id); this.running.delete(running); this.save(); this.pump() })
+      this.running.add(running); this.settled.set(task.id, running)
     }
+  }
+  /**
+   * 移除一条记录，必要时把它产出的文件送进回收站。
+   *
+   * 为什么是主进程里的一个动作而不是"渲染层先 cancel 再 remove"：两次 IPC 之间这个
+   * 任务可能刚好跑完并发布了文件，于是记录没了、文件还在，成为一个没人指向它的孤儿。
+   * 这里先 abort，再等它自己停下来（`settled`），此后 `run()` 已经不会再写任何文件，
+   * 删除记录才是安全的。
+   *
+   * 路径只从本进程自己那份 task 记录里取。渲染层只给 `{id, deleteFile}`：一个字符串
+   * 路径在那里只是"关于某个文件的声明"，不是证据（同 `allowedMediaPath` 的教训）。
+   *
+   * 删文件一律走回收站。回收站不支持这个路径（网络盘、某些可移动盘）时
+   * `trash` 会 reject，这里原样抛出并且**不移除记录** —— 不静默失败，也不退化成永久删除。
+   */
+  async remove(id: string, deleteFile: boolean): Promise<void> {
+    if (typeof id !== 'string' || !id) throw Error('下载记录无效')
+    if (typeof deleteFile !== 'boolean') throw Error('删除参数无效')
+    const index = this.tasks.findIndex(t => t.id === id)
+    if (index < 0) throw Error('这条下载记录已经不存在了')
+    const task = this.tasks[index]
+    this.controllers.get(id)?.abort()
+    // Give the download a moment to actually stop before its record goes: while it is
+    // still running, `.jj-<id>.part` has an open file handle and the cleanup below
+    // would fail on it. Bounded, because a stream that ignores its abort signal must
+    // not be able to hang the button the user pressed — worst case the scratch file
+    // outlives the record by one `finally`.
+    await Promise.race([this.settled.get(id)?.catch(() => undefined), new Promise(r => setTimeout(r, 5000).unref?.())])
+    if (deleteFile) {
+      // 只删这一次下载产出的东西：音频本体，外加当时确实由我们写出去的那个 sidecar
+      // `.lrc`。sidecar 是不覆盖语义，旁边完全可能放着用户自己写的同名文件。
+      const targets = [task.path, this.ownSidecar(task)].filter((p): p is string => !!p)
+      for (const target of targets) {
+        if (!isAbsolute(target)) throw Error('下载记录里的文件路径无效，已停止移除')
+        try { if (!(await stat(target)).isFile()) throw Error('那不是文件') }
+        catch (error) {
+          // 文件已经不在了不是失败：记录指向的东西早已被删，移除记录即可。
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+          throw Error(`无法移到回收站：${target}（${error instanceof Error ? error.message : '原因未知'}），记录未移除`)
+        }
+        try { await this.deps.trash(target) }
+        catch (error) { throw Error(`移到回收站失败：${target}（${error instanceof Error ? error.message : '原因未知'}），记录未移除`) }
+      }
+    }
+    const removed = this.tasks.splice(index, 1)[0]
+    this.save()
+    // 应用自己的临时件（`.jj-<id>.part` / 暂存 / `-tagged`）无论如何都清掉：
+    // 记录已经不在了，没有人会再来续传或重试它，留着就是纯粹的残留。
+    await this.cleanScratch(removed.id)
+  }
+  /** The sidecar `.lrc` this task wrote, but only if it is still shaped like one. */
+  private ownSidecar(task: DownloadTask): string | undefined {
+    if (!task.lyricPath || !task.path || !isAbsolute(task.lyricPath)) return undefined
+    const audio = task.path
+    const expected = join(dirname(audio), basename(audio, extname(audio)) + '.lrc')
+    return task.lyricPath === expected ? task.lyricPath : undefined
+  }
+  /** Delete this task's own `.jj-<id>*` scratch files in the folder it downloads to. */
+  private async cleanScratch(id: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return
+    const folder = this.deps.settings().downloadFolder || this.deps.defaultFolder
+    let names: string[] = []
+    try { names = await readdir(folder) } catch { return }
+    await Promise.all(names.filter(n => n.startsWith(`.jj-${id}`)).map(n => rm(join(folder, n), { force: true }).catch(() => undefined)))
   }
   async shutdown(): Promise<void> {
     this.closing=true
@@ -279,7 +352,11 @@ export class DownloadManager {
         // automatic, so a `.lrc` the user wrote by hand is left alone.
         try {
           const saved = await exportAssets({ audioPath: target, patch: { lyrics: lyricText }, to: ['sidecar'], noClobber: true })
-          if (!saved.written) task.warnings.push(saved.notes.join('；') || 'LRC 保存失败')
+          // Record exactly the file this write produced, so 「删除文件」 can tell it
+          // apart from a `.lrc` the user wrote themselves — `noClobber` means the
+          // neighbour may not be ours at all.
+          if (saved.written) task.lyricPath = saved.paths.find(p => p.toLowerCase().endsWith('.lrc'))
+          else task.warnings.push(saved.notes.join('；') || 'LRC 保存失败')
         } catch { task.warnings.push('LRC 保存失败') }
       }
     } catch(error) {

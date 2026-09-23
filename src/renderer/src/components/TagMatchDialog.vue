@@ -55,6 +55,12 @@ const overwriteCover = ref(false)
 const error = ref<string | null>(null)
 /** Cover previews keyed by candidate id, fetched lazily. */
 const covers = ref<Record<string, string>>({})
+/**
+ * Candidates the main process refused or could not fetch art for. Without this
+ * the preview would promise 「将写入」 for a picture that never arrives — the
+ * whole point of this dialog is that what it shows is what gets written.
+ */
+const coverMissing = ref<Record<string, boolean>>({})
 /** Pixel size of the cover the file already has, read off the `<img>`. */
 const currentCover = ref<{ w: number; h: number } | null>(null)
 /** Pixel size and byte count of the candidate's cover, read off its data URL. */
@@ -120,8 +126,11 @@ async function loadCovers(): Promise<void> {
     try {
       const result = await window.jj.match.cover(toIpcPayload(candidate.music))
       if (result) covers.value = { ...covers.value, [candidate.music.id]: result.dataUrl }
+      else coverMissing.value = { ...coverMissing.value, [candidate.music.id]: true }
     } catch {
-      /* a missing cover is not an error worth showing */
+      // A missing cover is not an error worth a toast, but it is worth saying so
+      // in the preview: the platform may be one whose art host we refuse to follow.
+      coverMissing.value = { ...coverMissing.value, [candidate.music.id]: true }
     }
   }
 }
@@ -169,7 +178,7 @@ const coverPlan = computed(() => {
     keep,
     /** Nothing to compare with: no `picUrl` at all, or a candidate beyond the six previews. */
     unknown: !selectedCoverUrl.value,
-    noArt: Boolean(music && !music.picUrl),
+    noArt: Boolean(music && (!music.picUrl || coverMissing.value[music.id])),
     /** A smaller picture is allowed to land — the switch says the user asked for it. It just has to be labelled. */
     smaller:
       hasCurrent && !keep && currentCover.value !== null && newCover.value !== null &&
@@ -370,7 +379,7 @@ onMounted(search)
 
                 <span class="cover__side">
                   <small v-if="coverPlan.keep" class="cover__keep">将保留原有封面（勾选「覆盖已有封面」才会替换）</small>
-                  <small v-else-if="coverPlan.noArt">该候选没有封面，不写入</small>
+                  <small v-else-if="coverPlan.noArt">该候选没有可用的封面，不写入</small>
                   <small v-else-if="coverPlan.unknown">将写入该平台封面（列表只预取前 6 张，这张没有预览）</small>
                   <template v-else>
                     <img class="cover__art" :src="selectedCoverUrl" alt="" />

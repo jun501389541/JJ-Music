@@ -1,4 +1,4 @@
-import type { OnlineMusicInfo } from '@shared/types'
+import type { OnlineMusicInfo, SourceId } from '@shared/types'
 import type { MatchApplyOptions } from '@shared/library-types'
 import { safeFetchBytes } from './url-guard'
 
@@ -30,6 +30,34 @@ const ACCEPTED_MIME: Record<string, string> = {
   'image/webp': 'image/webp'
 }
 
+/**
+ * Which hosts a platform's artwork legitimately comes from, per source.
+ *
+ * The host is *not* a constant in our code for most platforms: 网易云、酷狗、咪咕
+ * hand back an absolute URL (`search.ts:330`, `:525`, `:639`), so whatever that API
+ * says is what we would otherwise fetch. Pinning the family is what turns "a
+ * hostile or compromised platform response" from a disk-write primitive back into
+ * a broken thumbnail. `isHostAllowed` matches the root or any subdomain, and the
+ * same list is handed to the redirect validator, so a hop cannot leave it either.
+ *
+ * Measured from the live adapters on 2026-09-24 (`node .cache/pic-hosts.mjs`):
+ * wy `p1/p2.music.126.net`, kw `img1.kuwo.cn`, kg `imge/singerimg.kugou.com`,
+ * mg `d.musicapp.migu.cn`. 只有 tx 是例外 —— 它的地址是我们自己拼出来的
+ * （`search.ts:199-200` 的 `y.gtimg.cn` 字面量），那两条实测轮次没返回封面。
+ *
+ * A source missing from this map gets **no cover**, including the 音源脚本 platforms
+ * (`qs`, `qsvip`): their hosts are whatever a user-imported script returns, which is
+ * precisely the set nobody can vouch for. Refusing is the honest answer, and it costs
+ * only the cover — the text fields and the lyric still apply.
+ */
+const COVER_HOSTS: Partial<Record<SourceId, string[]>> = {
+  tx: ['gtimg.cn'],
+  wy: ['126.net'],
+  kw: ['kuwo.cn'],
+  kg: ['kugou.com'],
+  mg: ['migu.cn']
+}
+
 /** The ceiling the candidate previews already use — not a fourth number. */
 const MAX_BYTES = 8 * 1024 * 1024
 const TIMEOUT_MS = 10_000
@@ -46,13 +74,15 @@ export type CoverBytes = { data: Uint8Array; mimeType: string }
  * it — the network is the only hard part of this function to test around.
  */
 export async function fetchCoverBytes(
-  music: Pick<OnlineMusicInfo, 'picUrl'> | null | undefined,
+  music: Pick<OnlineMusicInfo, 'picUrl' | 'source'> | null | undefined,
   getBytes: typeof safeFetchBytes = safeFetchBytes
 ): Promise<CoverBytes | null> {
   const url = music?.picUrl
   if (!url) return null
+  const allowedHosts = music.source ? COVER_HOSTS[music.source] : undefined
+  if (!allowedHosts) return null
   try {
-    const { body, contentType } = await getBytes(url, { maxBytes: MAX_BYTES, timeoutMs: TIMEOUT_MS })
+    const { body, contentType } = await getBytes(url, { maxBytes: MAX_BYTES, timeoutMs: TIMEOUT_MS, allowedHosts })
     const mime = ACCEPTED_MIME[(contentType ?? 'image/jpeg').toLowerCase().split(';')[0].trim()]
     if (!mime || body.length === 0) return null
     return { data: new Uint8Array(body), mimeType: mime }

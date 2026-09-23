@@ -181,3 +181,54 @@ test('歌单封面文件被删后，加载时丢掉这条引用', () => fixture(
   await reopened.load()
   assert.equal((await reopened.list()).find(x => x.id === list.id).coverPath, undefined, '文件没了就不再引用它')
 }))
+
+/**
+ * 歌单音质档回填。这是唯一一处会**改写用户真实歌单数据**的新代码，所以钉得比较死：
+ * 顺序不能变（歌单顺序是用户自己拖出来的）、`meta` 里原有的键不能丢（`songmid`/`hash`/
+ * `albumId`/`copyrightId` 是各平台解析播放地址要用的，丢了那首歌就再也解不开）、
+ * 重复调用必须是 0（第二次打开同一个歌单不该再问一遍平台）。
+ */
+const onlineTrack = (id, meta) => ({ id, source: 'wy', name: `n-${id}`, singer: 's', interval: '03:00', albumName: '', picUrl: '', meta })
+const localTrack = id => ({ id, path: `C:/music/${id}.flac`, name: `n-${id}`, singer: 's', size: 1, mtimeMs: 1, duration: 180 })
+
+async function seededList(dir) {
+  const playlists = new PlaylistStore(dir)
+  await playlists.load()
+  const list = await playlists.create('忆')
+  await playlists.addTracks(list.id, [
+    onlineTrack('wy_1', { songmid: '1', albumId: 38789 }),
+    onlineTrack('wy_2', { songmid: '2', copyrightId: 'c2' }),
+    localTrack('local_3')
+  ])
+  return { playlists, id: list.id }
+}
+
+test('patchQualitys fills tiers without touching order or the other meta keys', () => fixture(async dir => {
+  const { playlists, id } = await seededList(dir)
+  const touched = await playlists.patchQualitys(id, [
+    { id: 'wy_2', qualitys: [{ type: '128k', size: '4.20 MB' }, { type: 'flac', size: '27.10 MB' }] },
+    { id: 'wy_1', qualitys: [{ type: 'flac24bit', size: '41.55 MB' }] }
+  ])
+  assert.equal(touched, 2)
+  const items = await new PlaylistStore(dir).getItems(id)
+  assert.deepEqual(items.map(t => t.id), ['wy_1', 'wy_2', 'local_3'], '顺序必须原样，回填不是重写')
+  assert.deepEqual(items[0].meta, { songmid: '1', albumId: 38789, qualitys: [{ type: 'flac24bit', size: '41.55 MB' }] })
+  assert.deepEqual(items[1].meta.qualitys, [{ type: '128k', size: '4.20 MB' }, { type: 'flac', size: '27.10 MB' }])
+  assert.equal(items[1].meta.copyrightId, 'c2', 'meta 是按键合并的，不是整个替换')
+  assert.equal(items[2].meta, undefined, '本地曲目没有 meta，也不该被造一个出来')
+}))
+
+test('patchQualitys is idempotent and never rewrites a list it cannot change', () => fixture(async dir => {
+  const { playlists, id } = await seededList(dir)
+  const patch = [{ id: 'wy_1', qualitys: [{ type: 'flac', size: '27.10 MB' }] }]
+  assert.equal(await playlists.patchQualitys(id, patch), 1)
+  // 第二次同样的值 → 0。这个 0 就是"打开过一次的歌单不再发请求"的落盘侧保证。
+  assert.equal(await playlists.patchQualitys(id, patch), 0)
+  assert.deepEqual(await readdir(dir), ['playlists.json'], '没改动就不该留下临时文件')
+  // 空补丁、不存在的歌单、空歌单都不该写盘。
+  assert.equal(await playlists.patchQualitys(id, []), 0)
+  assert.equal(await playlists.patchQualitys('no-such-list', patch), 0)
+  const empty = await playlists.create('空')
+  assert.equal(await playlists.patchQualitys(empty.id, patch), 0)
+  assert.deepEqual((await new PlaylistStore(dir).getItems(id)).map(t => t.id), ['wy_1', 'wy_2', 'local_3'])
+}))

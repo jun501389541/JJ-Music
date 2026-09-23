@@ -236,8 +236,71 @@ interface NeteaseSong {
  * returned a working 951 KB JPEG. Covers are therefore resolved lazily, one
  * request per track, rather than during search.
  */
-async function fetchNeteaseCovers(ids: number[]): Promise<Map<number, string>> {
-  const out = new Map<number, string>()
+/** What NetEase's detail endpoint tells us about one track, from a single batch call. */
+export interface NeteaseDetail {
+  picUrl: string
+  qualitys: Array<{ type: string; size?: string }>
+}
+
+/**
+ * The four tiers `/api/song/detail` reports. `mMusic` is 192k, which has no tier in
+ * our ladder, so it is dropped rather than rounded onto a neighbour.
+ */
+const NETEASE_TIERS: Array<readonly [string, Quality]> = [
+  ['lMusic', '128k'],
+  ['hMusic', '320k'],
+  ['sqMusic', 'flac'],
+  ['hrMusic', 'flac24bit']
+]
+
+/**
+ * Fetch cover URLs **and real quality availability** from NetEase's detail endpoint.
+ *
+ * ## Why this is needed
+ *
+ * The search endpoint returns only `album.picId`, never a URL. The intuitive
+ * rule — build `p2.music.126.net/<picId>/<picId>.jpg` — returns **404 for every
+ * track**, because the first path segment of a real NetEase image URL is a
+ * server-side encrypted id that cannot be derived from `picId`.
+ *
+ * The detail endpoint (`/api/song/detail`) *does* return the authoritative
+ * `picUrl`. Verified against live data: search gave no `picUrl`, the detail call
+ * returned a working 951 KB JPEG. Covers are therefore resolved lazily, one
+ * request per track, rather than during search.
+ *
+ * ## Why qualitys come out of this same call
+ *
+ * The search row used to declare `128k / 320k / flac` unconditionally, because
+ * availability is only exposed per track and the ladder would probe it anyway. That
+ * was harmless while nothing displayed it — and a lie the moment a quality badge got
+ * added, since every 网易云 result would then read as lossless. The same response this
+ * function already consumes carries `lMusic/hMusic/sqMusic/hrMusic`, each with a real
+ * byte `size`, so availability comes from the same request: **no extra call**.
+ *
+ * Only a field that is present *and* has `size > 0` counts as available.
+ */
+/**
+ * One id list, in batches of 100.
+ *
+ * The cap lives here rather than in each caller so no list size can turn into one
+ * enormous query string: a 5 000-track playlist would otherwise send ~20 KB of ids
+ * and the endpoint's answer is not guaranteed to survive that. 100 is what the cover
+ * path has always used.
+ */
+const NETEASE_DETAIL_BATCH = 100
+
+export async function fetchNeteaseDetails(ids: number[]): Promise<Map<number, NeteaseDetail>> {
+  const out = new Map<number, NeteaseDetail>()
+  const unique = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))]
+  for (let offset = 0; offset < unique.length; offset += NETEASE_DETAIL_BATCH) {
+    const batch = await fetchNeteaseDetailBatch(unique.slice(offset, offset + NETEASE_DETAIL_BATCH))
+    for (const [id, detail] of batch) out.set(id, detail)
+  }
+  return out
+}
+
+async function fetchNeteaseDetailBatch(ids: number[]): Promise<Map<number, NeteaseDetail>> {
+  const out = new Map<number, NeteaseDetail>()
   if (ids.length === 0) return out
 
   const url =
@@ -248,17 +311,28 @@ async function fetchNeteaseCovers(ids: number[]): Promise<Map<number, string>> {
   try {
     const text = await httpGet(url, { headers: { Referer: 'https://music.163.com/' } })
     const json = JSON.parse(text) as {
-      songs?: Array<{ id?: number; album?: { picUrl?: string } }>
+      songs?: Array<{
+        id?: number
+        album?: { picUrl?: string }
+      } & Partial<Record<string, { size?: number | string } | null>>>
     }
     for (const song of json.songs ?? []) {
+      if (!song.id) continue
       const pic = song.album?.picUrl
-      if (song.id && pic) {
-        // Ask the CDN to downscale; the originals are often multi-megabyte.
-        out.set(song.id, `${pic}${pic.includes('?') ? '&' : '?'}param=300y300`)
+      const sizes: Partial<Record<Quality | 'hires', number>> = {}
+      for (const [field, tier] of NETEASE_TIERS) {
+        const bytes = Number(song[field]?.size ?? 0)
+        if (Number.isFinite(bytes) && bytes > 0) sizes[tier] = bytes
       }
+      if (!pic && !Object.keys(sizes).length) continue
+      out.set(song.id, {
+        // Ask the CDN to downscale; the originals are often multi-megabyte.
+        picUrl: pic ? `${pic}${pic.includes('?') ? '&' : '?'}param=300y300` : '',
+        qualitys: buildQualitys(sizes)
+      })
     }
   } catch {
-    /* A failed cover lookup is not an error the UI should surface. */
+    /* A failed detail lookup is not an error the UI should surface. */
   }
   return out
 }
@@ -284,16 +358,17 @@ const neteaseProvider: SearchProvider = {
     const songs = payload.result?.songs ?? []
     const total = payload.result?.songCount ?? songs.length
 
-    // Resolve real cover URLs. Done for the page as one batch call rather than
-    // per track, so a 20-item page costs one request instead of twenty.
-    const covers = await fetchNeteaseCovers(
+    // One batch call for the page: cover URLs *and* which tiers each track actually
+    // has. Both used to be guessed here — covers because the search response omits
+    // them, qualities because availability is per-track only.
+    const details = await fetchNeteaseDetails(
       songs.map((s) => Number(s.id)).filter((id) => Number.isFinite(id) && id > 0)
     )
 
     return {
       list: songs.map((item): OnlineMusicInfo => {
         const id = String(item.id ?? '')
-        const picUrl = item.album?.picUrl ?? covers.get(Number(id)) ?? ''
+        const picUrl = item.album?.picUrl ?? details.get(Number(id))?.picUrl ?? ''
         return {
           id: `wy_${id}`,
           name: item.name ?? '',
@@ -305,9 +380,10 @@ const neteaseProvider: SearchProvider = {
           meta: {
             songmid: id,
             albumId: item.album?.id,
-            // NetEase exposes quality availability only per-track via other
-            // endpoints, so declare the common set and let the ladder probe.
-            qualitys: buildQualitys({ '128k': 1, '320k': 1, flac: 1 })
+            // What this track really has, from the same detail call. An empty list is
+            // a real answer (some tracks have no listed tier at all) and must stay
+            // empty: the badge renders nothing for it rather than inventing one.
+            qualitys: details.get(Number(id))?.qualitys ?? []
           }
         }
       }),

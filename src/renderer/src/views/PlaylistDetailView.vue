@@ -3,7 +3,7 @@
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import type { PlayableTrack } from '@shared/types'
+import { isLocalTrack, type PlayableTrack } from '@shared/types'
 import { toMediaUrl } from '@shared/media-url'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
@@ -32,6 +32,8 @@ async function load(): Promise<void> {
   try {
     const items = await window.jj.playlists.items(listId.value)
     if (generation === loadGeneration) tracks.value = items
+    // 列表先画出来再补徽标：660 首要 2.3 秒，为几个 `SQ` 让用户对着白屏是不可接受的。
+    if (generation === loadGeneration) void backfillQualitys(generation, listId.value)
   } catch (error) {
     if (generation !== loadGeneration) return
     toast.error(error instanceof Error ? error.message : '加载歌单失败')
@@ -41,10 +43,40 @@ async function load(): Promise<void> {
   }
 }
 
+/**
+ * Ask main what tiers this list's online tracks actually have, and merge the answer
+ * into the rows already on screen.
+ *
+ * The `generation` check is the whole point of writing it this way: main answers
+ * seconds later, and by then the user may have opened a different list. Merging
+ * unconditionally paints list A's badges onto list B's rows — same ids, different
+ * song — which is a wrong fact displayed confidently.
+ *
+ * Failures are silent on purpose. This decorates a list; it is not something the
+ * user asked to happen, and a toast for a network hiccup on a badge would be worse
+ * than no badge.
+ */
+async function backfillQualitys(generation: number, id: string): Promise<void> {
+  try {
+    const found = await window.jj.playlists.backfillQualitys(id)
+    if (generation !== loadGeneration || !found.length) return
+    const byId = new Map(found.map((entry) => [entry.id, entry.qualitys]))
+    tracks.value = tracks.value.map((track) => {
+      const tiers = byId.get(track.id)
+      if (!tiers || isLocalTrack(track)) return track
+      return { ...track, meta: { ...track.meta, qualitys: tiers } }
+    })
+  } catch {
+    /* nothing to see here */
+  }
+}
+
 watch([listId, () => library.playlists], load, { immediate: true })
 
 async function playAt(index: number): Promise<void> {
-  await player.playQueue(tracks.value, index)
+  // The label is what the panel's history page will be called after this one
+  // stops being current — 「歌单 · 忆」 beats "the list that starts with 勇气".
+  await player.playQueue(tracks.value, index, playlist.value ? `歌单 · ${playlist.value.name}` : '')
 }
 
 /**

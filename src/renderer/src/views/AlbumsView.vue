@@ -54,7 +54,7 @@ function albumSpec(tracks: ReturnType<typeof Object.values>[number] | never): st
 }
 
 async function playAlbum(tracks: PlayableTrack[]): Promise<void> {
-  await player.playQueue(tracks, 0)
+  await player.playQueue(tracks, 0, selected.value ? `专辑 · ${selected.value}` : '')
 }
 
 const trackList = ref<{ reveal: (index: number) => void } | null>(null)
@@ -88,7 +88,7 @@ function revealPlaying(): void {
       <input v-else v-model="filter" class="input" type="search" placeholder="筛选专辑…" />
     </header>
 
-    <TrackList v-if="selectedAlbum" ref="trackList" :tracks="selectedAlbum.tracks" @play="(_, index) => player.playQueue(selectedAlbum!.tracks, index)" />
+    <TrackList v-if="selectedAlbum" ref="trackList" :tracks="selectedAlbum.tracks" @play="(_, index) => player.playQueue(selectedAlbum!.tracks, index, selected ? `专辑 · ${selected}` : '')" />
     <div v-else-if="albums.length === 0" class="empty">
       <span class="empty__title">还没有专辑</span>
       <span class="empty__hint">专辑信息来自音频文件的标签，添加本地文件夹后会自动归类。</span>

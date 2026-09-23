@@ -205,7 +205,7 @@ function artOf(artist: { name: string; tracks: LocalMusicInfo[] } | null): strin
 }
 
 async function playArtist(tracks: PlayableTrack[]): Promise<void> {
-  await player.playQueue(tracks, 0)
+  await player.playQueue(tracks, 0, selected.value ? `歌手 · ${selected.value}` : '')
 }
 
 const trackList = ref<{ reveal: (index: number) => void } | null>(null)
@@ -256,7 +256,7 @@ function revealPlaying(): void {
       ref="trackList"
       :tracks="selectedArtist.tracks"
       :show-album="true"
-      @play="(_track, index) => player.playQueue(selectedArtist!.tracks, index)"
+      @play="(_track, index) => player.playQueue(selectedArtist!.tracks, index, selected ? `歌手 · ${selected}` : '')"
     />
     <div v-else-if="artists.length === 0" class="empty">
       <span class="empty__title">还没有艺术家</span>

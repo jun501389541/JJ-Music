@@ -1,4 +1,5 @@
 /** Small formatting helpers shared by the renderer. */
+import { QUALITY_LABELS, QUALITY_ORDER, type Quality } from '@shared/types'
 
 /**
  * Seconds to `mm:ss`, or `hh:mm:ss` past an hour.
@@ -60,4 +61,44 @@ export function formatAudioSpec(track: {
 /** Quality tier label, falling back to the raw key. */
 export function qualityLabel(quality: string, labels: Record<string, string>): string {
   return labels[quality] ?? quality
+}
+
+/**
+ * Short badge text per tier. Deliberately the *same words* the local badges use
+ * (`SQ` / `Hi-Res` in `TrackList`), because a row shows one or the other and two
+ * vocabularies for the same column reads like two different kinds of label.
+ */
+const QUALITY_BADGES: Record<string, string> = {
+  '128k': '标准',
+  '320k': 'HQ',
+  flac: 'SQ',
+  flac24bit: 'Hi-Res',
+  hires: 'Hi-Res'
+}
+
+/**
+ * The highest tier a track actually has, by `QUALITY_ORDER`. '' when there is none.
+ *
+ * Not `buildQualityLadder` from the source engine: that one treats the user's
+ * preferred quality as a *ceiling*, so it answers "what may we ask for", not "what
+ * exists here". A badge is a statement about the file, so it must not be filtered by
+ * a setting.
+ */
+export function bestQuality(qualitys: Array<{ type: string }> | undefined): string {
+  let best = ''
+  let bestIndex = -1
+  for (const item of qualitys ?? []) {
+    const index = QUALITY_ORDER.indexOf(item.type as Quality)
+    if (index < 0 || index <= bestIndex) continue
+    bestIndex = index
+    best = item.type
+  }
+  return best
+}
+
+/** Badge text for a track's available tiers, or '' meaning "show nothing". */
+export function qualityBadge(qualitys: Array<{ type: string }> | undefined): string {
+  const best = bestQuality(qualitys)
+  if (!best) return ''
+  return QUALITY_BADGES[best] ?? QUALITY_LABELS[best] ?? best
 }

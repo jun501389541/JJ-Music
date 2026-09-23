@@ -163,8 +163,14 @@ export function primeLyricCache(trackId: string, resolved: ResolvedLyric): void 
   cacheSet(trackId, resolved)
 }
 
-/** True when the text contains at least one LRC timestamp. */
-function looksSynchronized(text: string): boolean {
+/**
+ * True when the text contains at least one LRC timestamp.
+ *
+ * Exported because the picker's stage-then-write path rebuilds a resolved lyric
+ * from a candidate the renderer chose; the badge and the 逐行 marker must read
+ * the same predicate the resolver used, not a second one that happens to differ.
+ */
+export function looksSynchronized(text: string): boolean {
   return /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(text)
 }
 
@@ -326,8 +332,8 @@ export type { LyricCandidate }
  * score is not reliably the right recording, and the wrong lyric is worse than
  * none: it looks like the app is broken. Rather than raise the acceptance
  * threshold (which mostly produces no lyric at all), every plausible match is
- * returned so the user can pick. Their choice is saved as a sidecar, which then
- * wins on every later load.
+ * returned so the user can pick. Their choice displays at once and waits in the
+ * 待写入 queue; nothing reaches the file until they say so.
  *
  * Candidates below the confidence floor are dropped, because offering obvious
  * mismatches makes the picker useless.

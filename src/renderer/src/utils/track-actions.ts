@@ -110,11 +110,18 @@ export function playbackActions(): MenuItem[] {
       { label: '显示桌面歌词', checked: settings.desktopLyric, action: () => void library.updateSettings({ desktopLyric: !settings.desktopLyric }) },
       { label: '锁定位置', disabled: !settings.desktopLyric, checked: settings.desktopLyricLocked, action: () => void library.updateSettings({ desktopLyricLocked: !settings.desktopLyricLocked }) },
       { label: '显示翻译', checked: settings.lyricTranslation, action: () => void library.updateSettings({ lyricTranslation: !settings.lyricTranslation }) },
+      { label: '显示音译', checked: settings.lyricRomanization, action: () => void library.updateSettings({ lyricRomanization: !settings.lyricRomanization }) },
       { label: '字号', children: DESKTOP_LYRIC_FONTS.map(font => ({ label: font.label, checked: settings.desktopLyricFontSize === font.size, action: () => void library.updateSettings({ desktopLyricFontSize: font.size }) })) }
     ] },
     { label: '', separator: true },
-    { label: 'EQ 均衡器', icon: 'audio', action: () => { ui.nowPlaying = true; ui.playbackPanel = 'eq' } },
-    { label: '播放列表', icon: 'list', action: () => { ui.nowPlaying = true; ui.playbackPanel = 'queue' } },
+    /*
+     * Both open the panel where you are standing. They used to set
+     * `ui.nowPlaying = true` as well, which meant "show me the queue" also threw
+     * you into the full-screen playback page — the panel is a window-level
+     * surface now, so the jump is nothing this menu needs to do.
+     */
+    { label: 'EQ 均衡器', icon: 'audio', action: () => { ui.playbackPanel = 'eq' } },
+    { label: '播放列表', icon: 'list', action: () => { ui.playbackPanel = 'queue' } },
     { label: '播放界面设置', icon: 'settings', action: () => { ui.nowPlaying = false; return router.push('/settings/appearance/player') } },
     { label: '全屏', icon: 'expand', action: () => window.jj.window.fullscreen() }
   ]

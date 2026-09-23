@@ -2,12 +2,17 @@
 /**
  * Lyric editor.
  *
- * Saving writes the edited text where 设置·标签与文件 says (the file's tag, a
- * sidecar `.lrc`, or both), and always includes the sidecar: resolution prefers
- * a `.lrc`, so an edit that only reached the tag could be shadowed by the old
- * sidecar and look like the save did nothing. That is also what lets a user
- * correct a bad embedded lyric (a wrong version, a missing line, an offset that
- * drifts) without having to rewrite tags by hand.
+ * Two ways out, and the only difference is where the bytes go:
+ *
+ *   - 保存 writes where 设置·标签与文件 says (the file's tag, a sidecar `.lrc`, or
+ *     both), and always includes the sidecar: resolution prefers a `.lrc`, so an
+ *     edit that only reached the tag could be shadowed by the old sidecar and
+ *     look like the save did nothing. That is also what lets a user correct a bad
+ *     embedded lyric (a wrong version, a missing line, an offset that drifts)
+ *     without having to rewrite tags by hand.
+ *   - 导出歌词 writes the sidecar only. For the lyric that arrived from the
+ *     online picker and is sitting in 待写入: reading it here and deciding to keep
+ *     it is the consent the fetch itself never had.
  *
  * The timestamp helper is the important part: hand-typing `[mm:ss.xxx]` for
  * every line is what makes lyric editing tedious, so this can stamp the current
@@ -33,6 +38,7 @@ const toast = useToastStore()
 
 const text = ref(props.initial)
 const saving = ref(false)
+const exporting = ref(false)
 const textarea = ref<HTMLTextAreaElement | null>(null)
 /** Offset in ms applied by the "shift" buttons. */
 const shiftMs = ref(500)
@@ -121,6 +127,30 @@ async function save(): Promise<void> {
     saving.value = false
   }
 }
+
+/**
+ * Write a `.lrc` beside the track and nothing else, so the editor stays open.
+ *
+ * The difference from `save` is only where the bytes go: this leaves the audio
+ * file untouched whatever 设置·写入位置 says, which is the出口 for a lyric the
+ * picker parked in 待写入 — the user has read it, likes it, and now chooses to
+ * keep it. Overwrites a same-named `.lrc`, like every other write here.
+ */
+async function exportFile(): Promise<void> {
+  exporting.value = true
+  try {
+    const result = await window.jj.lyric.exportFile(props.trackId, text.value)
+    if (!result.written) {
+      toast.error(result.note)
+      return
+    }
+    toast.success(`歌词${result.note}`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '导出歌词失败')
+  } finally {
+    exporting.value = false
+  }
+}
 </script>
 
 <template>
@@ -131,7 +161,7 @@ async function save(): Promise<void> {
           <h2 class="editor__title">编辑歌词</h2>
           <p class="editor__subtitle">
             {{ lineCount }} 行 · {{ timedCount }} 行带时间标签
-            <span class="editor__note">保存后写入音频同目录的 .lrc，优先级高于内嵌歌词</span>
+            <span class="editor__note">保存按「设置 · 写入位置」写，可能改动音频标签；导出歌词只写同目录的 .lrc</span>
           </p>
         </div>
         <button class="icon-btn" type="button" title="关闭" @click="emit('close')">✕</button>
@@ -165,9 +195,13 @@ async function save(): Promise<void> {
         </span>
         <div class="editor__actions">
           <button class="btn" type="button" @click="emit('close')">取消</button>
+          <button class="btn" type="button" :disabled="exporting" @click="exportFile">
+            <span v-if="exporting" class="spinner" />
+            <span v-else>导出歌词</span>
+          </button>
           <button class="btn btn--primary" type="button" :disabled="saving" @click="save">
             <span v-if="saving" class="spinner" />
-            <span v-else>保存 .lrc</span>
+            <span v-else>保存</span>
           </button>
         </div>
       </footer>

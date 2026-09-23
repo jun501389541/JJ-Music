@@ -63,8 +63,10 @@ await build({
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'lyrics.ts'),
     join(repoRoot, 'src', 'main', 'online', 'url-guard.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'cover-fetch.ts'),
     join(repoRoot, 'src', 'main', 'store', 'json-file.ts'),
     join(repoRoot, 'src', 'main', 'media', 'media-response.ts'),
+    join(repoRoot, 'src', 'main', 'media', 'file-release.ts'),
     join(repoRoot, 'src', 'main', 'media', 'flac-repair.ts'),
     join(repoRoot, 'src', 'main', 'store', 'settings-store.ts')
   ],
@@ -101,6 +103,7 @@ await build({
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'web-audio-engine.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'settings-writer.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'format.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'utils', 'search-merge.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'local-search.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'library.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'player.ts')

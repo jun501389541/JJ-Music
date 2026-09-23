@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { extname, isAbsolute, normalize, relative, sep } from 'node:path'
 import { Readable } from 'node:stream'
+import { registerMediaStream } from './file-release'
 
 const MIME: Record<string, string> = {
   '.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4',
@@ -131,8 +132,15 @@ export async function serveMedia(request: Request, access: MediaAccess): Promise
     const stream = createReadStream(path, range ?? {})
     // Disconnected requests must not keep reading a large local audio file.
     const abort = (): void => { stream.destroy() }
+    // Registered so a tag write that replaces this very file can close the
+    // descriptor first: on Windows an open handle makes the final `rename` fail
+    // with EPERM, and the file being tagged is usually the one playing.
+    const unregister = registerMediaStream(path, abort)
     request.signal.addEventListener('abort', abort, { once: true })
-    stream.once('close', () => request.signal.removeEventListener('abort', abort))
+    stream.once('close', () => {
+      request.signal.removeEventListener('abort', abort)
+      unregister()
+    })
     if (request.signal.aborted) abort()
     return new Response(Readable.toWeb(stream) as ReadableStream, { status, headers })
   } catch (error) {

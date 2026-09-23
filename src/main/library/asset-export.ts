@@ -39,6 +39,7 @@ import { canWriteTags, lyricHasTimestamps, writeTags } from './tag-writer'
 import { readEmbeddedLyric } from './embedded-lyrics'
 import { coverSidecarPathFor, sidecarPathFor } from './asset-files'
 import { writeFileAtomic } from '../store/json-file'
+import { releaseFileForWrite } from '../media/file-release'
 import { saveSidecar } from './lyric-service'
 
 const EMBEDDED_LABEL = '文件内嵌'
@@ -104,6 +105,10 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
 
   /* ---------------- embedded: the user's own file ---------------- */
   if (embedded) {
+    // Put the file down before replacing it. The write ends in a rename over the
+    // original, and a player still streaming that song keeps a handle open which
+    // Windows reports as EPERM. A preview touches nothing, so it asks for nothing.
+    if (input.dryRun !== true) releaseFileForWrite(targetFile)
     const written = await writeTags(targetFile, patch, {
       dryRun: input.dryRun === true,
       // Skipping the backup is only safe because the file is a staging copy that

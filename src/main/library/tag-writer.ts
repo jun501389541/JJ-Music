@@ -31,7 +31,7 @@
  * dislikes the result must be able to get their file back.
  */
 import { existsSync } from 'node:fs'
-import { copyFile, readFile, rename, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { extname } from 'node:path'
 import NodeID3 from 'node-id3'
 import type { TagPatch, TagWriteResult } from '@shared/library-types'
@@ -98,18 +98,58 @@ async function backupOnce(filePath: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * What "the file is not ours to replace right now" looks like on Windows.
+ *
+ * An open handle makes `rename` fail with EPERM rather than EBUSY, and an
+ * antivirus or the search indexer touching the file mid-write can answer EACCES.
+ * All three are worth waiting a few hundred milliseconds for; anything else is a
+ * real error and retrying it only delays the message.
+ */
+const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const RENAME_TRIES = 4
+const RENAME_BACKOFF_MS = 150
+
+const wait = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
+
 /** Write tags atomically: temp file in the same directory, then rename. */
 async function replaceFile(filePath: string, data: Buffer): Promise<void> {
   const tmp = `${filePath}.jjtmp`
   await writeFile(tmp, data)
-  await rename(tmp, filePath)
+  let code = ''
+  for (let attempt = 0; attempt < RENAME_TRIES; attempt++) {
+    try {
+      await rename(tmp, filePath)
+      return
+    } catch (error) {
+      code = (error as NodeJS.ErrnoException).code ?? ''
+      if (!LOCK_CODES.has(code)) break
+      // Back off between tries: the caller has already been asked to put the file
+      // down, and a player releasing a stream is a matter of frames, not seconds.
+      if (attempt < RENAME_TRIES - 1) await wait(RENAME_BACKOFF_MS * (attempt + 1))
+    }
+  }
+  /*
+   * The temp file is the new tags and nothing else. Keeping it would leave a
+   * multi-megabyte orphan in the user's music folder for every failed write —
+   * and the original is untouched either way, so nothing is lost by removing it.
+   */
+  await unlink(tmp).catch(() => undefined)
+  if (LOCK_CODES.has(code)) {
+    // Marked so the one case with an actionable user message can be turned into a
+    // note, while every other failure keeps propagating as an error.
+    throw Object.assign(new Error(
+      '文件正被其他程序占用，无法替换（通常是这首歌正在播放）。已停止播放并重试仍未成功——请暂停或切到其他曲目后再试一次。'
+    ), { locked: true, code })
+  }
+  throw new Error(`替换标签文件失败：${code || '未知错误'}`)
 }
 
 /* ------------------------------------------------------------------ *
  * MP3 (ID3v2)
  * ------------------------------------------------------------------ */
 
-function writeMp3(filePath: string, patch: TagPatch): WriteResult {
+async function writeMp3(filePath: string, patch: TagPatch): Promise<WriteResult> {
   const tags: NodeID3.Tags = {}
 
   if (patch.title) tags.title = patch.title
@@ -140,10 +180,21 @@ function writeMp3(filePath: string, patch: TagPatch): WriteResult {
     }
   }
 
-  const ok = NodeID3.update(tags, filePath)
+  /*
+   * `node-id3` writes in place and answers `true`, or an Error describing why it
+   * could not. A locked file is the common reason on Windows — the same song the
+   * user is tagging is the one playing — so it gets the same short backoff as the
+   * FLAC rename, and the same plain-language note instead of a silent false.
+   */
+  let last: true | Error | unknown = true
+  for (let attempt = 0; attempt < RENAME_TRIES; attempt++) {
+    last = NodeID3.update(tags, filePath)
+    if (last === true) return { written: true, note: '已写入 ID3v2 标签' }
+    if (attempt < RENAME_TRIES - 1) await wait(RENAME_BACKOFF_MS * (attempt + 1))
+  }
   return {
-    written: ok === true,
-    note: ok === true ? '已写入 ID3v2 标签' : 'ID3 写入失败'
+    written: false,
+    note: `文件正被其他程序占用，无法写入标签${last instanceof Error && last.message ? `（${last.message}）` : ''}。通常是这首歌正在播放——请暂停或切到其他曲目后再试一次。`
   }
 }
 
@@ -362,10 +413,27 @@ export async function writeTags(
 
   const backupPath = options.skipBackup ? undefined : await backupOnce(filePath)
 
-  const result =
-    ext === '.mp3'
-      ? writeMp3(filePath, patch)
-      : await writeFlac(filePath, patch)
+  /*
+   * A refused replacement is reported, not thrown. The caller turns a
+   * `written: false` into a note the user can read and act on; an exception would
+   * surface as the Node text (`EPERM: operation not permitted, rename '…' -> '…'`)
+   * over a file the user asked us to fix, which is the message that started this.
+   *
+   * Only that case. A FLAC chain that cannot be parsed or a picture over the block
+   * limit is a fact about the file, and the downloader depends on the rejection to
+   * leave such a file untouched and say why — swallowing those would turn a loud
+   * failure into a silent one.
+   */
+  let result: WriteResult
+  try {
+    result =
+      ext === '.mp3'
+        ? await writeMp3(filePath, patch)
+        : await writeFlac(filePath, patch)
+  } catch (error) {
+    if ((error as { locked?: boolean })?.locked !== true) throw error
+    result = { written: false, note: error instanceof Error ? error.message : '标签写入失败' }
+  }
 
   return backupPath ? { ...result, backupPath } : result
 }

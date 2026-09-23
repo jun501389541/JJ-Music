@@ -19,7 +19,7 @@
  *
  * Usage: node out/test/asset-export.test.mjs [library-folder]
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -433,6 +433,69 @@ async function pickSamples(folder, readEmbedded) {
   }
   return found
 }
+
+/* ------------------------------------------------------------------ *
+ * 7. A file that is open cannot be replaced — and must not be left messy
+ *
+ * The bug this pins is one the app caused for itself: it streams audio straight
+ * from the file it is about to re-tag, so on Windows the final `rename` answered
+ * EPERM and the user read a raw Node message over a file they had asked, in so
+ * many words, to fix. Writing tags to the song that is playing must either work —
+ * because the handle was put down first — or say so in Chinese, and either way it
+ * must not leave a multi-megabyte `.jjtmp` sitting in the music folder.
+ *
+ * The unlocked write before and after the locked one are not decoration: without
+ * them "it failed" proves nothing, since a rejected file fails for any reason.
+ * ------------------------------------------------------------------ */
+
+const { registerMediaStream, releaseFileForWrite, setPlaybackReleaser } = await load('media/file-release.js')
+
+/** The smallest thing `writeFlac` accepts: magic, one last STREAMINFO block, audio. */
+function fakeFlac() {
+  return Buffer.concat([
+    Buffer.from('fLaC', 'latin1'),
+    Buffer.from([0x80, 0x00, 0x00, 0x22]),
+    Buffer.alloc(34),
+    Buffer.from('some audio bytes')
+  ])
+}
+
+const lockFile = join(scratch, 'locked', 'Song.flac')
+put(lockFile, fakeFlac())
+
+const first = await exportAssets({ audioPath: lockFile, patch: { lyrics: '[00:01.00]词' }, to: ['embedded'] })
+check('正对照：能写的 FLAC 确实写进了标签', first.embeddedWritten === true, first.note)
+check('成功写入不留下 .jjtmp', !existsSync(`${lockFile}.jjtmp`))
+
+// Captured after the successful write above: the point is that a *blocked* write
+// changes nothing, and comparing against pre-first-write bytes would pass for the
+// wrong reason if the earlier write had somehow not landed.
+const pristine = readFileSync(lockFile)
+const held = createReadStream(lockFile, { start: 0, end: 200 })
+await new Promise(resolve => setTimeout(resolve, 200))
+const blocked = await exportAssets({ audioPath: lockFile, patch: { lyrics: '[00:02.00]词' }, to: ['embedded'] })
+check('文件被占用时不谎称写入成功', blocked.written === false && /占用/.test(blocked.note), blocked.note)
+check('占用失败后不在用户文件夹里留下 .jjtmp', !existsSync(`${lockFile}.jjtmp`))
+check('占用失败时原文件一个字节没动', readFileSync(lockFile).equals(pristine))
+
+held.destroy()
+await new Promise(resolve => setTimeout(resolve, 200))
+const retried = await exportAssets({ audioPath: lockFile, patch: { lyrics: '[00:03.00]词' }, to: ['embedded'] })
+check('句柄释放后同一颗文件写得进去', retried.embeddedWritten === true, retried.note)
+
+/* The registry that makes that release possible, on its own terms. */
+let released = 0
+const unregister = registerMediaStream(lockFile, () => { released += 1 })
+let asked = ''
+setPlaybackReleaser(path => { asked = path })
+releaseFileForWrite(lockFile.toUpperCase())
+check('释放按 Windows 的写法认文件（大小写不同也算同一颗）', released === 1, `released=${released}`)
+check('写入前请渲染层放下这首歌', asked === lockFile.toUpperCase(), asked)
+unregister()
+released = 0
+asked = ''
+releaseFileForWrite(lockFile)
+check('流自己关掉之后从映射里摘掉，不越长越大', released === 0)
 
 /* ------------------------------------------------------------------ *
  * Summary

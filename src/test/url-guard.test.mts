@@ -22,7 +22,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { assertPublicHttpUrl, isHostAllowed, resolveRedirect } = await import('./online/url-guard.js')
+const { assertPublicHttpUrl, guardedFetch, isHostAllowed, resolveRedirect } = await import('./online/url-guard.js')
 
 const allowed = (raw) => {
   assert.doesNotThrow(() => assertPublicHttpUrl(raw))
@@ -194,4 +194,55 @@ test('a relative redirect resolves against the current URL, not the origin root'
   assert.throws(() => resolveRedirect('/\\\\evil.test', base, ['migu.cn']), /允许的主机/)
   // A lone leading backslash, by contrast, stays a path on the current host.
   assert.equal(resolveRedirect('\\evil.test\\x', base, ['migu.cn']).hostname, 'd.musicapp.migu.cn')
+})
+
+/*
+ * The adapter between a `fetch`-shaped seam and the guard.
+ *
+ * This is the one place where the pin can be lost *silently*: the download
+ * manager attaches `allowedHosts` to `init`, and a plain `fetch` would take that
+ * extra key, ignore it, and send the request unpinned with nothing failing. So
+ * the interesting assertions are about the conversion, not about the network.
+ */
+test('guardedFetch refuses an unpinned request to a host the caller pinned away', async () => {
+  // Rejected before any socket is opened: the URL never passes the guard.
+  await assert.rejects(
+    () => guardedFetch('https://attacker.test/cover.jpg', { allowedHosts: ['migu.cn'] }),
+    /允许的主机/
+  )
+  // The same address without a pin is only checked for being public http(s).
+  // It is not fetched here either — it resolves nowhere — but the failure has to
+  // be a network failure, not a policy one.
+  await assert.rejects(
+    () => guardedFetch('https://attacker.test/cover.jpg', { signal: AbortSignal.timeout(2000) }),
+    (error) => !/允许的主机/.test(error.message)
+  )
+})
+
+test('guardedFetch keeps the pin out of the browser init and the abort signal in it', async () => {
+  const seen = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), init })
+    return new Response('bytes')
+  }
+  try {
+    const controller = new AbortController()
+    await guardedFetch('https://d.musicapp.migu.cn/pic', {
+      allowedHosts: ['migu.cn'],
+      signal: controller.signal,
+      headers: { Referer: 'https://music.migu.cn/' }
+    })
+    assert.equal(seen.length, 1)
+    // `allowedHosts` must not reach the platform fetch: it is not a real option,
+    // and its presence there is exactly what a caller would mistake for a pin.
+    assert.equal('allowedHosts' in seen[0].init, false)
+    assert.ok(seen[0].init.signal instanceof AbortSignal, '取消信号必须原样传下去')
+    assert.equal(seen[0].init.headers.Referer, 'https://music.migu.cn/')
+    // Redirects are walked by the guard itself, never by the platform fetch: a
+    // `fetch` left to follow one would carry the pin nowhere.
+    assert.equal(seen[0].init.redirect, 'manual')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })

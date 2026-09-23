@@ -8,6 +8,7 @@ import { LX_QUALITIES } from '@shared/types'
 import { canWriteTags } from '../library/tag-writer'
 import { exportAssets } from '../library/asset-export'
 import { readBounded } from '../online/read-bounded'
+import { COVER_HOSTS } from '../online/cover-fetch'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 
 export function audioExtension(container: string, codec: string): string {
@@ -63,7 +64,19 @@ interface Dependencies {
   resolve: (track: OnlineMusicInfo, quality: Quality) => Promise<{ url: string; quality: Quality }>
   lyrics: (track: OnlineMusicInfo) => Promise<LyricResult>
   cover: (track: OnlineMusicInfo) => Promise<string>
-  fetch?: typeof fetch
+  /**
+   * The one HTTP seam, and `allowedHosts` rides on it.
+   *
+   * The audio URL and the cover URL need different guarantees, so the pin cannot
+   * be baked into the injected function. An audio URL legitimately lives on
+   * whatever relay the 音源 picked and the most that can be asked of it is
+   * "public http(s)"; a cover comes from a small known host family per platform
+   * (`COVER_HOSTS`). The caller that knows `track.source` is this file, so this
+   * file decides the pin and the injection just forwards it to
+   * `safeFetchResponse` — which is where it has to arrive, because the redirect
+   * loop in there re-validates every hop against it.
+   */
+  fetch?: GuardedFetch
   /**
    * Send one path to the system recycle bin. Injected rather than imported:
    * `shell.trashItem` only exists in the main process, and this module is imported
@@ -72,6 +85,18 @@ interface Dependencies {
    */
   trash: (path: string) => Promise<void>
 }
+
+/**
+ * `fetch`, plus the optional host pin.
+ *
+ * Structurally a superset of `fetch`, so a plain one-argument stub satisfies it —
+ * which is what every existing test injects, and they keep testing the unpinned
+ * shape they were written against.
+ */
+export type GuardedFetch = (
+  url: string,
+  init?: RequestInit & { allowedHosts?: string[] }
+) => Promise<Response>
 export class DownloadManager {
   private tasks: DownloadTask[] = []
   private controllers = new Map<string, AbortController>()
@@ -315,9 +340,28 @@ export class DownloadManager {
       signal.throwIfAborted()
       if (settings.downloadEmbedCover) {
         try {
+          /*
+           * The picture URL comes from the platform, and it ends up *inside the
+           * user's audio file* — so it is pinned to that platform's image host
+           * family before anything is fetched. Two things are why this is not
+           * just a nicety:
+           *
+           * A source with no entry here gets no cover rather than an unpinned
+           * fetch. The 音源脚本 platforms (`qs`, `qsvip`) return whichever host the
+           * user's imported script names, which is exactly the set nobody can
+           * vouch for, and refusing costs only the picture.
+           *
+           * The pin is passed *into* the request rather than checked around it,
+           * because `safeFetchResponse` follows redirects by hand and
+           * re-validates each hop against the same list. Checking only the first
+           * URL would leave `302 Location: http://127.0.0.1:1887/` free to walk
+           * straight through — the hole `url-guard.ts` documents at the top.
+           */
+          const allowedHosts = task.track.source ? COVER_HOSTS[task.track.source] : undefined
+          if (!allowedHosts) throw Error('该平台没有可钉的封面域名')
           const url=await abortable(this.deps.cover(task.track),signal)
           if (!/^https?:\/\//i.test(url)) throw Error('无封面')
-          const res=await http(url,{signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])})
+          const res=await http(url,{signal:AbortSignal.any([signal,AbortSignal.timeout(15000)]),allowedHosts})
           const data=await readBounded(res,10*1024*1024)
           const mimeType=data[0]===0xff && data[1]===0xd8 ? 'image/jpeg' : data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? 'image/png' : ''
           if (!mimeType) throw Error('封面格式不支持')

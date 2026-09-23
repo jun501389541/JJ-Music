@@ -25,7 +25,7 @@ import { resolveDataDir, migrationSource, pointerPath, relocationProblem, type D
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
-import { safeFetchBytes, safeFetchResponse } from './online/url-guard'
+import { guardedFetch, safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
 import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
@@ -106,10 +106,15 @@ function unpackedPath(fileName: string): string {
  * `JJ_ALLOW_DEBUG_PORT=1` as well. Two deliberate variables instead of one
  * ambient one; an inherited `JJ_DEBUG_PORT` alone now does nothing.
  *
- * This is defence in depth, not a boundary: Electron has no fuse for the
- * `--remote-debugging-port` *argv*, so a launcher that can pass arguments can
- * still open CDP on this build. What changes is that the app no longer opens it
- * out of an environment it merely happened to inherit.
+ * Both routes are closed now, and they needed different fixes. This one gates
+ * the environment variable. The argv switch is parsed by Chromium itself, before
+ * any of this code runs, so it is taken back further down with
+ * `app.commandLine.removeSwitch` — see the comment there for the measurement
+ * that made that necessary.
+ *
+ * `tools/probe/check-packed-surface.mjs` measures all of it against the packaged
+ * exe, with a control scenario that proves CDP is detectable at all: three
+ * "no answer" results mean nothing unless the fourth does answer.
  */
 const debugPort = isDev || process.env['JJ_ALLOW_DEBUG_PORT'] === '1'
   ? process.env['JJ_DEBUG_PORT']
@@ -329,12 +334,20 @@ async function createServices(): Promise<Services> {
     resolve: (track, quality) => sourceEngine.getMusicUrl(track.source, track, quality, true),
     lyrics: async (track) => (await onlineLyric(track)).lyric,
     cover: async track => track.picUrl || sourceEngine.getPic(track.source, track),
-    // The audio and cover URLs being fetched here were produced by an untrusted
-    // source script, so this must validate every hop like the other caller-supplied
-    // fetch paths do. Left to the default `fetch` in DownloadManager, a script
-    // could point the app at loopback or a cloud metadata address.
+    /*
+     * The audio and cover URLs being fetched here were produced by an untrusted
+     * source script, so this must validate every hop like the other
+     * caller-supplied fetch paths do. Left to the default `fetch` in
+     * DownloadManager, a script could point the app at loopback or a cloud
+     * metadata address.
+     *
+     * `guardedFetch` is what turns the per-request `allowedHosts` the download
+     * manager attaches to a cover request into the pin `safeFetchResponse` needs.
+     * See it for why that conversion cannot be left to `fetch`, and why
+     * `init.signal` must not be hoisted on the way through.
+     */
     fetch: (input, init) => typeof input === 'string'
-      ? safeFetchResponse(input, { init })
+      ? guardedFetch(input, init)
       : Promise.reject(new Error('下载不接受非字符串地址')),
     // 回收站，不是永久删除。回收站不收这个路径时（网络盘、某些可移动盘）
     // `trashItem` 会 reject，remove() 把它原样报给界面并且保留记录。

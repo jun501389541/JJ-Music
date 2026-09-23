@@ -180,6 +180,29 @@ export async function safeFetchText(raw: string | URL, options: SafeFetchOptions
   }
 }
 
+/**
+ * `safeFetchResponse` shaped like `fetch`, with the host pin travelling in `init`.
+ *
+ * A caller that has one HTTP seam for two kinds of request needs to say "pin this
+ * one" per request, and the only channel it has is `init`. `fetch` itself would
+ * take an extra key there and drop it without a word, so the conversion has to
+ * happen somewhere between the seam and the guard — and it has to be somewhere a
+ * test can reach, which an inline lambda inside the main entry is not. Measured:
+ * with the key left in `init` the request goes out unpinned and nothing anywhere
+ * complains, because `init` is only ever spread.
+ *
+ * `init.signal` deliberately stays under `init` rather than being hoisted: that is
+ * where `safeFetchResponse` reads the caller's cancellation from, and moving it to
+ * the top level would quietly turn every aborted download back into a live request.
+ */
+export function guardedFetch(
+  url: string,
+  init?: RequestInit & { allowedHosts?: string[] }
+): Promise<Response> {
+  const { allowedHosts, ...rest } = init ?? {}
+  return safeFetchResponse(url, { init: rest, ...(allowedHosts ? { allowedHosts } : {}) })
+}
+
 function blockedIPv4(address: string): boolean {
   const [a, b] = address.split('.').map(Number)
   return a === 0 || a === 10 || a === 127 || a >= 224 ||

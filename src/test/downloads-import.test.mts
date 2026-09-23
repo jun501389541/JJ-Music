@@ -48,6 +48,35 @@ test('download writes audio, merged lyrics and embedded FLAC cover; duplicate na
   // Verify actual persistence/restart semantics separately using the saved directory.
   const reload=new DownloadManager(dir,{});await reload.load();assert.equal(reload.list().length,2)
 })
+test('封面抓取带着平台的域名钉，音源脚本那种钉不了的平台宁可不抓',async()=>{
+  const calls=[]
+  const {manager}=await setup({fetch:async(url,init)=>{calls.push({url,allowed:init?.allowedHosts});return new Response(url.endsWith('/cover')?png:flac())}})
+  const [id]=manager.add([track],'flac');const done=await settled(manager,id)
+  assert.equal(done.status,'completed',done.error)
+  const cover=calls.find(c=>c.url.endsWith('/cover'))
+  // 音频地址不钉：它本来就落在音源挑的中继上，能问的只有「是不是公网 http(s)」。
+  assert.equal(calls.find(c=>c.url.endsWith('/a')).allowed,undefined)
+  // 封面地址必须钉：这张图会被写进用户的音频文件。
+  assert.deepEqual(cover.allowed,['126.net'],'wy 的封面只允许来自 126.net')
+
+  /*
+   * 钉不了的平台宁可不抓封面。
+   *
+   * `qs`/`qsvip` 的封面主机名由用户导入的音源脚本决定，那正是没人能担保的一组。
+   * 这里断言的是**退回**而不是报错：文本字段和歌词照写，只有封面没有。
+   */
+  const scriptTrack={...track,id:'qs_1',source:'qs'}
+  const rejected=[]
+  const {manager:scriptManager}=await setup({
+    fetch:async(url)=>{if(url.endsWith('/cover'))rejected.push(url);return new Response(url.endsWith('/cover')?png:flac())},
+    resolve:async()=>({url:'https://audio.test/a',quality:'flac'})
+  })
+  const [scriptId]=scriptManager.add([scriptTrack],'flac')
+  const scriptDone=await settled(scriptManager,scriptId)
+  assert.equal(scriptDone.status,'completed',scriptDone.error)
+  assert.deepEqual(rejected,[],'没有可钉域名时连请求都不该发出去')
+  assert.ok(scriptDone.warnings.some(w=>/封面/.test(w)),`要留下一条说明，实际是 ${JSON.stringify(scriptDone.warnings)}`)
+})
 test('bad responses fail cleanly and strict quality cannot silently downgrade',async()=>{
   const {manager,dir}=await setup({fetch:async()=>new Response('{"error":"expired"}')})
   const [id]=manager.add([track],'flac');assert.equal((await settled(manager,id)).status,'failed')

@@ -8,10 +8,8 @@ import { useRouter } from 'vue-router'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { trackActions } from '../utils/track-actions'
 import AppIcon from '../components/AppIcon.vue'
-import EqualizerPanel from '../components/EqualizerPanel.vue'
 import PlayerBar from '../components/PlayerBar.vue'
 import WindowControls from '../components/WindowControls.vue'
-import TrackList from '../components/TrackList.vue'
 import { toMediaUrl } from '@shared/media-url'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { describeAsset, isLocalTrack, ONLINE_LYRIC_SOURCES, ONLINE_LYRIC_SOURCE_LABELS, type OnlineLyricSource } from '@shared/types'
@@ -22,6 +20,7 @@ import { useToastStore } from '../stores/toast'
 import { formatAudioSpec } from '../utils/format'
 import SpectrumVisualizer from '../components/SpectrumVisualizer.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
+import { flyCover, type FlightBox, type FlightSpec } from '../composables/cover-flight'
 import LyricEditor from '../components/LyricEditor.vue'
 
 const emit = defineEmits<{ close: [] }>()
@@ -32,6 +31,7 @@ const toast = useToastStore()
 
 const ui = useUiStore(), router = useRouter()
 const showTranslation = computed({ get: () => library.settings.lyricTranslation, set: value => { void library.updateSettings({ lyricTranslation: value }) } })
+const showRomanization = computed({ get: () => library.settings.lyricRomanization, set: value => { void library.updateSettings({ lyricRomanization: value }) } })
 /*
  * Every lyric operation lives in this one list, reachable two ways: right-click
  * over the lyric column, and the 更多 button at the top right of the page.
@@ -40,16 +40,22 @@ const showTranslation = computed({ get: () => library.settings.lyricTranslation,
  * buttons above the lyrics, plus a 翻译 checkbox. Same five actions, drawn
  * twice, in a strip that cost the lyric column a header's worth of height — so
  * the icons went away and the menu is now the single source.
+ *
+ * 「显示翻译」and「显示音译」sit here for the same reason they used to live only in
+ * 设置: a song that happens to carry a romanization is discovered while playing,
+ * and making the user leave the page to flip one checkbox loses the line they
+ * wanted to check. Both are disabled by the absence of that layer in the current
+ * lyric, so the two rows behave the same way round.
  */
 function lyricMenuItems(): MenuItem[] {
   return [
     { label: '显示翻译', icon: 'lyrics', disabled: !hasTranslation.value, checked: showTranslation.value, action: () => { showTranslation.value = !showTranslation.value } },
+    { label: '显示音译', icon: 'lyrics', disabled: !hasRomanization.value, checked: showRomanization.value, action: () => { showRomanization.value = !showRomanization.value } },
     { label: '导入歌词', icon: 'download', disabled: !canEditLyric.value, action: onImportLyric },
     { label: '编辑歌词', icon: 'edit', disabled: !canEditLyric.value, action: () => { showLyricEditor.value = true } },
-    { label: '在线搜索歌词', icon: 'search', disabled: !canEditLyric.value, action: onSearchLyric },
     // A metadata match is a guess; when several platforms match, let the user
     // pick rather than silently trusting the top score.
-    { label: '从多个来源选择…', icon: 'library', disabled: !canEditLyric.value, action: onPickLyricSource },
+    { label: '在线匹配歌词', icon: 'search', disabled: !canEditLyric.value, action: onPickLyricSource },
     { label: '标签匹配', icon: 'info', disabled: !canEditLyric.value, action: () => { showTagMatch.value = true } },
     ...(isOnlineTrack.value ? [lyricSourceItem()] : []),
     { label: '', separator: true },
@@ -87,6 +93,23 @@ function lyricMenuGroup(): MenuItem[] {
 
 const lyricChoices = ref<LyricCandidate[]>([])
 const pickingLyric = ref(false)
+/**
+ * Bumped whenever the picker is opened or closed by the user.
+ *
+ * The lookup takes several network round trips, and a list that arrives after the
+ * user already closed it — or after the song changed — would otherwise repopulate
+ * the panel and apply its rows to a track they were never about.
+ */
+let pickerGeneration = 0
+
+/** The one wording for "nothing matched", shared by the toast and the empty lyric column. */
+function noteLyricFailure(note: string): void {
+  // Written through to the store because the empty state above the lyric column
+  // reads `lyricError`, and with 「在线搜索歌词」 gone this is the only path that
+  // can find nothing.
+  player.lyricError = note
+  toast.error(note)
+}
 
 /**
  * Look up every credible lyric match and open the picker.
@@ -101,38 +124,63 @@ async function onPickLyricSource(): Promise<void> {
     toast.error('只有本地曲目可以匹配在线歌词')
     return
   }
+  const generation = ++pickerGeneration
   pickingLyric.value = true
   lyricChoices.value = []
   try {
     const found = await window.jj.lyric.candidates(track.id)
+    if (generation !== pickerGeneration) return
     if (found.length === 0) {
-      toast.error('没有匹配到在线歌词')
+      noteLyricFailure('在线未匹配到歌词')
       return
     }
     lyricChoices.value = found
   } catch (error) {
-    toast.error(error instanceof Error ? error.message : '在线歌词查询失败')
+    if (generation !== pickerGeneration) return
+    noteLyricFailure(error instanceof Error ? error.message : '在线歌词查询失败')
   } finally {
-    pickingLyric.value = false
+    if (generation === pickerGeneration) pickingLyric.value = false
   }
 }
 
-/** Write the chosen lyric where the settings point; it also becomes the sidecar, which wins on reload. */
+function closeLyricPicker(): void {
+  pickerGeneration++
+  lyricChoices.value = []
+  pickingLyric.value = false
+}
+
+// A track change abandons a match in flight and a list already on screen: both
+// describe the song that just stopped playing.
+watch(() => player.currentTrack?.id, () => { closeLyricPicker() })
+
+/**
+ * Show the chosen lyric and hold it for review; touch no file.
+ *
+ * The queue is the same one an automatic online fetch goes through, so the badge
+ * says 待写入 and 「导出歌词」or 全部写入 stays the only way it becomes the user's
+ * `.lrc`. Translations ride along because the picker's rows carry them — the
+ * queue keeps one body, but the resolved lyric the pane reads has all three.
+ */
 async function applyLyricChoice(choice: LyricCandidate): Promise<void> {
   const track = player.currentTrack
   if (!track || !isLocalTrack(track)) return
   try {
-    const saved = await window.jj.lyric.applyCandidate(track.id, choice.lyric)
-    if (!saved.written) {
-      toast.error(saved.note)
+    const staged = await window.jj.lyric.stageCandidate(track.id, {
+      lyric: choice.lyric,
+      ...(choice.tlyric ? { tlyric: choice.tlyric } : {}),
+      ...(choice.rlyric ? { rlyric: choice.rlyric } : {})
+    })
+    closeLyricPicker()
+    // Re-resolve so the pane shows the lyric that was just staged.
+    await player.reloadLyric()
+    if (!staged.asset?.pending) {
+      // `stageFetchedLyric` declines a text this song already said no to.
+      toast.info('这条歌词之前在待写入里被丢弃过，所以没有再加入')
       return
     }
-    lyricChoices.value = []
-    // Re-resolve so the pane shows the lyric that was just written.
-    await player.reloadLyric()
-    toast.success(`已使用「${choice.title}」的歌词，${saved.note}`)
+    toast.success(`已使用「${choice.title}」的歌词，未写入文件`)
   } catch (error) {
-    toast.error(error instanceof Error ? error.message : '保存歌词失败')
+    toast.error(error instanceof Error ? error.message : '匹配歌词失败')
   }
 }
 const showTagMatch = ref(false)
@@ -173,6 +221,11 @@ const hasTranslation = computed(() =>
   Boolean(player.lyrics?.lines.some((line) => line.translation))
 )
 
+/** The same question one layer down: a romanization line is its own copy, not a translation. */
+const hasRomanization = computed(() =>
+  Boolean(player.lyrics?.lines.some((line) => line.romanization))
+)
+
 /**
  * Where the current lyric came from, as a short badge.
  *
@@ -203,12 +256,6 @@ async function onImportLyric(): Promise<void> {
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '导入歌词失败')
   }
-}
-
-async function onSearchLyric(): Promise<void> {
-  const ok = await player.searchLyricOnline()
-  if (ok) toast.success('已匹配到在线歌词')
-  else toast.error(player.lyricError ?? '在线未匹配到歌词')
 }
 
 const cover = computed<string | null>(() => {
@@ -298,11 +345,12 @@ onMounted(async () => {
  */
 onMounted(() => {
   /*
-   * Wait for the overlay's own slide-up to settle before flying the cover:
-   * `getBoundingClientRect()` during the slide reports a position that is still
-   * moving, which would make the flight start from the wrong place.
+   * Both endpoints are known on the first frame — `artBox()` takes the sheet's
+   * own slide out of the measurement — so the cover starts travelling with the
+   * page rather than 60 ms after it. That delay existed only because the cover
+   * used to be inside the thing that was moving.
    */
-  window.setTimeout(playArtworkFlight, 60)
+  void playArtworkFlight()
 })
 
 /** Clicking a lyric line jumps to that point, as in Salt Player. */
@@ -316,63 +364,134 @@ function seekToLine(index: number): void {
  * ---------------------------------------------------------------- */
 
 const artwork = ref<HTMLElement | null>(null)
+/** The page's own cover, parked out of sight while the layer carries it. */
 const artworkFlying = ref(false)
+/**
+ * The two flight durations and curves, mirroring `--dur-overlay` /
+ * `--dur-overlay-out` and the sheet's own enter / leave easing.
+ *
+ * They are repeated here rather than read out of CSS because the script owns
+ * when the cover is revealed again, and the layer resolves on `transitionend`
+ * with this number only as a fallback. What matters is the *pairing*: the cover
+ * and the page must share a curve per direction, or they start together and
+ * land apart.
+ */
+const FLIGHT_IN_MS = 420
+const FLIGHT_OUT_MS = 460
+const EASE_IN = 'var(--ease-out)'
+const EASE_OUT = 'var(--ease-sharp)'
+
+/** `translateY` of a possibly-transformed element, in px. */
+function translateYOf(el: HTMLElement): number {
+  const matrix = getComputedStyle(el).transform
+  if (!matrix || matrix === 'none') return 0
+  return new DOMMatrixReadOnly(matrix).m42
+}
 
 /**
- * Fly the artwork up from the toolbar thumbnail into place.
+ * The artwork's box in viewport coordinates, with the sheet's slide taken out.
  *
- * ## Why a FLIP rather than a plain slide
+ * `getBoundingClientRect()` reports where the cover *is*, which while the page
+ * is rising is somewhere on its way to where the cover *belongs*. The page is
+ * only ever translated, so subtracting its `translateY` gives the layout box
+ * exactly — the alternative (walking `offsetParent` and summing `offsetLeft`)
+ * inherits every border and margin between here and there.
  *
- * The playing view opening is a full-screen overlay sliding up, so the artwork
- * would arrive already in its final position and merely be carried along. What
- * the request asks for is the cover *travelling* — starting as the small
- * thumbnail in the bottom bar and growing into the large centred square, which
- * is the visual thread between the two surfaces.
- *
- * That is a FLIP: measure the thumbnail's box, apply the inverse transform
- * (translate + scale) to the artwork, then release it on the next frame so the
- * transition animates to the identity transform. Doing it by animating
- * width/height would relayout on every frame; a transform stays on the
- * compositor.
- *
- * Restraint: the animation is skipped when `reduceMotion` is on, and when no
- * origin element exists (the toolbar is not always rendered).
+ * This is what lets both endpoints be known before the first frame moves.
  */
-function playArtworkFlight(): void {
-  const target = artwork.value
-  const origin = document.querySelector<HTMLElement>('.mini-art')
-  if (!target || !origin || library.settings.reduceMotion) return
-
-  const from = origin.getBoundingClientRect()
-  const to = target.getBoundingClientRect()
-  // A zero-size origin means the toolbar was hidden when this ran; animating
-  // from nowhere produces a visible jump, so do nothing instead.
-  if (from.width < 4 || to.width < 4) return
-
-  const scale = from.width / to.width
-  const dx = (from.left + from.width / 2) - (to.left + to.width / 2)
-  const dy = (from.top + from.height / 2) - (to.top + to.height / 2)
-
-  target.style.transition = 'none'
-  target.style.transform = `translate(${dx}px, ${dy}px) scale(${scale})`
-  target.style.opacity = '0.35'
-  artworkFlying.value = true
-
-  requestAnimationFrame(() => {
-    // Release on the next frame so the browser has committed the start state;
-    // collapsing both into one frame makes the transition a no-op.
-    requestAnimationFrame(() => {
-      target.style.transition = ''
-      target.style.transform = ''
-      target.style.opacity = ''
-    })
-  })
-
-  // Clear the flag once the travel finishes so the resting styles apply again.
-  window.setTimeout(() => {
-    artworkFlying.value = false
-  }, 420)
+function artBox(): FlightBox | null {
+  const el = artwork.value
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  if (r.width < 4 || r.height < 4) return null
+  const sheet = el.closest<HTMLElement>('.np')
+  return {
+    x: r.left,
+    y: r.top - (sheet ? translateYOf(sheet) : 0),
+    w: r.width,
+    h: r.height,
+    radius: getComputedStyle(el).borderTopLeftRadius
+  }
 }
+
+/**
+ * The bottom bar's thumbnail.
+ *
+ * Only one exists: the playback page's own bar is rendered `bare`, and the
+ * thumbnail is not part of that variant — which is convenient, because the
+ * overlay's copy of the bar would be sliding along with the page.
+ */
+function miniBox(): FlightBox | null {
+  const el = document.querySelector<HTMLElement>('.mini-art')
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  // A zero-size box means the bar is not on screen; flying to or from nowhere is
+  // a visible jump, so no animation is the better answer.
+  if (r.width < 4 || r.height < 4) return null
+  return { x: r.left, y: r.top, w: r.width, h: r.height, radius: getComputedStyle(el).borderTopLeftRadius }
+}
+
+/**
+ * The one spec both directions share, or `null` for "do not fly".
+ *
+ * Skipped under `reduceMotion` (a cover stranded mid-flight is the exact failure
+ * that setting exists to prevent) and when the picture has not decoded yet: the
+ * layer would then carry an empty panel-coloured square across the window, which
+ * is worse than no animation. The bar's thumbnail is loaded from this very URL,
+ * so it is the honest signal that the bytes are already in memory.
+ */
+function flightSpec(from: FlightBox, to: FlightBox, ms: number, ease: string): FlightSpec | null {
+  const src = cover.value
+  if (!src || library.settings.reduceMotion) return null
+  const shown = document.querySelector<HTMLImageElement>('.mini-art img')
+  if (!shown?.complete || !shown.naturalWidth) return null
+  return { from, to, src, ms, ease }
+}
+
+/**
+ * Fly the cover up from the toolbar thumbnail as the page rises.
+ *
+ * A FLIP rather than a size animation: the box is placed at its destination and
+ * transformed back to the start, so the compositor interpolates a transform and
+ * nothing relayouts per frame. The radius interpolates with it (6px → 14px, or
+ * `50%` all the way under circle-cover, which is why the two ends are measured
+ * rather than written down) — that repaints but never relayouts. A curved path is
+ * deliberately not attempted: one transform transition is a straight line, and
+ * splitting the trip in two to fake an arc doubles the state machine for a
+ * difference nobody can see at 400 ms.
+ */
+async function playArtworkFlight(): Promise<void> {
+  const mini = miniBox()
+  const art = artBox()
+  if (!mini || !art) return
+  const spec = flightSpec(mini, art, FLIGHT_IN_MS, EASE_IN)
+  if (!spec) return
+  artworkFlying.value = true
+  await flyCover(spec)
+  // Same frame as the layer stepping out: see `cover-flight.ts`.
+  artworkFlying.value = false
+}
+
+/**
+ * Send the cover back down to the toolbar *while* the page slides out.
+ *
+ * Not awaited. The layer lives outside the sliding sheet, so the two motions no
+ * longer compose and the destination does not run away — which is the whole
+ * reason the layer exists. Fire-and-forget is safe by construction: the worst it
+ * can do is finish one frame after this view unmounts, and the promise resolves
+ * on `transitionend` rather than on a guessed timer.
+ */
+function playArtworkFlightBack(): void {
+  const mini = miniBox()
+  const art = artBox()
+  if (!mini || !art) return
+  const spec = flightSpec(art, mini, FLIGHT_OUT_MS, EASE_OUT)
+  if (!spec) return
+  artworkFlying.value = true
+  void flyCover(spec)
+}
+
+defineExpose({ playArtworkFlightBack })
 </script>
 
 <template>
@@ -419,7 +538,8 @@ function playArtworkFlight(): void {
           ref="artwork"
           @contextmenu="player.currentTrack && ui.openMenu($event, trackActions(player.currentTrack))"
           class="np__art"
-          :class="{ 'is-spinning': player.playing, 'is-flying': artworkFlying, 'has-reflection': !!cover }"
+          :class="{ 'is-spinning': player.playing, 'has-reflection': !!cover }"
+          :style="artworkFlying ? { visibility: 'hidden' } : undefined"
         >
           <img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer" />
           <svg v-else width="72" height="72" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -472,7 +592,7 @@ function playArtworkFlight(): void {
             @click="seekToLine(index)"
           >
             <span class="np__line-text">{{ line.text || '♪' }}</span>
-            <span v-if="library.settings.lyricRomanization && line.romanization" class="np__line-translation">{{ line.romanization }}</span>
+            <span v-if="showRomanization && line.romanization" class="np__line-translation">{{ line.romanization }}</span>
             <span v-if="showTranslation && line.translation" class="np__line-translation">
               {{ line.translation }}
             </span>
@@ -509,13 +629,6 @@ function playArtworkFlight(): void {
       </template>
     </PlayerBar>
 
-    <div v-if="ui.playbackPanel" class="np-panel-layer" @click.self="ui.playbackPanel = null" @keydown.esc.stop="ui.playbackPanel = null">
-      <aside class="np-panel" :aria-label="ui.playbackPanel === 'eq' ? 'EQ 均衡器' : '当前播放列表'">
-        <header><div><h2>{{ ui.playbackPanel === 'eq' ? 'EQ 均衡器' : '播放列表' }}</h2><small v-if="ui.playbackPanel === 'queue'">{{ player.queue.length }} 首歌曲 · 双击切换播放</small></div><button class="icon-btn" aria-label="关闭播放面板" @click="ui.playbackPanel = null"><AppIcon name="close" :size="19"/></button></header>
-        <EqualizerPanel v-if="ui.playbackPanel === 'eq'"/>
-        <TrackList v-else :tracks="player.queue" :extra-actions="track => [{ label: '从播放列表移除', icon: 'trash', action: () => player.removeFromQueue(track.id) }]" @play="(_, index) => player.playTrackAt(index)" empty-text="播放列表是空的"/>
-      </aside>
-    </div>
     <TagMatchDialog
       v-if="showTagMatch && player.currentTrack && isLocalTrack(player.currentTrack)"
       :track="player.currentTrack"
@@ -532,38 +645,48 @@ function playArtworkFlight(): void {
     />
 
     <!--
-      Multi-source lyric picker.
+      Online lyric picker.
 
       A metadata match is a guess: several platforms spell the same song
       differently and the top score is not reliably the right recording. Rather
-      than silently showing one platform's guess, the alternatives are listed
-      with their confidence, and the choice is written as a sidecar so it then
-      outranks both the embedded tag and any future lookup.
+      than silently showing one platform's guess, the alternatives are listed with
+      their confidence. Choosing one shows it and parks it in 待写入 — it becomes
+      the user's file only through 「导出歌词」 or 全部写入.
+
+      The head is drawn while the lookup is still running because it costs several
+      round trips, and a panel that shows an empty frame for two seconds reads as
+      a failure rather than as work in progress.
     -->
-    <div v-if="lyricChoices.length > 0" class="np__picker" role="dialog" aria-label="选择歌词来源">
+    <div v-if="pickingLyric || lyricChoices.length > 0" class="np__picker" role="dialog" aria-label="选择匹配到的歌词">
       <div class="np__picker-card">
         <header class="np__picker-head">
-          <strong>选择歌词来源</strong>
-          <button class="icon-btn" type="button" aria-label="关闭" @click="lyricChoices = []">
+          <strong>选择匹配到的歌词</strong>
+          <button class="icon-btn" type="button" aria-label="关闭" @click="closeLyricPicker">
             <AppIcon name="close" :size="16" />
           </button>
         </header>
-        <p class="np__picker-note">匹配结果是按曲名与艺术家推算的，请选择歌词内容正确的一项。</p>
-        <ul class="np__picker-list">
-          <li v-for="choice in lyricChoices" :key="choice.id">
-            <button class="np__picker-item" type="button" @click="applyLyricChoice(choice)">
-              <span class="np__picker-title">
-                {{ choice.title }}
-                <em v-if="choice.synchronized" class="np__picker-badge">逐行</em>
-              </span>
-              <span class="np__picker-meta">
-                {{ choice.artist }}<template v-if="choice.album"> · {{ choice.album }}</template>
-                · {{ choice.source.toUpperCase() }} · 匹配度 {{ Math.round(choice.score * 100) }}%
-              </span>
-              <span class="np__picker-preview">{{ choice.lyric.split(/\r?\n/).filter(l => l.trim())[0] ?? '' }}</span>
-            </button>
-          </li>
-        </ul>
+        <p v-if="pickingLyric" class="np__picker-note"><span class="spinner" /> 正在按曲名与艺术家匹配…</p>
+        <template v-else>
+          <p class="np__picker-note">匹配结果是按曲名与艺术家推算的，请选择歌词内容正确的一项。</p>
+          <ul class="np__picker-list">
+            <li v-for="(choice, index) in lyricChoices" :key="choice.id">
+              <button class="np__picker-item" type="button" @click="applyLyricChoice(choice)">
+                <span class="np__picker-title">
+                  {{ choice.title }}
+                  <!-- Sorted by score on the way in, so this first row is the one
+                       the old 「在线搜索歌词」 used to take without asking. -->
+                  <em v-if="index === 0" class="np__picker-badge is-best">最佳匹配</em>
+                  <em v-if="choice.synchronized" class="np__picker-badge">逐行</em>
+                </span>
+                <span class="np__picker-meta">
+                  {{ choice.artist }}<template v-if="choice.album"> · {{ choice.album }}</template>
+                  · {{ choice.source.toUpperCase() }} · 匹配度 {{ Math.round(choice.score * 100) }}%
+                </span>
+                <span class="np__picker-preview">{{ choice.lyric.split(/\r?\n/).filter(l => l.trim())[0] ?? '' }}</span>
+              </button>
+            </li>
+          </ul>
+        </template>
       </div>
     </div>
   </div>
@@ -746,19 +869,12 @@ function playArtworkFlight(): void {
 }
 
 /*
- * Artwork flight from the toolbar thumbnail.
- *
- * The transform is set inline by `playArtworkFlight()` (it is a FLIP, so the
- * start values are only known at runtime); this rule supplies the easing and
- * keeps the cover above the sliding overlay while it travels.
+ * The cover used to carry `is-flying` / `is-flying-out` transition rules here.
+ * It no longer travels at all: the trip belongs to `CoverFlightLayer`, which is
+ * outside this sheet so that the slide and the flight cannot compose into each
+ * other. While that layer is carrying the picture, `.np__art` is `visibility:
+ * hidden` — see `playArtworkFlight()`.
  */
-.np__art.is-flying {
-  transition:
-    transform var(--dur-slow) var(--ease-out),
-    opacity var(--dur-slow) var(--ease-out);
-  will-change: transform;
-  z-index: 2;
-}
 
 /*
  * The spectrum band. Its bottom edge is the progress line, so the silhouette
@@ -980,13 +1096,15 @@ code {
 .np__picker-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none}
 .np__picker-head strong{font-size:17px;font-weight:550}
 .np__picker-note{margin:10px 0 16px;font-size:11px;line-height:1.7;color:var(--text-secondary);flex:none}
+/* `.spinner` has no display of its own, so inside a paragraph it needs one. */
+.np__picker-note .spinner{display:inline-block;width:12px;height:12px;margin-right:7px;vertical-align:-2px}
 .np__picker-list{list-style:none;margin:0;padding:0;overflow:auto;display:flex;flex-direction:column;gap:6px}
 .np__picker-item{width:100%;display:flex;flex-direction:column;gap:5px;padding:13px 15px;border:1px solid #ffffff14;border-radius:8px;background:#ffffff0a;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 .np__picker-item:hover{background:#ffffff17;border-color:#ffffff2e}
 .np__picker-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500}
 .np__picker-badge{font-style:normal;font-size:10px;padding:1px 6px;border-radius:4px;background:var(--accent);color:#fff}
+/* Outlined, so it stays readable next to the solid 逐行 marker on the same row. */
+.np__picker-badge.is-best{background:transparent;border:1px solid var(--accent);color:var(--accent)}
 .np__picker-meta{font-size:11px;color:var(--text-secondary)}
 .np__picker-preview{font-size:11px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.np-panel-layer{position:absolute;inset:55px 0 0;z-index:4;background:#0002}.np-panel{position:absolute;right:18px;top:8px;bottom:20px;width:min(540px,88vw);display:flex;flex-direction:column;padding:24px;background:#22252df5;border:1px solid #ffffff1a;box-shadow:0 20px 60px #0006;backdrop-filter:blur(30px);border-radius:12px;overflow:auto}.np-panel>header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:26px;flex:none}.np-panel h2{margin:0;font-size:20px;font-weight:550}.np-panel small{display:block;margin-top:9px;font-size:11px;color:var(--text-secondary)}.np-panel :deep(.tracklist){height:auto;min-height:0;flex:1}.np-panel :deep(.track-head),.np-panel :deep(.track-row){grid-template-columns:24px minmax(0,1fr) 0px 38px 25px;gap:7px;padding-left:5px;padding-right:5px}.np-panel :deep(.track-album),.np-panel :deep(.track-head>span:nth-child(3)){visibility:hidden}.np-panel :deep(.track-label strong){font-size:12px}.np-panel :deep(.track-identity){gap:10px}.np-panel :deep(.track-cover){width:36px;height:36px}.np-panel :deep(.selection-toolbar){gap:8px;font-size:10px}
-@media(max-height:700px){.np-panel{padding:20px}.np-panel>header{margin-bottom:18px}}
 </style>

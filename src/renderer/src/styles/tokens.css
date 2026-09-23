@@ -83,9 +83,31 @@
   /* ---- motion ---- */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  /*
+   * Material's "sharp" curve — for an element that leaves and may come back.
+   * An exit on a decelerating curve spends most of its distance in the first
+   * tenth of its time, so the surface is gone before the eye catches it and the
+   * rest of the duration animates something already off screen; accelerating
+   * instead lets it start slowly and leave decisively.
+   */
+  --ease-sharp: cubic-bezier(0.4, 0, 0.6, 1);
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --dur-slow: 320ms;
+  /*
+   * Full-screen surfaces (the playback page) travel too far for `--dur-slow`:
+   * measured against the reference player, a 100 % slide reads as travelling at
+   * 420 ms and as teleporting below ~350 ms. Its own token because `--dur-slow`
+   * carries a hundred smaller transitions that must not stretch with it.
+   */
+  --dur-overlay: 420ms;
+  /*
+   * Leaving gets its own number rather than sharing `--dur-overlay`: the exit
+   * curve spends less of its distance early, and the same 420 ms under
+   * `--ease-sharp` read as "too quick" next to the reference. Mirrored in
+   * `FLIGHT_OUT_MS`, which has to land on the thumbnail when the sheet does.
+   */
+  --dur-overlay-out: 460ms;
 
   /* ---- elevation ---- */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);

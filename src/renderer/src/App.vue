@@ -10,6 +10,7 @@
 import { toMediaUrl } from '@shared/media-url'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 import { activeLines } from '@shared/desktop-lyric'
+import { coverDataUrl } from './composables/cover-data-url'
 import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContextMenu from './components/ContextMenu.vue'
@@ -19,6 +20,8 @@ import { useToastStore } from './stores/toast'
 import TitleBar from './components/TitleBar.vue'
 import SideBar from './components/SideBar.vue'
 import PlayerBar from './components/PlayerBar.vue'
+import PlaybackPanel from './components/PlaybackPanel.vue'
+import CoverFlightLayer from './components/CoverFlightLayer.vue'
 import NowPlayingView from './views/NowPlayingView.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useLibraryStore } from './stores/library'
@@ -37,7 +40,39 @@ const ui = useUiStore()
 const nowPlayingOpen = toRef(ui, 'nowPlaying')
 /** The routed views render here, which is the whole scope scroll memory covers. */
 const contentEl = ref<HTMLElement | null>(null)
-watch(nowPlayingOpen, open => { if (!open) ui.playbackPanel = null })
+/** The playback page, so closing it can send the cover back down first. */
+const nowPlayingView = ref<{ playArtworkFlightBack: () => void } | null>(null)
+
+/**
+ * Put the playback page away, cover and all.
+ *
+ * Every gesture that closes it — the 收起 chevron, Escape, the title bar's
+ * toggle — comes through here. Anything that sets `ui.nowPlaying` directly
+ * skips the animation, which is right for a navigation (going to 播放界面设置 is
+ * not a gesture you watch) and wrong for these three.
+ *
+ * The two halves run **at the same time** and share the page's 420 ms: the
+ * cover's return trip is handed to `CoverFlightLayer`, which is teleported to
+ * `body` and therefore not carried down by the sheet it is leaving. Awaiting the
+ * flight instead — which is what this did while the cover lived inside the
+ * overlay — costs two beats (420 + 420 ms measured) for no gain, because the
+ * layer's endpoint is known before either motion starts.
+ *
+ * The panel no longer closes with the page. It used to live inside the overlay,
+ * so it had no choice; now it is a window-level surface, and a panel you opened
+ * from the main page would otherwise vanish because you happened to look at the
+ * artwork.
+ */
+function closeNowPlaying(): void {
+  if (!nowPlayingOpen.value) return
+  nowPlayingView.value?.playArtworkFlightBack()
+  nowPlayingOpen.value = false
+}
+
+function toggleNowPlaying(): void {
+  if (nowPlayingOpen.value) closeNowPlaying()
+  else nowPlayingOpen.value = true
+}
 
 /** Apply the persisted theme and keep it in sync with the settings store. */
 function applyTheme(theme: string): void {
@@ -125,6 +160,8 @@ systemTheme.addEventListener('change', onSystemTheme)
 let offTransportCommand: (() => void) | undefined
 /** The lyric overlay's menu and drag; unsubscribed alongside the tray's. */
 let offDesktopLyricCommand: (() => void) | undefined
+/** Main asking us to put a file down so it can be rewritten with new tags. */
+let offReleaseFile: (() => void) | undefined
 
 /* ---------------------------------------------------------------- *
  * Desktop lyrics
@@ -133,7 +170,31 @@ let offDesktopLyricCommand: (() => void) | undefined
  * should show is pushed to it here — from the same state the now-playing page
  * already renders, rather than a second copy of the lyric logic that could
  * drift. Nothing is sent while the feature is off.
+ *
+ * The payload also carries the karaoke timing, and the overlay animates the wipe
+ * itself between pushes. Pushing per frame would mean crossing a process boundary
+ * sixty times a second to move a clip rectangle; instead each push leaves an
+ * anchor (`elapsedMs`, `spanMs`) and the strip advances it on its own monotonic
+ * clock, while this side re-anchors twice a second so a seek or a slow drift
+ * cannot compound. `playing` rides along because the wipe must stop when the audio
+ * does, and the overlay has no other way to know.
  * ---------------------------------------------------------------- */
+const lyricClock = computed(() => Math.floor(player.currentTime * 2))
+
+/** The cover as bytes, re-encoded only when the track changes — see the helper. */
+const lyricCover = ref('')
+watch(
+  () => player.currentTrack,
+  track => {
+    const wanted = track
+    void coverDataUrl(track).then(url => {
+      // A fast track change must not let the older decode win the picture.
+      if (player.currentTrack === wanted) lyricCover.value = url
+    })
+  },
+  { immediate: true }
+)
+
 const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
   if (!library.settings.desktopLyric) return null
   // Depend on the counter the theme watcher bumps when an accent lands, then
@@ -141,9 +202,25 @@ const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
   // so a strip that only recomputed on the next lyric line could keep showing
   // the previous colour indefinitely — paused between tracks, for instance.
   void accentApplied.value
+  // The 2 Hz tick this depends on is what makes the wipe self-correcting.
+  void lyricClock.value
   const accent =
     getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffd166'
-  const { line, translation, romanization } = activeLines(player.lyrics?.lines ?? [], player.activeLyricIndex)
+  const lines = player.lyrics?.lines ?? []
+  const index = player.activeLyricIndex
+  const current = index >= 0 ? lines[index] : undefined
+  const { line, translation, romanization } = activeLines(lines, index)
+  const words = current?.words ?? []
+  const lastWord = words[words.length - 1]
+  // A line lasts until the next one starts; the last line falls back to the
+  // word timing, and a plain LRC with no next line gets a sane default rather
+  // than an infinite span (which would freeze the wipe at wherever it started).
+  const spanMs = current
+    ? (lines[index + 1] ? lines[index + 1].time - current.time : lastWord ? lastWord.offset + lastWord.duration : 5000)
+    : 0
+  const elapsedMs = current
+    ? Math.min(Math.max(player.currentTime * 1000 - current.time, 0), spanMs)
+    : 0
   return {
     line,
     translation,
@@ -152,8 +229,14 @@ const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
     artist: player.currentTrack?.singer ?? '',
     fontSize: library.settings.desktopLyricFontSize,
     showTranslation: library.settings.lyricTranslation,
+    showRomanization: library.settings.lyricRomanization,
     locked: library.settings.desktopLyricLocked,
-    accent
+    accent,
+    cover: lyricCover.value,
+    playing: player.playing,
+    words,
+    elapsedMs,
+    spanMs
   }
 })
 
@@ -184,8 +267,16 @@ function onDesktopLyricCommand(command: DesktopLyricCommand): void {
     case 'close': void library.updateSettings({ desktopLyric: false }); break
     case 'toggle-lock': void library.updateSettings({ desktopLyricLocked: !library.settings.desktopLyricLocked }); break
     case 'toggle-translation': void library.updateSettings({ lyricTranslation: !library.settings.lyricTranslation }); break
+    case 'toggle-romanization': void library.updateSettings({ lyricRomanization: !library.settings.lyricRomanization }); break
     case 'set-font': void library.updateSettings({ desktopLyricFontSize: command.size }); break
     case 'moved': void library.updateSettings({ desktopLyricPosition: { x: command.x, y: command.y } }); break
+    // The card's transport. Not a settings write: playback belongs to the player,
+    // and this is the same three calls the play bar and the taskbar buttons make.
+    case 'transport':
+      if (command.action === 'toggle') void player.toggle()
+      else if (command.action === 'previous') void player.previous()
+      else void player.next()
+      break
   }
 }
 
@@ -275,6 +366,7 @@ onUnmounted(() => {
   systemTheme.removeEventListener('change', onSystemTheme)
   offTransportCommand?.()
   offDesktopLyricCommand?.()
+  offReleaseFile?.()
 })
 
 
@@ -296,11 +388,23 @@ watch(
  * background. Pushing on state change (not just at startup) is the fix, and it
  * keeps working while the window is hidden in the tray, which is exactly when
  * these buttons matter most.
+ *
+ * Favouriting is on the same push for the same reason: the heart glyph is the
+ * track's state, so a favourite flipped anywhere in the app — this page, the
+ * context menu, the taskbar's own heart — has to reach Windows or the button
+ * goes stale in exactly the way the play glyph used to.
  */
 watch(
-  () => [Boolean(player.currentTrack), player.playing] as const,
-  ([hasTrack, playing]) => {
-    void window.jj.shell?.setTaskbarState({ hasTrack, playing }).catch(() => undefined)
+  () =>
+    [
+      Boolean(player.currentTrack),
+      player.playing,
+      // Same test the context menu uses, so the two surfaces never disagree
+      // about whether the current track is in 我喜欢的.
+      library.favorites.some((item) => item.id === player.currentTrack?.id)
+    ] as const,
+  ([hasTrack, playing, favorite]) => {
+    void window.jj.shell?.setTaskbarState({ hasTrack, playing, favorite }).catch(() => undefined)
   },
   { immediate: true }
 )
@@ -333,8 +437,35 @@ onMounted(async () => {
     if (command === 'toggle') void player.toggle()
     else if (command === 'previous') void player.previous()
     else if (command === 'next') void player.next()
+    else if (command === 'favorite' && player.currentTrack) {
+      /*
+       * The taskbar's heart, word for word what the play bar's heart does. No
+       * toast: this click often lands with the window hidden in the tray, and
+       * the glyph redraws filled or hollow a moment later anyway — the state
+       * change is the feedback.
+       */
+      void library.toggleFavorite(player.currentTrack)
+    }
   })
 
+  /*
+   * Main is about to replace this file with a re-tagged copy, and on Windows a
+   * file we still have open cannot be renamed over — the app's own audio stream
+   * was the thing blocking the write the user asked for. Only the loaded track is
+   * stopped: writing another song's tags must not interrupt the music.
+   *
+   * Compared case- and separator-insensitively because the library stores what the
+   * scan found and the writer resolves what the caller passed; on Windows those
+   * are the same file written two ways.
+   */
+  offReleaseFile = window.jj.shell?.onReleaseFile(path => {
+    const current = player.currentTrack
+    const same = (one: string): string => one.replace(/[\\/]/g, '\\').toLowerCase()
+    if (current && 'path' in current && same(current.path) === same(path)) player.stop()
+  }) ?? undefined
+  // Recent queues belong to the panel, not to playback: they are restored even
+  // when the OS asked for a specific track, and restoring one never starts audio.
+  player.restoreQueueHistory(library.settings.queueHistory)
   // A track opened from the OS should start playing without extra clicks.
   const openId = route.query['play']
   if (typeof openId === 'string') {
@@ -441,9 +572,9 @@ function onKeydown(event: KeyboardEvent): void {
     player.toggleMute()
     return
   }
-  if (event.key === 'Escape' && ui.playbackPanel && nowPlayingOpen.value) { ui.playbackPanel = null; return }
+  if (event.key === 'Escape' && ui.playbackPanel) { ui.playbackPanel = null; return }
   if (event.key === 'Escape' && nowPlayingOpen.value) {
-    nowPlayingOpen.value = false
+    closeNowPlaying()
     return
   }
   if (event.key === 'f' && mod) {
@@ -473,7 +604,7 @@ const contentKey = computed(() => route.path)
     @dragleave="onDragLeave"
     @drop.prevent="onDrop"
   >
-    <TitleBar @toggle-now-playing="nowPlayingOpen = !nowPlayingOpen" />
+    <TitleBar @toggle-now-playing="toggleNowPlaying" />
 
     <div class="shell__body">
       <SideBar @open-now-playing="nowPlayingOpen = true" />
@@ -490,7 +621,7 @@ const contentKey = computed(() => route.path)
     <PlayerBar @open-now-playing="nowPlayingOpen = true" />
 
     <Transition name="slide-up">
-      <NowPlayingView v-if="nowPlayingOpen" @close="nowPlayingOpen = false" />
+      <NowPlayingView v-if="nowPlayingOpen" ref="nowPlayingView" @close="closeNowPlaying" />
     </Transition>
 
     <!-- Drop overlay: covers the window so the drop target is unambiguous. -->
@@ -503,6 +634,13 @@ const contentKey = computed(() => route.path)
 
     <ContextMenu />
     <DialogHost />
+    <PlaybackPanel />
+    <!--
+      Mounts once here rather than inside the playback page: the cover has to
+      travel outside the sheet that slides, or the two transforms add up. The
+      element itself teleports to `body`.
+    -->
+    <CoverFlightLayer />
     <ToastHost />
   </div>
 </template>
@@ -576,16 +714,29 @@ const contentKey = computed(() => route.path)
   opacity: 0;
 }
 
-.slide-up-enter-active,
+.slide-up-enter-active {
+  /*
+   * Transform only, at the overlay's own duration. The fade that used to ride
+   * along is gone on purpose: the reference player's page is opaque the whole
+   * way up, so anything below it is *covered* rather than cross-faded, and a
+   * semi-transparent sheet lets the track list flash through for the first
+   * frames of the trip.
+   */
+  transition: transform var(--dur-overlay) var(--ease-out);
+}
+
+/*
+ * Leaving is the time-reverse of arriving, which is an accelerating curve — not
+ * the same decelerate the enter uses. On `--ease-out` the sheet had covered
+ * ~63 % of the screen in its first 60 ms, so closing read as the page vanishing
+ * (and the cover's landing was already over by the time you looked for it).
+ */
 .slide-up-leave-active {
-  transition:
-    transform var(--dur-slow) var(--ease-out),
-    opacity var(--dur-slow) var(--ease-out);
+  transition: transform var(--dur-overlay-out) var(--ease-sharp);
 }
 
 .slide-up-enter-from,
 .slide-up-leave-to {
   transform: translateY(100%);
-  opacity: 0;
 }
 </style>

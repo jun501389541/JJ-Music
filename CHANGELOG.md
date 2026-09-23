@@ -1,6 +1,13 @@
 # 更新日志
 
-## 未发布
+## 0.2.0 — 2026-09-24
+
+推送前跑了一次全局安全审查（手工通读，31 个提交），15 条里修了 13 条，
+剩下几条明确记在下面的已知边界里。**这一版的主要工作是"别再说一件自己
+没做的事"** —— 审查发现的多数条目都不是"少了一道门"，而是某种检查存在
+却什么都没检查：名单没传下去、断言只测参数传了、`npm audit` 报 0 而运行
+时带着 19 条公告、成品 exe 从继承来的环境里开调试口。所以修复的重点
+除了补门，还有补上"怎么证明这扇门关着"。
 
 ### 功能
 
@@ -254,6 +261,39 @@
 
 ### 修复
 
+- **推送前的一次全局安全审查：15 条里修了 13 条，剩下 2 条明确写在下面**。
+  - **审查方式**：手工通读 `origin/main`（`c5edf00`）到当时的 `HEAD`（`808a5e1`）之间 31 个提交的全部改动，加针对性复现。**这次没有被任何自动化安全工具扫过** —— `npm audit` 与这类通读回答的不是同一个问题（见下面 Electron 那条）。
+  - **本轮新代码引入的只有两条，都已修**：① 艺术家头像抓取走的是不钉来源域名的 `safeFetchBytes`（与下面 U 轮那条封面抓取是同一个洞，抓回来的字节写进 `artist-images.json`）；② 头像记录表无条数上限。其余在 `origin/main` 里就存在，逐条用 `git show origin/main:<path>` 核过归属。
+- **艺术家头像抓取按平台钉住来源域名，并且记录表封顶**（新代码引入的两条）。
+  - **同一个洞的第三个出口**：`artist-images.ts` 把平台给的 `picUrl` 交给 `safeFetchBytes` 时没传 `allowedHosts`，而守卫本身只挡私网/回环/元数据地址、不挡任意公网主机。修法与 `cover-fetch.ts` 完全一致 —— 复用同一个 `COVER_HOSTS`（不另建一份名单，两处各写一份迟早会漂），并且测试里那条桩**压根不检查第二个参数**，所以"名单传下去了"这件事必须由断言自己证明。
+  - **顺带堵住的是"名单不全会静默放行"**：没有条目的 source 直接不抓，而不是退回不钉的那种抓法。代价只有这一路没有头像，音频与歌词都不受影响。
+  - 记录表加 `MAX_ENTRIES = 4000` 并按最近写入淘汰 —— 对照的是 `pending-assets.ts` 已有的 `MAX_ENTRIES = 500`，这类表原来只有它一处设了上限。
+- **URL 守卫的尾点绕过**（预存在，但本轮让它变得可达）。
+  - `music.126.net.` 这类以点结尾的主机名进 `isHostAllowed` 时比不中名单，于是**名单形同虚设**；同一个洞也在黑名单那一侧（`localhost.` 被当成公网主机放行）。修法是新增一个 `normalizedHost()` 归一尾点，两条路都走它。
+  - 三条断言是纯新增，既有一条都没改：尾点不绕黑名单、尾点不绕白名单（`isHostAllowed('migu.cn.', ['migu.cn']) === true` 而 `'evil-migu.cn.' === false` —— 后者保证归一化没有变成宽松匹配）、重定向每跳都不放行尾点。
+- **下载嵌封面按平台钉住域名，钉不了的平台宁可不抓**（同一个洞的第四个出口）。
+  - **音频地址和封面地址需要的保证不一样**，所以钉不能焊进注入的那个函数：音频地址合法地活在音源挑的中继上，最多只能要求它是公开的 http(s)；封面则来自每个平台一小撮已知图床。知道 `track.source` 的是下载器，于是由它决定钉什么，注入的 `fetch` 只负责把钉转交给守卫 —— **而且必须转交到守卫手里**，因为里面的重定向循环每一跳都要拿它重新校验；只在第一个 URL 上查一次的话，`302 Location: http://127.0.0.1:1887/` 可以直接走过去。
+  - 新增 `guardedFetch`：`fetch` 收到多出来的 `allowedHosts` 会**一声不响地丢掉**（实测：留在 `init` 里请求就真的不钉，且没有任何地方报错，因为 `init` 只被展开）。`init.signal` 故意留在 `init` 里不往上提 —— 那正是守卫读取消信号的位置，提到顶层会把每一次已取消的下载悄悄变回活请求。
+- **打包后的成品 exe：调试面两条路都收回来了**（预存在）。
+  - **`JJ_DEBUG_PORT` 原来在成品里没有 `isDev` 门**：带这个环境变量启动 `release/win-unpacked/JJ Music.exe` 实测答 CDP 200。现在要求 `isDev` **或**显式 `JJ_ALLOW_DEBUG_PORT=1`；探针改设后者，所以打包探针照旧能跑。
+  - **argv 那条只能靠 `app.commandLine.removeSwitch` 收回**：Chromium 自己解析 `--remote-debugging-port`，早于我们任何代码，所以这不是"没门"而是"必须在 `app.ready` 之前把它拿掉"。无条件删会坏 harness，所以它是"应用决定要用的那个端口"的 `else`。原来那段注释写着「Electron 对 argv 没有 fuse」——**F4 落地之后这句已经不成立**，改成两条路各修各的。
+  - **补充 `electronFuses`**：`RunAsNode` 保持启用（`source-engine.ts` 用 `fork()` 起音源宿主，@electron/fuses 文档明说禁用会「also breaks `process.fork()` in the main process」），关掉 `EnableNodeOptionsEnvironmentVariable` 与 `EnableNodeCliInspectArguments`，打开 asar 完整性校验与 `OnlyLoadAppFromAsar`。升级前实测这三个开关都是 ENABLED 的默认值，`--inspect=9444` 能拿到活 inspector。
+  - **怎么证明"修好了"**：这三条共同形状是**「本该没有回答」**，而一个根本没启动的构建同样不回答。所以新增 `tools/probe/check-packed-surface.mjs`，四个场景里第四个是控制组（`JJ_DEBUG_PORT` 配上 `JJ_ALLOW_DEBUG_PORT=1` 必须答得上来），否则前三条的"静默"什么也没证明。它自己踩的两个坑写在脚本里：端口向 OS 申请而不是写死（写死那次报的 `bind() … (0x271D)` 读起来像"应用起不来"，其实只是端口被占），收尾用 `taskkill /T /F`（`child.kill()` 只杀主进程，留下的渲染/GPU 子进程会活到下一个场景里把它的 profile 一起写脏）。
+- **Electron 38.8.6 → 42.11.8**（审查发现 `npm audit` 的那个 0 是假的）。
+  - **Electron 把 Chromium 和 Node 都编进了二进制，公告从来不走 npm 的依赖树**，所以 `npm audit --omit=dev` 报 0 条时运行时实际带着 19 条公告。升级后 `npm audit` 仍是 0 条 —— 那是同一件本来就看不见的事，所以这次的依据是公告面，不是 audit 输出。
+  - 升级后逐项实测：`typecheck` 通过、`npm test` **27/27 套通过**、`npm audit` 0 条、`test:e2e` 通过（末尾确认生产构建里测试钩子不可达：`E2E hook reachable in this build: NO (clean build)`）、`npm run pack` 通过且 `electronVersion=42.11.8`。fuse wire 读回确认五个开关都是期望值。⚠️ **本机 npm 的 `allowScripts` 策略会拦下 electron 的 install 脚本**，于是 `npm install` 之后二进制并不存在、`test:e2e` 先报 `electron binary not found` 再报 `ERROR: the test hook is reachable in the production build` —— 后一条读起来像钩子泄露，其实只是二进制没下载；补 `node node_modules/electron/install.js` 即可。
+- **损坏的配置文件不再被默认值静默覆盖**（预存在，数据完整性）。
+  - `parseJsonLoose` 分不清「文件不存在」和「文件被截断」，于是损坏的 `settings.json` / `playlists.json` / `library/index.json` 一律被当成空配置读进来，**接下来第一次写入就把用户原来的东西覆盖掉了**。新增 `readJsonFile`：ENOENT 返回 `undefined`，解析失败则把原文件改名成 `<path>.corrupt-<时间戳>` 留档并回报。先例是仓库自己的 —— `source-store.ts` 早就是把坏文件改名成 `.corrupt` 再返回空数组。
+  - 两个坑：`writeCover` 原来是非原子写，而**文件名本身就是摘要**，所以半个 JPEG 会被 `existsSync` 永远认定存在、且不可能有正确字节哈希到同一个名字 —— 改成原子写。渲染层拖入 `.lrc` 走的是唯一一条绕过允许表的歌词读（路径来自渲染层、扩展名检查是另一道门、文本随后写进曲库目录），改走 `allowedMediaPath`；真拖入仍然通过，因为曲库根或用户在对话框里选过的文件正是允许表持有的东西。
+  - 两条回归测试都是新增而不是改判据：写一个截断的 `settings.json` 进去，读出来必须是默认值、`.corrupt-*` 必须与原文件逐字节相同、随后 `update()` 读回新值且只留一个 `.corrupt-`；曲库索引同理（`getAll()` 为空、`index.json.corrupt-*` 逐字节相同）。
+- **桌面歌词浮窗补 `setWindowOpenHandler` / `will-navigate`**：这个窗口此前没有任何"不许导航走"的约束，与另外两个窗口不一致。
+- **歌词写入加 1 MiB 上限**：三条渲染层可控的歌词写入通道（`lyricSave` / `lyricApplyCandidate` / `lyricExportFile`）都没有大小限制，而 `tag-writer.ts` 的 `unsynchronisedLyrics` 同样不管。上限取 1 MiB —— 刻意宽于上游 512 KiB × 3 段合并的可能值，只拦明显畸形的输入。
+- **`SHA256SUMS` 的版本过滤从子串改成 `-<版本>-`**：`'JJ-Music-0.1.10-Setup-x64.exe'.includes('0.1.1') === true`，所以打包时会把上一版的残留一起算进来。CI 的两个 action 同时改成 SHA 钉并加 `persist-credentials: false`。
+- **`README` 那句「默认从 GitHub Releases」改成照实描述**：`tools/package.mjs` 默认把二进制下载指向 npmmirror。**这一条只改了文档**，没有改默认值 —— 换镜像源是会影响每位用户下载速度的决定，不该夹在一次安全修复里做。
+- **两条"已记账、一直没修"的接口谎话**（按发版流程的要求在这次一并修掉，不是记进已知边界）。
+  - **kw / kg 搜索行的 `size` 传的是字面量 `1`**，于是下载子菜单显示成 `0.00 MB`。现在 `SizeHint` 多一个 `true` 表示「这一档存在、尺寸未知」，据此不再带 `size`；顺手把判据从 `!bytes || bytes <= 0` 改成 `!Number.isFinite(hint) || hint <= 0` —— 原来畸形字段会渲染成 `NaN MB`。既有断言一条没改：那条「byte sizes are reported as MB」查的是 QQ 的真字节，另一条「no formats still declares 128k」只查 `type`。
+  - **播放页那行显示的是请求档位而不是实际拿到的档位**（设置项默认 `flac24bit`，所以拿到的即使是 128k 也照样写 flac24bit）。新增 `resolvedQuality`，在 `playTrackAt` 过了 generation 检查之后落值，界面读它并回退请求值 —— 播放失败时不会留下上一次的档位。
+- **重新记一遍这次不修的**：产物未签名（`SHA256SUMS.txt` 与二进制同源，这是流程选择不是缺陷）；`relaxCorsForMedia` 定点注入 `Access-Control-Allow-Origin: *`（只在原本没有该响应头时、不设 `Allow-Credentials`，取舍写在 `index.ts` 的注释里）；守卫对 DNS 重绑定仍是"纵深防御、不是边界"，作者原话如此；`extract-zip@2.0.1` 被 audit 标 high 但只在开发机安装期跑、不进 asar。
 - **安全修复：抓封面按平台钉住来源域名**（推送前手工通读发现，不是工具扫描报的）。
   - **形状**：`fetchCoverBytes` 把 `picUrl` 交给 `safeFetchBytes` 时**没有传 `allowedHosts`** —— 而 `picUrl` 的主机对网易云/酷狗/咪咕是**远端响应决定的**（`search.ts:330` 直接给响应里的 `pic` 拼参数、`:525` 是响应给的模板、`:639` 咪咕那条 `cover` 是绝对 URL 时**原样透出**）。守卫本身只挡私网/回环/元数据地址，不挡"任意公网主机"。
   - **为什么这条要紧 / 哪些是我自己引入的**：`picUrl` 远端可控一直如此，但**在此之前它唯一的消费者是列表里那张 `<img>` 缩略图**；是 U 轮把它接到了「抓取 → 字节写进用户原始音频文件（或同名 sidecar）」的落盘通道上，同一份不可信输入换了个强得多的出口。另外 `matchApply` 的 `coverFrom` 是渲染层构造的对象，所以这条链还多一个入口。正是文档 A 节点名的第 2 类（同一份不可信输入的所有消费点，包括我自己新写的调用点）。

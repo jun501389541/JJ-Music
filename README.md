@@ -2,15 +2,15 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.1.7** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.2.0** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.7/JJ-Music-0.1.7-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.7/JJ-Music-0.1.7-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.1.7/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.2.0/JJ-Music-0.2.0-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.2.0/JJ-Music-0.2.0-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.2.0/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。更新前请先退出旧版；安装版和免安装版默认共用当前用户的配置。
 
@@ -63,8 +63,8 @@
 打包输出：
 
     release/
-      JJ-Music-0.1.7-Setup-x64.exe
-      JJ-Music-0.1.7-Portable-x64.zip
+      JJ-Music-0.2.0-Setup-x64.exe
+      JJ-Music-0.2.0-Portable-x64.zip
       SHA256SUMS.txt          # 由 npm run dist 生成，只列本次版本的两个文件
       win-unpacked/
 

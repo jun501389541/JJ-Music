@@ -142,7 +142,19 @@ const port = await new Promise((ok, no) => {
 const child = spawn(exe, [`--user-data-dir=${profile}`], {
   cwd: appDir,
   stdio: 'ignore',
-  env: { ...process.env, JJ_DEBUG_PORT: String(port), ELECTRON_RUN_AS_NODE: undefined }
+  /*
+   * This probe drives `release/win-unpacked`, a packaged build — and a packaged
+   * build ignores `JJ_DEBUG_PORT` unless `JJ_ALLOW_DEBUG_PORT=1` says the
+   * request is deliberate (see the note at that variable in `src/main/index.ts`).
+   * Without the second variable the app starts with no CDP port and this waits
+   * for a target that never appears.
+   */
+  env: {
+    ...process.env,
+    JJ_DEBUG_PORT: String(port),
+    JJ_ALLOW_DEBUG_PORT: '1',
+    ELECTRON_RUN_AS_NODE: undefined
+  }
 })
 child.on('error', (error) => { console.error('无法启动打包程序:', error.message); process.exit(1) })
 

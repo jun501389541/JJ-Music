@@ -49,8 +49,15 @@ const ACCEPTED_MIME: Record<string, string> = {
  * (`qs`, `qsvip`): their hosts are whatever a user-imported script returns, which is
  * precisely the set nobody can vouch for. Refusing is the honest answer, and it costs
  * only the cover — the text fields and the lyric still apply.
+ *
+ * Exported because this is the *only* place that knows which host belongs to which
+ * platform, and the two other callers that fetch a platform-supplied picture need
+ * the same answer: `library/artist-images.ts` (the portrait behind a search result)
+ * and `online/playlist-import.ts` (the imported playlist's own cover). Both take a
+ * URL out of a platform's JSON exactly as this file does, so leaving them to fetch
+ * it unpinned would make the hole this map closes reachable through either of them.
  */
-const COVER_HOSTS: Partial<Record<SourceId, string[]>> = {
+export const COVER_HOSTS: Partial<Record<SourceId, string[]>> = {
   tx: ['gtimg.cn'],
   wy: ['126.net'],
   kw: ['kuwo.cn'],

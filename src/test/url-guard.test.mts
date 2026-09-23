@@ -118,6 +118,46 @@ test('a public host outside the allow-list is refused', () => {
 })
 
 /*
+ * A rooted name — `localhost.` with a trailing dot — is the same host as
+ * `localhost`: it resolves there and reaches the same service. WHATWG URL keeps
+ * that dot, so every check below is written against a name that does not carry
+ * it, and reading `url.hostname` verbatim let both the private-address
+ * blocklist and the allow-list be walked around.
+ *
+ * The second case is the one that dictates the shape of the fix: Node's parser
+ * eats exactly *one* dot from a numeric host but keeps every dot on a name, so
+ * stripping a single trailing dot still leaves `localhost..` unmatched. The
+ * strip has to loop.
+ */
+test('a trailing dot does not walk around the blocklist', () => {
+  blocked('http://localhost.:1887/x')
+  blocked('http://localhost../x')
+  blocked('http://metadata.google.internal./x')
+  blocked('http://foo.internal./x')
+  blocked('http://printer.local./x')
+  // Numbers are normalised by the parser first, so this was already refused —
+  // kept so that a future change to the strip cannot silently reopen it.
+  blocked('http://127.0.0.1.:1887/x')
+})
+
+test('a trailing dot does not walk around the allow-list', () => {
+  assert.equal(isHostAllowed('migu.cn.', ['migu.cn']), true)
+  assert.equal(isHostAllowed('migu.cn..', ['migu.cn']), true)
+  assert.equal(isHostAllowed('d.musicapp.migu.cn.', ['migu.cn']), true)
+  // The boundary is still a boundary: a rooted foreign name stays foreign.
+  assert.equal(isHostAllowed('evil-migu.cn.', ['migu.cn']), false)
+  assert.throws(() => assertPublicHttpUrl('https://attacker.test./a', ['migu.cn']), /允许的主机/)
+  assert.throws(() => assertPublicHttpUrl('https://evil-migu.cn./a', ['migu.cn']), /允许的主机/)
+  assert.doesNotThrow(() => assertPublicHttpUrl('https://d.musicapp.migu.cn./a', ['migu.cn']))
+})
+
+test('a redirect may not walk around the guard with a trailing dot', () => {
+  const publicBase = new URL('https://d.musicapp.migu.cn/lyric/1')
+  assert.throws(() => resolveRedirect('http://localhost.:1887/x', publicBase), /内部地址/)
+  assert.throws(() => resolveRedirect('https://evil-migu.cn./x', publicBase, ['migu.cn']), /允许的主机/)
+})
+
+/*
  * Redirect handling.
  *
  * The fetch loop cannot be exercised offline — it would need a public host that

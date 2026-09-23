@@ -90,8 +90,30 @@ function unpackedPath(fileName: string): string {
  * the command line: Electron's argument handling rejects that switch when it
  * appears as a forwarded argv entry, and setting it here is deterministic. The
  * harness (`tools/e2e-verify.mjs`) is the only thing that sets the variable.
+ *
+ * ## Why a packaged build ignores `JJ_DEBUG_PORT` on its own
+ *
+ * CDP on the main process is remote code execution with the app's own Node
+ * privileges, and this value arrives in the environment — so a shipped build
+ * that honours one variable is a shipped build that opens that door to whatever
+ * set it. `isDev` was missing here while its sibling use in `locateDataDir`
+ * below had it, which is exactly the kind of asymmetry that gets inherited
+ * rather than re-decided.
+ *
+ * The packaged-build probes (`tools/probe/probe-hook.mjs --packaged`,
+ * `tools/probe/clean-profile-sources.mjs`, which CI runs against `npm run pack`)
+ * are the only callers that still need the other route, so they set
+ * `JJ_ALLOW_DEBUG_PORT=1` as well. Two deliberate variables instead of one
+ * ambient one; an inherited `JJ_DEBUG_PORT` alone now does nothing.
+ *
+ * This is defence in depth, not a boundary: Electron has no fuse for the
+ * `--remote-debugging-port` *argv*, so a launcher that can pass arguments can
+ * still open CDP on this build. What changes is that the app no longer opens it
+ * out of an environment it merely happened to inherit.
  */
-const debugPort = process.env['JJ_DEBUG_PORT']
+const debugPort = isDev || process.env['JJ_ALLOW_DEBUG_PORT'] === '1'
+  ? process.env['JJ_DEBUG_PORT']
+  : undefined
 const testDataDir = process.env['JJ_TEST_USER_DATA']
 
 function isWritableDir(path: string): boolean {
@@ -183,8 +205,23 @@ async function migrateLegacyData(): Promise<void> {
     filter: (source) => !isSkippedForMigration(legacy, source)
   })
 }
+/*
+ * Two routes open CDP on this app, and both are closed here.
+ *
+ * The one above is the variable; this is the command line. Measured on the
+ * 0.1.7 build: `JJ Music.exe --remote-debugging-port=9566` answered
+ * `/json/version` just as the environment route did, because Chromium parses
+ * that switch itself before any of our code runs. `removeSwitch` is the only
+ * way to take it back, and it has to happen before `app.ready`.
+ *
+ * Removing it unconditionally would break the harness, which is why it is the
+ * `else` of the port the app decided to honour: with no authorised port there
+ * is no CDP this app will open, whoever asked.
+ */
 if (debugPort && /^\d+$/.test(debugPort)) {
   app.commandLine.appendSwitch('remote-debugging-port', debugPort)
+} else {
+  app.commandLine.removeSwitch('remote-debugging-port')
 }
 
 /** `jjmedia://local/<url-encoded absolute path>` */
@@ -1195,7 +1232,17 @@ function registerIpc(): void {
           continue
         }
         try {
-          const text = await readLyricFile(filePath)
+          /*
+           * The allow-list applies here too, and this used to be the one lyric
+           * read that skipped it: the path comes from the renderer (a dropped
+           * file), the extension check is the only other gate, and the text is
+           * then written into a library folder — from where the allow-listed
+           * `lyricReadFile` hands it back. Requiring the path to be one the
+           * renderer is already allowed to read closes that, and a genuine drop
+           * still passes: a library root, or a file the user picked in a dialog,
+           * is what the list holds.
+           */
+          const text = await readLyricFile(await allowedMediaPath(filePath))
           // Same route as picking a lyric by hand, so a dropped `.lrc` and a
           // chosen candidate leave the same provenance behind.
           await saveChosenLyric(match.path, text)

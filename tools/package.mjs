@@ -131,7 +131,11 @@ if (!wantDirOnly) {
   const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
   const assets = existsSync(releaseDir)
     ? readdirSync(releaseDir)
-      .filter(name => name.includes(version) && (name.endsWith('.exe') || name.endsWith('.zip')))
+      // `-${version}-`, not `${version}`: `release/` accumulates every build ever
+      // made, and a bare substring test lets `0.1.1` collect the leftovers from
+      // `0.1.10` (measured: `'JJ-Music-0.1.10-Setup-x64.exe'.includes('0.1.1')`
+      // is true). Both names below are `JJ-Music-<version>-<kind>-<arch>.<ext>`.
+      .filter(name => name.includes(`-${version}-`) && (name.endsWith('.exe') || name.endsWith('.zip')))
       .sort()
     : []
 
@@ -164,7 +168,8 @@ if (existsSync(releaseDir)) {
   // never built by this run.
   const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
   for (const name of readdirSync(releaseDir).sort()) {
-    if (!name.includes(version)) continue
+    // Same version boundary as the sums file above — see the note there.
+    if (!name.includes(`-${version}-`)) continue
     if (name.endsWith('.exe')) report(join(releaseDir, name), '安装包')
     if (name.endsWith('.zip')) report(join(releaseDir, name), '免安装 ZIP（完整解压后运行）')
   }

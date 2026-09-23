@@ -76,6 +76,60 @@ win:
   # hyphens, so this also restores the established convention.
   artifactName: JJ-Music-${version}-Portable-${arch}.${ext}
 
+# Electron's own defaults are the *development* defaults, and a shipped binary
+# that keeps them hands a debugger to anyone who can launch it with a flag.
+# electron-builder flips these after packaging and before signing, so the code
+# signature (when there is one) covers the flipped binary.
+#
+# Measured on the 0.1.7 build before this block existed:
+#   `JJ Music.exe --inspect=9444`  → `GET /json/list` answered with a live Node
+#                                     inspector on the packaged exe.
+# Every fuse below is a deliberate decision, not a default:
+electronFuses:
+  # MUST stay true. Two things depend on `ELECTRON_RUN_AS_NODE`:
+  # `sources/source-engine.ts` starts the 音源 host with `fork()`, and
+  # `sources/restricted-launch.ts` sets that variable itself for the restricted
+  # launcher. @electron/fuses documents the consequence directly: disabling it
+  # "also breaks `process.fork()` in the main process". Turning this off would
+  # ship an app with zero usable 音源.
+  runAsNode: true
+
+  # Off: nothing in the app reads `NODE_OPTIONS` or `NODE_EXTRA_CA_CERTS`, and
+  # honouring them lets a launcher inject `--require` (i.e. arbitrary code) into
+  # the main process.
+  enableNodeOptionsEnvironmentVariable: false
+
+  # Off: `--inspect` / `--inspect-brk` are development flags. This is the fuse
+  # that closes the live-inspector measurement quoted above. `SIGUSR1` no longer
+  # opens the V8 inspector either.
+  enableNodeCliInspectArguments: false
+
+  # On: Electron verifies the embedded SHA-256 of `app.asar` before loading it,
+  # so a replaced archive is refused instead of executed. Supported on Windows
+  # from Electron 30 (this build is 38); requires `asar` to be enabled and
+  # `disableAsarIntegrity` to be off, both of which hold in this file.
+  # electron-builder writes the INTEGRITY resource itself — see
+  # `node_modules/app-builder-lib/out/electron/electronWin.js`.
+  enableEmbeddedAsarIntegrityValidation: true
+
+  # On: the app is looked up in `app.asar` only, with no fallback to an
+  # `app/` directory or `default_app.asar`. Together with the fuse above, an
+  # attacker cannot side-load code by dropping an unarchived `app/` next to the
+  # exe. `asarUnpack` is unaffected: it changes where *files* live, not where
+  # the app is loaded from.
+  onlyLoadAppFromAsar: true
+
+# Not set, and why, so the next reader does not have to re-derive it:
+#
+#   grantFileProtocolExtraPrivileges — left at Electron's default (enabled).
+#     The advice to disable it applies to apps that never load content from
+#     `file://`, and this one does: in a packaged build both windows load their
+#     HTML with `loadFile()` (`src/main/index.ts`, `src/main/desktop-lyrics.ts`).
+#     The `jjmedia://` protocol serves *media*, not the app shell.
+#   enableCookieEncryption — left alone. It is a one-way migration of the
+#     Chromium cookie store, and nothing in this app logs in anywhere.
+#   resetAdHocDarwinSignature — macOS-only, and this build is Windows-only.
+
 nsis:
   artifactName: JJ-Music-${version}-Setup-${arch}.${ext}
   oneClick: false

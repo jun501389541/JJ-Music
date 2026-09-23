@@ -16,13 +16,13 @@
  */
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, stat } from 'node:fs/promises'
 import type { Dirent } from 'node:fs'
 import { extname, join, basename } from 'node:path'
 import { parseFile } from 'music-metadata'
 import type { LocalMusicInfo, TrackAssets } from '@shared/types'
 import { findCoverSidecar, sidecarPathFor } from './asset-files'
-import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
+import { readJsonFile, writeFileAtomic, writeJsonAtomic } from '../store/json-file'
 
 /** Extensions we attempt to read. Mirrors what the browser can decode plus
  *  common lossless containers that users expect to see indexed. */
@@ -158,9 +158,8 @@ export class MusicLibrary {
   async load(): Promise<void> {
     if (this.loaded) return
     this.loaded = true
-    if (!existsSync(this.indexPath)) return
 
-    const raw = parseJsonLoose<Partial<LibraryIndex>>(await readFile(this.indexPath, 'utf8'))
+    const raw = await readJsonFile<Partial<LibraryIndex>>(this.indexPath)
     if (!raw) return
 
     // An older index is still usable: the track entries themselves are valid,
@@ -515,7 +514,15 @@ export class MusicLibrary {
     if (existsSync(target)) return target
     try {
       await mkdir(this.coverDir, { recursive: true })
-      await writeFile(target, data)
+      /*
+       * Through the atomic writer, not `writeFile`: the name *is* the digest, so
+       * a half-written JPEG left by a crash or a full disk would be found by the
+       * `existsSync` above on the next attempt and served as this cover forever —
+       * the correct bytes hash to the same name, so nothing would ever replace
+       * it. The rollback on failure otherwise has no way to tell the two apart. A
+       * temp file plus a rename means the name only appears once it is complete.
+       */
+      await writeFileAtomic(target, data)
       return target
     } catch {
       return undefined

@@ -55,6 +55,58 @@ test('concurrent settings and playlist operations survive reload', () => fixture
   assert.equal((await new PlaylistStore(dir).list()).length, 17)
 }))
 
+/**
+ * 损坏的配置文件必须留下证据，而不是被空状态盖掉。
+ *
+ * 每个 store 都是「读不出来就退回默认值，然后下一次改动写盘」。对**不存在**的文件
+ * 这是对的；对**被截断**的文件这是毁灭性的：磁盘写满、异常退出、云盘同步到一半，
+ * 都会让用户的歌单/设置在被替换成空的一份之后彻底消失，连一句提示都没有。
+ *
+ * 这里钉的是「原字节还在」和「恢复出来的就是原来那份」，因为把文件改名成
+ * `.corrupt-*` 后仍然要求**用户自己**去 %APPDATA% 里找，等于没救。
+ */
+test('损坏的设置文件被留档，而不是被默认值静默覆盖', () => fixture(async dir => {
+  const path = join(dir, 'settings.json')
+  const damaged = '{"volume": 0.3, "showQualityBadge": tr'
+  await writeFile(path, damaged)
+
+  const store = new SettingsStore(dir)
+  const loaded = await store.load()
+  assert.equal(loaded.volume, 0.8, '读不出来就退回默认值，这一步没变')
+
+  const [kept] = (await readdir(dir)).filter(name => name.startsWith('settings.json.corrupt-'))
+  assert.ok(kept, '损坏的文件被改名留档，而不是原地留着等下一次写盘盖掉')
+  assert.equal(await readFile(join(dir, kept), 'utf8'), damaged, '留档的是原始字节，一个字都没动')
+
+  // 下一步照常工作：写入不会碰到那份留档，也不会再有第二份。
+  await store.update({ volume: 0.42 })
+  assert.equal((await new SettingsStore(dir).load()).volume, 0.42)
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).volume, 0.42)
+  assert.equal((await readdir(dir)).filter(name => name.includes('.corrupt-')).length, 1)
+}))
+
+test('损坏的曲库索引同样留档，重启后不会假装曲库是空的', () => fixture(async dir => {
+  const index = join(dir, 'library')
+  await mkdir(index, { recursive: true })
+  const path = join(index, 'index.json')
+  const damaged = '{"version": 3, "folders": ["D:\\\\Music"], "tracks": [{"pa'
+  await writeFile(path, damaged)
+
+  const library = new MusicLibrary(dir)
+  await library.load()
+  assert.equal(library.getAll().length, 0)
+  const [kept] = (await readdir(index)).filter(name => name.startsWith('index.json.corrupt-'))
+  assert.ok(kept, '索引被留档')
+  assert.equal(await readFile(join(index, kept), 'utf8'), damaged)
+
+  /*
+   * 索引只剩空的一份，但曲库不会因此看起来是空的：`src/main/index.ts:338-346` 会把
+   * `settings.json` 里的 libraryFolders 与索引里的目录取并集，缺的那个重新 addFolder
+   * （顺带扫描）。这里钉住那条恢复链的起点——目录列表确实丢了，必须靠设置侧补回来。
+   */
+  assert.deepEqual(library.getFolders(), [], '索引里的目录列表也丢了，这正是要恢复的东西')
+}))
+
 // A tiny FLAC metadata fixture. No real library or copyrighted audio required.
 function flacWithCover(image) {
   const streamInfo = Buffer.alloc(38)

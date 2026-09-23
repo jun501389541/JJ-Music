@@ -208,6 +208,22 @@ export class DesktopLyrics {
       if (this.last) window.webContents.send(IPC.desktopLyricState, this.last)
     })
 
+    /*
+     * The main window has carried these two handlers since it was written; this
+     * one never did, and that asymmetry is the whole finding — a window that
+     * cannot navigate *today* because its markup and CSP happen to forbid it is
+     * one template edit away from being able to.
+     *
+     * The overlay has no links and no reason to leave its own document, so the
+     * answer is deny/unconditional-prevent rather than the main window's
+     * "http(s) goes to the real browser": there is nothing here a user could
+     * legitimately click through to, and `shell.openExternal` is not imported.
+     * The lyric text it paints arrives from the renderer as `textContent`, so
+     * this is defence in depth, not a live hole.
+     */
+    window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    window.webContents.on('will-navigate', (event) => event.preventDefault())
+
     window.on('moved', () => this.persistPosition(window))
     window.on('closed', () => {
       // A drag outliving the window it moved is the one leak here that a user can

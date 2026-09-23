@@ -45,6 +45,25 @@ import { saveSidecar } from './lyric-service'
 const EMBEDDED_LABEL = '文件内嵌'
 const SIDECAR_LABEL = '同目录文件'
 
+/**
+ * The most lyric text this module will write, in UTF-16 code units.
+ *
+ * The channels that reach here take the lyric from the renderer, and until this
+ * existed the only check was "is it a non-empty string" — so a multi-hundred-
+ * megabyte value became a `.lrc` of that size next to the user's music, and, on
+ * the embedded path, an `USLT`/`LYRICS` frame of that size inside their file.
+ * A `.lrc` is a text file someone reads; there is no legitimate value here that
+ * is not far below this.
+ *
+ * It is *not* a tight bound, on purpose. A downloaded lyric arrives as three
+ * separately-fetched pieces (main / 翻译 / 音译), each capped at 512 KiB of
+ * bytes upstream (`LYRIC_MAX_BYTES` in `online/lyrics.ts`), and they are merged
+ * into one string before they get here — so the ceiling has to sit above the sum
+ * of three legitimate pieces, not above one. One mebibyte of characters is well
+ * over that and still three orders of magnitude below the failure being closed.
+ */
+const MAX_LYRIC_CHARS = 1024 * 1024
+
 /** Anything the caller leaves out is decided by these defaults. */
 const DEFAULT_TARGETS: AssetWriteTarget[] = ['embedded']
 
@@ -69,7 +88,16 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
   const assets: TrackAssets = {}
   const result: AssetExportResult = { written: false, landed: [], paths: [], notes: [], note: '', embeddedWritten: false }
 
-  const lyric = patch.lyrics?.trim() ?? ''
+  // Refused here rather than at each caller, because this is the single place
+  // that writes: a bound enforced at three of the four entry points is a bound
+  // the fourth walks around. The oversized text is dropped from the patch as
+  // well as from `lyric`, so it cannot reach `writeTags` and become a tag frame.
+  const rawLyric = patch.lyrics?.trim() ?? ''
+  const oversized = rawLyric.length > MAX_LYRIC_CHARS
+  const lyric = oversized ? '' : rawLyric
+  // Metadata still has to fit in the file's tags, so the patch is otherwise kept.
+  const effective: TagPatch = oversized ? { ...patch, lyrics: undefined } : patch
+
   const hasAssetPayload = Boolean(lyric || patch.cover)
   const targetFile = input.stagingPath ?? audioPath
   const now = Date.now()
@@ -81,7 +109,7 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
   // them always asks for the embedded write even when 写入位置 says 「同名文件」
   // only: otherwise 标签匹配 from that setting matches the candidate, writes
   // nothing, and does not even say it did nothing.
-  const wantsEmbedded = targets.includes('embedded') || hasMetadataFields(patch)
+  const wantsEmbedded = targets.includes('embedded') || hasMetadataFields(effective)
   const embedded = wantsEmbedded && canWriteTags(targetFile, input.writableFormats)
   // `embedded` in the settings means "in the file, and beside it if the file
   // cannot be modified" — the alternative is a button that quietly does nothing
@@ -94,11 +122,17 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
     result.notes.push('下载文件尚未定名，同目录副本会在保存后写入')
   }
 
+  if (oversized) {
+    // Not `return`ed: a patch may carry metadata beside the rejected lyric, and
+    // refusing the whole call would silently drop fields the user did ask for.
+    result.notes.push(`${Math.round(rawLyric.length / 1024)} KiB 的歌词超过上限，未写入`)
+  }
+
   if (!embedded && wantsEmbedded) {
     const ext = extname(targetFile).toUpperCase().replace(/^\./, '')
     if (fallback) {
       result.notes.push(`${ext} 不支持写入标签，已改为保存同目录文件`)
-    } else if (hasMetadataFields(patch)) {
+    } else if (hasMetadataFields(effective)) {
       result.notes.push(`${ext} 不支持写入标签，标题等文本字段未写入`)
     }
   }
@@ -109,7 +143,7 @@ export async function exportAssets(input: AssetExportInput): Promise<AssetExport
     // original, and a player still streaming that song keeps a handle open which
     // Windows reports as EPERM. A preview touches nothing, so it asks for nothing.
     if (input.dryRun !== true) releaseFileForWrite(targetFile)
-    const written = await writeTags(targetFile, patch, {
+    const written = await writeTags(targetFile, effective, {
       dryRun: input.dryRun === true,
       // Skipping the backup is only safe because the file is a staging copy that
       // nothing else has open — the download's `.jj-<id>` temp. Honouring the flag

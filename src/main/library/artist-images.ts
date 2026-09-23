@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { SourceId } from '@shared/types'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 import { platformSite } from '../online/playlist-import'
+import { COVER_HOSTS } from '../online/cover-fetch'
 import type { ArtistImage } from '../online/artist-image'
 import { resolveArtistImage } from '../online/artist-image'
 import { safeFetchBytes } from '../online/url-guard'
@@ -19,6 +20,22 @@ interface ArtistImageEntry {
 const PREFETCH_LIMIT = 120
 /** The same ceiling the artist page uses: two searches at a time, never more. */
 const PREFETCH_PARALLEL = 2
+/**
+ * How many artist names the record keeps before the oldest ones are dropped.
+ *
+ * The map is fed by whatever the renderer asks for — `artistPrefetch` alone
+ * accepts several thousand names in one call — and *every* outcome is stored,
+ * including the misses, because a miss is what stops the next launch from
+ * re-searching an artist who has no photo anywhere. That is the point of the
+ * table, and it is also why it cannot be unbounded: the whole map is rewritten
+ * on every lookup, so its size is on the write path of a single portrait.
+ *
+ * A ceiling with no eviction would be worse than no ceiling (it would stop
+ * recording new answers), so over the limit the least recently written entries
+ * go. The cost of evicting is one repeated search, which is the cheap side of
+ * this trade.
+ */
+const MAX_ENTRIES = 4000
 
 /**
  * Artist name → a portrait file stored with the rest of the cover art.
@@ -157,11 +174,22 @@ export class ArtistImageStore {
     }
     if (!found) return this.remember(name, null)
 
+    // `found.url` is a string out of a platform's JSON, so it is pinned to that
+    // platform's own CDN the way `online/cover-fetch.ts` pins a search result's:
+    // without the list the guard still refuses file:/loopback/metadata, but any
+    // *public* host would do, and a hostile response could then have the app
+    // pull up to 8 MB of its choosing into the cover store. A platform with no
+    // entry has no vouched-for host, so there is no portrait — the same answer
+    // `fetchCoverBytes` gives, and it costs only the picture.
+    const allowedHosts = COVER_HOSTS[found.source]
+    if (!allowedHosts) return this.remember(name, null)
+
     let saved: string | undefined
     try {
       const { body, contentType } = await (this.deps.getBytes ?? safeFetchBytes)(found.url, {
         maxBytes: 8 * 1024 * 1024,
         timeoutMs: 15_000,
+        allowedHosts,
         headers: { Referer: platformSite[found.source] ?? '', 'User-Agent': 'Mozilla/5.0' }
       })
       saved = await this.deps.saveCover(new Uint8Array(body), contentType ?? '')
@@ -177,7 +205,15 @@ export class ArtistImageStore {
 
   /** Record the outcome — hit or miss — and persist it. Returns the path. */
   private async remember(name: string, path: string | null, source?: SourceId): Promise<string | null> {
+    // Re-inserting an existing key moves it to the end of the iteration order, so
+    // the map is kept in least-recently-written order for free.
+    this.entries.delete(name)
     this.entries.set(name, { path, ...(source ? { source } : {}), at: Date.now() })
+    while (this.entries.size > MAX_ENTRIES) {
+      const oldest = this.entries.keys().next()
+      if (oldest.done) break
+      this.entries.delete(oldest.value)
+    }
     // Awaited rather than fired-and-forgotten: `writeJsonAtomic` serialises per
     // file, so this is the point at which a miss is guaranteed to be on disk for
     // the next launch — and the caller's reply should not race the record.

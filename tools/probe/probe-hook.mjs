@@ -116,7 +116,18 @@ async function main() {
   const child = spawn(electronBin, packaged ? [] : ['.', `--user-data-dir=${profile}`], {
     cwd: repoRoot,
     stdio: 'inherit',
-    env: { ...process.env, JJ_DEBUG_PORT: String(DEBUG_PORT), ELECTRON_RUN_AS_NODE: undefined }
+    /*
+     * `JJ_ALLOW_DEBUG_PORT` is only needed for `--packaged`: a shipped build
+     * ignores `JJ_DEBUG_PORT` on its own, so that an inherited environment
+     * variable cannot open a CDP port in a build a user downloaded. A probe
+     * that deliberately targets the packaged exe says so explicitly.
+     */
+    env: {
+      ...process.env,
+      JJ_DEBUG_PORT: String(DEBUG_PORT),
+      JJ_ALLOW_DEBUG_PORT: packaged ? '1' : undefined,
+      ELECTRON_RUN_AS_NODE: undefined
+    }
   })
   let page
   try {

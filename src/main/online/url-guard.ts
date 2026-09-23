@@ -34,7 +34,7 @@ export function assertPublicHttpUrl(raw: string | URL, allowedHosts?: string[]):
   }
   if (url.username || url.password) throw new Error('地址不允许携带凭据')
 
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const host = normalizedHost(url.hostname)
   if (allowedHosts && !isHostAllowed(host, allowedHosts)) throw new Error('目标不在允许的主机内')
   if (host === 'localhost' || host.endsWith('.localhost') ||
       host.endsWith('.local') || host.endsWith('.internal') ||
@@ -55,7 +55,38 @@ export function assertPublicHttpUrl(raw: string | URL, allowedHosts?: string[]):
  * Both look correct and neither is.
  */
 export function isHostAllowed(host: string, allowedHosts: string[]): boolean {
-  return allowedHosts.some((root) => host === root || host.endsWith(`.${root}`))
+  // Normalised here as well as at the call site: this is exported and a caller
+  // that hands over a raw `url.hostname` must not lose the boundary check to a
+  // rooted name (`evil-migu.cn.`). Re-normalising an already-normalised host is
+  // a no-op.
+  const name = normalizedHost(host)
+  return allowedHosts.some((root) => name === root || name.endsWith(`.${root}`))
+}
+
+/**
+ * The host as the checks below need to see it.
+ *
+ * A hostname is case-insensitive, so it is lower-cased; an IPv6 literal arrives
+ * bracketed, so the brackets come off.
+ *
+ * ## Why the trailing dots are stripped, and why it is a loop
+ *
+ * `http://localhost.:1887/` is a name that resolves to loopback and reaches the
+ * same service as `http://localhost:1887/`, but WHATWG URL keeps the dot, so a
+ * blocklist written against `localhost` misses it. That is a real bypass rather
+ * than a curiosity: measured on this build, `fetch` connects to loopback for
+ * `localhost.` exactly as it does for `localhost`.
+ *
+ * One `.replace(/\.$/, '')` is not enough, and that is measured too: Node's
+ * parser strips *one* trailing dot from a numeric host (`127.0.0.1.` becomes
+ * `127.0.0.1`) but keeps every dot on a name (`localhost..` stays `localhost..`),
+ * so a single strip leaves the second one in place and the name check is bypassed
+ * again. A rooted name may carry any number of dots and all of them are the same
+ * root label. Nothing legitimate has one: a request to `migu.cn.` and to
+ * `migu.cn` go to the same place, and this app never builds such a name itself.
+ */
+function normalizedHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
 }
 
 /**

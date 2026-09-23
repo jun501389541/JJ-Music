@@ -7,11 +7,10 @@ import { UI_DEFAULTS } from '@shared/preferences'
  * that an imported LX library maps cleanly onto ours.
  */
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AppSettings, PlayableTrack, Playlist } from '@shared/types'
 import { isLocalTrack } from '@shared/types'
-import { parseJsonLoose, writeJsonAtomic } from './json-file'
+import { readJsonFile, writeJsonAtomic } from './json-file'
 
 export const DEFAULT_SETTINGS: AppSettings = {
   ...UI_DEFAULTS,
@@ -57,12 +56,10 @@ export class SettingsStore {
   async load(): Promise<AppSettings> {
     if (this.loaded) return this.settings
     this.loaded = true
-    if (existsSync(this.filePath)) {
-      const parsed = parseJsonLoose<Partial<AppSettings>>(await readFile(this.filePath, 'utf8'))
-      if (parsed) {
-        // Merge so new settings added in later versions get their defaults.
-        this.settings = { ...DEFAULT_SETTINGS, ...parsed }
-      }
+    const parsed = await readJsonFile<Partial<AppSettings>>(this.filePath)
+    if (parsed) {
+      // Merge so new settings added in later versions get their defaults.
+      this.settings = { ...DEFAULT_SETTINGS, ...parsed }
     }
     return this.settings
   }
@@ -107,19 +104,17 @@ export class PlaylistStore {
   async load(): Promise<void> {
     if (this.loaded) return
     this.loaded = true
-    if (existsSync(this.filePath)) {
-      const raw = parseJsonLoose<Partial<PlaylistFile>>(await readFile(this.filePath, 'utf8'))
-      if (raw) {
-        this.playlists = Array.isArray(raw.playlists) ? raw.playlists : []
-        // A cover folder that was cleared leaves a reference to a file that no
-        // longer exists; the card would show a broken image instead of falling
-        // back to the note glyph.
-        for (const list of this.playlists) {
-          if (list.coverPath && !existsSync(list.coverPath)) delete list.coverPath
-        }
-        for (const [id, tracks] of Object.entries(raw.items ?? {})) {
-          this.items.set(id, tracks)
-        }
+    const raw = await readJsonFile<Partial<PlaylistFile>>(this.filePath)
+    if (raw) {
+      this.playlists = Array.isArray(raw.playlists) ? raw.playlists : []
+      // A cover folder that was cleared leaves a reference to a file that no
+      // longer exists; the card would show a broken image instead of falling
+      // back to the note glyph.
+      for (const list of this.playlists) {
+        if (list.coverPath && !existsSync(list.coverPath)) delete list.coverPath
+      }
+      for (const [id, tracks] of Object.entries(raw.items ?? {})) {
+        this.items.set(id, tracks)
       }
     }
     if (!this.playlists.some((list) => list.id === 'default')) {

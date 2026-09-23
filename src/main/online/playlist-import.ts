@@ -1,6 +1,7 @@
 import type { ImportedPlaylist, OnlineMusicInfo, SourceId } from '@shared/types'
 import { readBounded } from './read-bounded'
 import { safeFetchBytes } from './url-guard'
+import { COVER_HOSTS } from './cover-fetch'
 import { miguSongToInfo, type MiguSong } from './search'
 
 const domains: Record<string,string[]> = {wy:['music.163.com','163cn.tv'],tx:['y.qq.com','c.y.qq.com'],kw:['kuwo.cn'],kg:['kugou.com'],mg:['migu.cn']}
@@ -202,12 +203,18 @@ export async function fetchImportCover(
   get: typeof safeFetchBytes = safeFetchBytes
 ): Promise<string | undefined> {
   if (!preview.coverUrl) return undefined
+  const allowedHosts = COVER_HOSTS[preview.source]
+  // No pinned host family for this platform ⇒ no cover. Same call as
+  // `cover-fetch.ts`: the URL is text out of a platform's JSON, and a platform we
+  // cannot name the picture hosts for is one whose text we do not fetch.
+  if (!allowedHosts) return undefined
   const referer = platformSite[preview.source]
   // The URL comes from a platform response, so it is validated per hop like every
   // other fetched address; `d.musicapp.migu.cn` answers 403 to a request with no
   // Referer, which is the only reason one is sent.
   const { body, contentType } = await get(preview.coverUrl, {
-    maxBytes: 8 * 1024 * 1024, timeoutMs: 15_000, ...(referer ? { headers: { Referer: referer } } : {})
+    maxBytes: 8 * 1024 * 1024, timeoutMs: 15_000, allowedHosts,
+    ...(referer ? { headers: { Referer: referer } } : {})
   })
   return saveCover(new Uint8Array(body), contentType ?? '')
 }

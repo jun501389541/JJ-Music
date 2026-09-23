@@ -127,7 +127,7 @@ for (const name of ['settings.json', 'playlists.json', 'library/index.json']) {
     writeFileSync(file, JSON.stringify(data))
   }
 }
-const child = spawn(electronBin, [...(packagedApp?[]:['.']),`--user-data-dir=${testDataDir}`], { cwd: repoRoot, stdio: 'inherit', windowsHide: true, env: { ...process.env, JJ_DEBUG_PORT: String(DEBUG_PORT), JJ_TEST_USER_DATA: testDataDir, ELECTRON_RUN_AS_NODE: undefined } })
+const child = spawn(electronBin, [...(packagedApp?[]:['.']),`--user-data-dir=${testDataDir}`], { cwd: repoRoot, stdio: 'inherit', windowsHide: true, env: { ...process.env, JJ_DEBUG_PORT: String(DEBUG_PORT), JJ_ALLOW_DEBUG_PORT: packagedApp ? '1' : undefined, JJ_TEST_USER_DATA: testDataDir, ELECTRON_RUN_AS_NODE: undefined } })
 const childExit=new Promise(resolve=>child.once('exit',code=>resolve(code)))
 const screenshotDir = join(repoRoot, 'docs', 'research', 'screenshots', 'salt-ui')
 mkdirSync(screenshotDir, { recursive: true })

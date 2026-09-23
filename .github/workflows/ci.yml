@@ -34,9 +34,14 @@ jobs:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
 
     steps:
-      - uses: actions/checkout@v4
+      # Pinned by commit SHA, not by the mutable `v4` tag: whoever can move that
+      # tag can run code in this job, and this job holds a token. The trailing
+      # comment keeps the version readable — Dependabot understands this form.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -70,9 +75,11 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm

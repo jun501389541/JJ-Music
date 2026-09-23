@@ -33,7 +33,7 @@
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.1",
     "@vue/tsconfig": "^0.8.1",
-    "electron": "^38.2.2",
+    "electron": "^42.11.8",
     "electron-builder": "^26.0.12",
     "electron-vite": "^4.0.1",
     "pinia": "^3.0.3",

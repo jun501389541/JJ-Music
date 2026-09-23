@@ -106,8 +106,9 @@ electronFuses:
 
   # On: Electron verifies the embedded SHA-256 of `app.asar` before loading it,
   # so a replaced archive is refused instead of executed. Supported on Windows
-  # from Electron 30 (this build is 38); requires `asar` to be enabled and
-  # `disableAsarIntegrity` to be off, both of which hold in this file.
+  # from Electron 30, so every version this app has shipped on satisfies it;
+  # requires `asar` to be enabled and `disableAsarIntegrity` to be off, both of
+  # which hold in this file.
   # electron-builder writes the INTEGRITY resource itself — see
   # `node_modules/app-builder-lib/out/electron/electronWin.js`.
   enableEmbeddedAsarIntegrityValidation: true

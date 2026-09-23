@@ -273,7 +273,13 @@ const spec = computed(() => {
   const track = player.currentTrack
   if (!track) return ''
   if (isLocalTrack(track)) return formatAudioSpec(track)
-  return `${track.source.toUpperCase()} · ${player.quality}`
+  /*
+   * The served tier, not the requested one. `player.quality` is what the user
+   * picked and what a source is *asked* for; a source is free to answer lower,
+   * and reading the request back made the page assert a quality the audio may
+   * not have. The fallback covers the moment before a resolve lands.
+   */
+  return `${track.source.toUpperCase()} · ${player.resolvedQuality ?? player.quality}`
 })
 
 /** The bar's info line reads "艺术家 · 专辑 · 规格", so the album is optional. */

@@ -112,6 +112,17 @@ export const usePlayerStore = defineStore('player', () => {
   const lyricError = ref<string | null>(null)
 
   const quality = ref<Quality>('flac24bit')
+  /**
+   * The tier the *current* track's audio was actually resolved at.
+   *
+   * A source may answer lower than asked (`MusicUrlResult.quality` is documented
+   * as "may be lower than requested"), and the picker above records only what
+   * the user requested. Showing the request back to them is how "FLAC" gets
+   * displayed for a file that arrived at 320k, so the answer is kept here and
+   * the UI reads this — falling back to the request when nothing was resolved
+   * (a locally preferred file has no tier at all).
+   */
+  const resolvedQuality = ref<Quality | null>(null)
   const equalizer = ref<number[]>([...EQUALIZER_PRESETS['平坦']])
   const equalizerPreset = ref('平坦')
 
@@ -467,6 +478,12 @@ export const usePlayerStore = defineStore('player', () => {
     lyricLoading.value = false
     duration.value = 0
     waiting.value = false
+    /*
+     * Cleared per attempt, not kept: the outgoing track's tier says nothing
+     * about what the incoming one will be served, and a stale `flac` on a track
+     * that then resolves at 128k is the same lie in the other direction.
+     */
+    resolvedQuality.value = null
 
     // Silence the outgoing track straight away. Resolving a URL can take
     // seconds; leaving the old audio running until then is the reported bug.
@@ -478,6 +495,9 @@ export const usePlayerStore = defineStore('player', () => {
       const source = await resolveWithTimeout(track, quality.value)
       // A newer selection superseded this one while we were resolving.
       if (isStale()) return
+      // Recorded only once this attempt survived the generation check, so a
+      // superseded resolve cannot leave the previous track labelled with it.
+      resolvedQuality.value = source.quality ?? null
 
       const instance = ensureEngine()
       /*
@@ -1281,6 +1301,7 @@ export const usePlayerStore = defineStore('player', () => {
     lyricAsset,
     lyricSourceChoice,
     quality,
+    resolvedQuality,
     equalizer,
     equalizerPreset,
     outputDeviceId,

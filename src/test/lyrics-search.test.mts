@@ -229,6 +229,22 @@ check(
   JSON.stringify(bare.meta.qualitys)
 )
 check('mg: a missing cover stays empty rather than becoming a broken URL', bare.picUrl === '', bare.picUrl)
+/*
+ * 「这一档存在」和「这一档有多大」是两件事。kw / kg 只给哈希与 FORMATS，mg 的兜底档
+ * 在读任何 format 行之前就声明了，这三处以前都写 `1` —— 一个合法的字节数，于是
+ * 被 `push` 渲染成 `0.00 MB` 交给音源脚本（`toLegacyOnline` 的 `types[].size`）。
+ * 没人量过的尺寸不该以任何数字的形式发出去。
+ */
+check(
+  'mg: a declared tier with no measured size carries no size at all',
+  bare.meta.qualitys?.[0]?.size === undefined,
+  JSON.stringify(bare.meta.qualitys)
+)
+check(
+  'mg: a tier with no format row is not reported as 0.00 MB',
+  !(bare.meta.qualitys ?? []).some((q) => q.size === '0.00 MB'),
+  JSON.stringify(bare.meta.qualitys)
+)
 
 console.log('\n--- live search (network) ---')
 const KEYWORD = '周杰伦'

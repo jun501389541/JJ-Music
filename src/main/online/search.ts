@@ -94,15 +94,35 @@ function toInterval(seconds: number | string | undefined): string | undefined {
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
 }
 
+/**
+ * What an adapter knows about one tier.
+ *
+ * A number is a real byte count. `true` means "this tier exists but its size is
+ * unknown" — kw and kg answer with hashes and a `FORMATS` list, not byte counts,
+ * and Migu's floor tier is declared before any format row is read. Those used to
+ * be written as the literal `1`, which is a *valid* small number and therefore
+ * rendered as the string `0.00 MB`: a size nobody measured, published as if
+ * someone had. `size` is optional on the descriptor, so the honest encoding is
+ * to leave it off rather than to invent a value for it.
+ */
+type SizeHint = number | true | undefined
+
 /** Build the quality descriptor list from size information. */
-function buildQualitys(sizes: Partial<Record<Quality | 'hires', number | undefined>>): Array<{
+function buildQualitys(sizes: Partial<Record<Quality | 'hires', SizeHint>>): Array<{
   type: string
   size?: string
 }> {
   const out: Array<{ type: string; size?: string }> = []
-  const push = (type: string, bytes: number | undefined): void => {
-    if (!bytes || bytes <= 0) return
-    out.push({ type, size: `${(bytes / 1024 / 1024).toFixed(2)} MB` })
+  const push = (type: string, hint: SizeHint): void => {
+    if (hint === undefined) return
+    if (hint === true) {
+      out.push({ type })
+      return
+    }
+    // A platform that reports `0` means "not this tier", and a `NaN` out of a
+    // malformed field is not a size either; neither may become `NaN MB`.
+    if (!Number.isFinite(hint) || hint <= 0) return
+    out.push({ type, size: `${(hint / 1024 / 1024).toFixed(2)} MB` })
   }
   push('128k', sizes['128k'])
   push('320k', sizes['320k'])
@@ -457,9 +477,9 @@ const kuwoProvider: SearchProvider = {
               songmid,
               albumId: item.ALBUMID,
               qualitys: buildQualitys({
-                '128k': 1,
-                '320k': item.FORMATS?.includes('MP3H') || item.FORMATS?.includes('320') ? 1 : undefined,
-                flac: item.FORMATS?.includes('FLAC') ? 1 : undefined
+                '128k': true,
+                '320k': item.FORMATS?.includes('MP3H') || item.FORMATS?.includes('320') ? true : undefined,
+                flac: item.FORMATS?.includes('FLAC') ? true : undefined
               })
             }
           }
@@ -538,9 +558,9 @@ const kugouProvider: SearchProvider = {
             hash: item.FileHash ?? '',
             albumId: item.AlbumID,
             qualitys: buildQualitys({
-              '128k': 1,
-              '320k': item.HQFileHash ? 1 : undefined,
-              flac: item.SQFileHash ? 1 : undefined
+              '128k': true,
+              '320k': item.HQFileHash ? true : undefined,
+              flac: item.SQFileHash ? true : undefined
             })
           }
         }
@@ -615,7 +635,7 @@ const MG_MAX_PAGE = 25
  * like `SQ` became `flac` or that `Z3D` stayed out of the ladder.
  */
 export function miguSongToInfo(item: MiguSong): OnlineMusicInfo {
-  const sizes: Partial<Record<Quality, number>> = {}
+  const sizes: Partial<Record<Quality, SizeHint>> = {}
   for (const format of item.audioFormats ?? []) {
     const tier = format.formatType ? MG_FORMAT_TO_QUALITY[format.formatType] : undefined
     if (!tier) continue
@@ -623,8 +643,10 @@ export function miguSongToInfo(item: MiguSong): OnlineMusicInfo {
     if (Number.isFinite(bytes) && bytes > 0) sizes[tier] = bytes
   }
   // The other adapters declare the floor tier unconditionally and let the ladder
-  // probe it; do the same so an empty list never results.
-  sizes['128k'] = sizes['128k'] ?? 1
+  // probe it; do the same so an empty list never results. `true` = the tier is
+  // claimed but its size is not known, so the descriptor carries no `size`
+  // instead of the `0.00 MB` the old literal `1` produced.
+  sizes['128k'] = sizes['128k'] ?? true
 
   const songId = String(item.songId ?? '')
   const cover = item.img2 ?? item.img1 ?? ''

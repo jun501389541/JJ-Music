@@ -115,7 +115,15 @@ const timeLabel = computed(() => {
     -->
     <component :is="bare ? 'div' : 'button'" class="mini-track" @click="openPlayingView">
       <div v-if="!bare" class="mini-art"><img v-if="cover" :src="cover" alt="" referrerpolicy="no-referrer"/><AppIcon v-else name="music" :size="24"/></div>
-      <span class="mini-meta"><strong>{{ player.currentTrack?.name || '未载入歌曲' }}</strong><small><slot name="meta">{{ player.currentTrack?.singer || '选择一首歌曲，开始聆听' }}</slot></small></span>
+      <!--
+        Two different empties share this one line, and a single `||` said both of
+        them: a track with no artist tag (`music-library.ts` leaves `singer: ''`)
+        rendered as "选择一首歌曲，开始聆听" — the cold-start message — because
+        `''` is falsy. So each field asks "is there a track?" first, then falls
+        back to the repo's own wording for a missing value («未知艺术家» /
+        «未知曲目», the same convention TrackList and six other places use).
+      -->
+      <span class="mini-meta"><strong>{{ player.currentTrack ? (player.currentTrack.name || '未知曲目') : '未载入歌曲' }}</strong><small><slot name="meta">{{ player.currentTrack ? (player.currentTrack.singer || '未知艺术家') : '选择一首歌曲，开始聆听' }}</slot></small></span>
     </component>
     <component :is="bare ? 'div' : 'button'" class="mini-lyric" @click="openPlayingView">{{ player.error || lyric || '' }}</component>
   </div>

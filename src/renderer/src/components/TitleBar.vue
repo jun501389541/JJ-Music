@@ -102,7 +102,9 @@ function systemMenu(event: MouseEvent): void { ui.openMenu(event, [
     </div>
     <SearchSuggest v-if="searchOpen && suggestions.length" :items="suggestions" :highlight="highlight" @pick="pick" @hover="highlight = $event"/>
   </div>
-  <button class="caption-track" @click="emit('toggleNowPlaying')">{{ player.currentTrack?.name || '让音乐回归纯粹' }}<span v-if="player.currentTrack"> · {{ player.currentTrack.singer }}</span></button>
+  <!-- The separator used to hang off "a track exists", so an unknown artist left
+       a bare «歌名 · ». It now asks about the artist itself. -->
+  <button class="caption-track" @click="emit('toggleNowPlaying')">{{ player.currentTrack ? (player.currentTrack.name || '未知曲目') : '让音乐回归纯粹' }}<span v-if="player.currentTrack?.singer"> · {{ player.currentTrack.singer }}</span></button>
   <div class="caption-controls"><WindowControls /></div>
 </header></template>
 <style scoped>

@@ -616,7 +616,14 @@ defineExpose({ playArtworkFlightBack })
     -->
     <PlayerBar bare :extra-menu="lyricMenuGroup">
       <template #meta>
-        <span class="np__meta-text">{{ player.currentTrack?.singer ?? '选择一首歌曲，开始聆听' }}<template v-if="albumName"> · {{ albumName }}</template><template v-if="spec"> · {{ spec }}</template></span>
+        <!--
+          `??` only catches null/undefined, so an empty artist tag — which is
+          what the scanner stores for a file without one — slipped through as a
+          blank. Same shape as the bottom bar's default slot: ask whether a track
+          exists first, so the cold-start wording survives. The album and spec
+          segments below keep their own conditions untouched.
+        -->
+        <span class="np__meta-text">{{ player.currentTrack ? (player.currentTrack.singer || '未知艺术家') : '选择一首歌曲，开始聆听' }}<template v-if="albumName"> · {{ albumName }}</template><template v-if="spec"> · {{ spec }}</template></span>
         <!--
           Provenance belongs here rather than above the lyrics: the user needs
           to know whether the line they are reading is the file's own tag, a

@@ -184,9 +184,17 @@ function playThisList(): void {
  * z-index 68: above `.np` (50) so the drawer is visible over the playback page,
  * below the dialogs (70/75) and the menus (2000) so a confirm box opened from
  * here is not trapped underneath.
+ *
+ * It stops short of the bottom bar rather than covering the window: those
+ * `--playbar-height` pixels belong to the transport controls on both surfaces,
+ * and a queue panel that eats them means you cannot leave the panel while it is
+ * open. Same geometry `ToastHost.vue:24`, `LocatePlaying.vue:31` and
+ * `.np__spectrum-band` already use. The card then floats inside what is left,
+ * centred and rounded on all four sides, instead of being a sheet welded to the
+ * window edges.
  */
-.np-panel-layer{position:fixed;inset:0;z-index:68;display:flex;align-items:flex-end;justify-content:center;background:#0002}
-.np-panel{width:100%;height:min(70vh,620px);max-height:min(70vh,620px);display:flex;flex-direction:column;padding:18px 22px 20px;background:#22252df5;border:1px solid #ffffff1a;border-bottom:0;box-shadow:0 -18px 60px #0006;backdrop-filter:blur(30px);border-radius:12px 12px 0 0;overflow:hidden}
+.np-panel-layer{position:fixed;left:0;right:0;top:0;bottom:var(--playbar-height);z-index:68;display:flex;align-items:flex-end;justify-content:center;padding:0 18px 16px;background:#0002}
+.np-panel{width:min(560px,100%);height:min(70vh,620px);max-height:100%;display:flex;flex-direction:column;padding:18px 22px 20px;background:#22252df5;border:1px solid #ffffff1a;box-shadow:0 10px 40px #0006;backdrop-filter:blur(30px);border-radius:var(--radius-lg);overflow:hidden}
 /*
  * The height is fixed, not just capped. With only `max-height` the sheet is
  * content-sized, and the list inside it is `flex:1; height:auto` — so an empty

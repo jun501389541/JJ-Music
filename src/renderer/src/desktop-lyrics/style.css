@@ -5,6 +5,19 @@
  * being drawn over an arbitrary desktop: a light wallpaper behind white text is
  * the failure case, which is why the legibility comes from a dark stroke that
  * travels with the font size rather than from a background panel.
+ *
+ * That was the whole story until the user looked at it on a bright blue wallpaper
+ * and asked for the shade to cover the lyric area too. The original reasoning is
+ * worth keeping on the record, because it is still true of the *collapsed* strip:
+ * a panel that is always there turns a floating line of text into a grey box on
+ * the desktop, which is exactly what the transparency check measures.
+ *
+ * What changed is when a panel is allowed, not whether. There are now two, and
+ * both only exist while the pointer is on the strip: the hover card, and the plate
+ * under the words (`.verse::before`). The user has already chosen to look at the
+ * strip at that moment, so covering the wallpaper is no longer a cost — and the
+ * gap between the two, where a bright desktop used to show through the text, is
+ * gone. `body` itself stays transparent in every state.
  */
 html,
 body {
@@ -19,11 +32,34 @@ body {
   font-family: 'Segoe UI Variable', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   user-select: none;
-  cursor: grab;
+  /*
+   * Not `grab`: the window is a fixed 820×156 rectangle and the content is one
+   * line of text plus a card, so a grab cursor on `body` advertised "drag me"
+   * across the empty margin as well. It now sits on the boxes that answer.
+   */
+  cursor: default;
 }
 
-/* A locked window ignores the mouse entirely, so the cursor never reaches it —
-   this only covers the frame between locking and the setting taking effect. */
+/*
+ * Measured, not assumed (`.cache/lyric-lock-hover.mjs`): a locked strip still
+ * receives `mousemove` — `setIgnoreMouseEvents(true, { forward: true })` forwards
+ * pointer motion precisely so hover can work — but receives **no** `pointerdown`,
+ * because the click goes to the window underneath. So "locked" is not "the cursor
+ * never reaches this page"; it is "the page can see you but cannot be clicked".
+ *
+ * That is why a locked strip shows no *toolbar*. A row of buttons that cannot be
+ * pressed is a lie, and making them pressable would mean stopping to ignore the
+ * mouse over the whole strip — which throws away the one thing 锁定位置 is for:
+ * being able to click through it to the app behind.
+ *
+ * It used to follow from that that a locked strip showed nothing at all, and that
+ * unlocking happened in the main window. Users hit that as "locked and now I can't
+ * get it back", so the rule is narrower now: hover still registers, and exactly one
+ * control appears — 解锁, in `.unlock-bar` below. It is pressable because the page
+ * tells the main process when the pointer is on it, and click-through is suspended
+ * for that moment only (see `hover-unlock`). Everything else a locked strip can't do
+ * is still not shown.
+ */
 body.is-locked {
   cursor: default;
 }
@@ -32,28 +68,376 @@ body.is-locked {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /*
+   * Bottom-anchored, so the card grows *upwards* out of the lyric line. The
+   * alternative — centring the block — made the text jump several lines' worth of
+   * pixels the moment the mouse arrived, which is the thing a karaoke overlay must
+   * not do while you are reading it.
+   *
+   * `pointer-events: none` is the hot-area fix. Every listener (hover, drag,
+   * context menu) is bound to this element, and it fills the window, so before
+   * this the whole 820×156 rectangle answered the mouse: hovering the transparent
+   * margin above a collapsed card opened it, and pressing there dragged the strip.
+   * The user sees one line of text and was able to grab an invisible slab.
+   *
+   * Turning the container off does not turn the page off — events on the children
+   * below still reach these listeners by bubbling. What stops being a target is
+   * exactly the padding: the gap around the text, and the empty band above it.
+   *
+   * Chosen over sizing the window to its content because the window's position is
+   * persisted and `clampPosition`/`restingPosition` are computed against a fixed
+   * size; a height that changes with the font size, the translation toggle and the
+   * card would make every one of those a moving target, and the two hardcoded
+   * landing points in `src/test/desktop-lyric.test.mts` would stop pinning
+   * anything. The cost of *this* approach, stated plainly: it shrinks what the page
+   * reacts to, not what the window covers. A click in the margin still lands on
+   * this window and therefore on nothing — it is not passed through to the desktop
+   * behind. Only a content-sized window, or toggling `setIgnoreMouseEvents` from
+   * pointer position, fixes that, and both are bigger changes than a hot area.
+   */
+  justify-content: flex-end;
   gap: 2px;
   width: 100%;
   height: 100%;
-  padding: 0 10px;
+  padding: 0 10px 4px;
   box-sizing: border-box;
   text-align: center;
+  pointer-events: none;
 }
 
-.lyric.is-grabbing {
+.lyric.is-grabbing .lyric__line,
+.lyric.is-grabbing .lyric__sub,
+.lyric.is-grabbing .card {
   cursor: grabbing;
 }
 
+/* ------------------------------------------------------------------ *
+ * The plate under the words
+ * ------------------------------------------------------------------ */
+/*
+ * The two text rows, wrapped so that something wide enough exists to carry a plate.
+ *
+ * Why a wrapper and not a background on `.lyric__line`: that box is shrink-to-fit on
+ * purpose — its width is the current sentence, which is what makes the drag handle
+ * follow the words instead of the window. Paint a plate on it and the plate's width
+ * would jump with every lyric line, like a karaoke highlight bar rather than a board.
+ * The wrapper spans the same content box the card does, so the two line up at the left
+ * and right edges however short the lyric is.
+ *
+ * `pointer-events: none` is the part that must not be "fixed" later: `.lyric` turned
+ * off pointer events for the whole container to shrink the grab area to the words, and
+ * a full-width decorative layer that answers the mouse would put the entire 820×156
+ * rectangle back on the list — undoing that fix while looking like it still holds. The
+ * two rows opt themselves back in below.
+ */
+.verse {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.verse::before {
+  content: '';
+  position: absolute;
+  /* Behind the words it is meant to sit behind; `.verse` starts no stacking context
+     of its own, so this lands under the text but above the transparent window. */
+  z-index: -1;
+  left: 0;
+  right: 0;
+  /*
+   * -6px: the card's own 4px bottom margin plus the 2px flex gap, which is exactly
+   * the strip of wallpaper that used to show between the two — the seam DSH's
+   * screenshot measured (board ended at y=113, text started at y=117). Starting the
+   * plate at the card's bottom edge instead makes them read as one board.
+   * -4px: `.lyric`'s bottom padding, so the plate reaches the window's own bottom
+   * edge instead of leaving a clear line under the translation.
+   */
+  top: -6px;
+  bottom: -4px;
+  background: rgba(18, 20, 28, .74);
+  border-radius: 0 0 12px 12px;
+  opacity: 0;
+  transition: opacity .12s ease-out;
+  pointer-events: none;
+}
+
+/* Same class drives card and plate, so they appear and leave together. `reveal()` and
+   `unreveal()` already own the 240ms delayed collapse; a second timer here would
+   drift out of sync with the card. */
+.lyric.is-hover .verse::before {
+  opacity: 1;
+}
+
+/* A locked strip shows no card, so it shows no plate either — the plate exists to sit
+   under the card, and revealing one without the other would leave a dark band with
+   nothing attached to it. */
+body.is-locked .verse::before {
+  display: none;
+}
+
+/* A locked strip is not draggable, so it must not offer a grab cursor either. */
+body.is-locked .lyric__line,
+body.is-locked .lyric__sub,
+body.is-locked .card {
+  cursor: default;
+}
+
+/* ------------------------------------------------------------------ *
+ * The hover card
+ * ------------------------------------------------------------------ */
+/*
+ * Three columns: what is playing on the left, the transport in the middle, 关闭
+ * alone on the right.
+ *
+ * `minmax(0,1fr) auto minmax(0,1fr)` is what keeps the control cluster on the
+ * card's centre line. The obvious flex layout cannot do this: with the text block
+ * on `flex:1 1 auto` it eats every spare pixel and parks all five buttons against
+ * the right edge, which is how this looked until it was measured against the
+ * reference (the cluster sat at 75%–91% of the frame instead of 43%–60%). Because
+ * the two side columns are the same `1fr`, the middle one stays centred whatever
+ * the window width and whatever the song title.
+ *
+ * The `minmax(0,…)` floor is what lets a long title truncate instead of pushing
+ * the buttons: without a zero floor the left column would grow to fit the text.
+ */
+.card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  /*
+   * Rounded on top only: the plate below (`.verse::before`) is rounded on the bottom,
+   * and the two meet edge to edge. Four rounded corners on the card used to leave two
+   * notches of raw wallpaper where the plate started.
+   */
+  border-radius: 12px 12px 0 0;
+  background: rgba(18, 20, 28, .74);
+  /* `visibility` and not `display`: see the note on `.lyric`'s alignment. */
+  visibility: hidden;
+  /*
+   * Opting back in against `.lyric`'s `pointer-events: none`. `visibility: hidden`
+   * already keeps the collapsed card from being a target, so this costs nothing
+   * when the card is away and makes the whole dark plate live once it is up.
+   */
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity .12s ease-out;
+  cursor: grab;
+}
+
+.lyric.is-hover .card {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* A locked strip shows no toolbar — but it does show the way out. See `.unlock-bar`. */
+body.is-locked .card {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * The unlock affordance, and the only thing a locked strip reveals
+ * ------------------------------------------------------------------ */
+.unlock-bar {
+  display: none;
+  /* It is reachable only because it sits on the text's own hover, and it has to
+     opt back in against `.lyric`'s `pointer-events: none` like everything else. */
+  pointer-events: auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+body.is-locked .lyric.is-hover .unlock-bar {
+  display: flex;
+}
+
+.tool.unlock-bar__btn {
+  /*
+   * Two classes, not one: `.tool` is declared further down this file and sets
+   * `width:30px; height:30px; background:transparent`. Equal specificity means the
+   * later rule wins, and what that produced was a real, clickable, correctly
+   * positioned button with no plate at all — invisible on a light desktop. The
+   * extra class is what makes this rule the one that applies.
+   */
+  width: auto;
+  height: 24px;
+  /* `.tool` is a grid with `place-items:center`; two children in one cell would
+     overlap and the `gap` below would do nothing. */
+  display: flex;
+  align-items: center;
+  padding: 0 9px 0 6px;
+  gap: 5px;
+  border-radius: 12px;
+  background: rgba(18, 20, 28, .74);
+  color: rgba(255, 255, 255, .86);
+  /* Not `grab`: a locked strip cannot be dragged, so it must not offer that. */
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tool.unlock-bar__btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.tool.unlock-bar__btn:hover,
+.tool.unlock-bar__btn:focus-visible {
+  background: rgba(18, 20, 28, .92);
+  color: #fff;
+}
+
+.card__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* The grid floor alone is not enough: a flex row also refuses to shrink below
+     its content unless it is told to. */
+  min-width: 0;
+}
+
+.card__art {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .5);
+  display: grid;
+  place-items: center;
+}
+
+.card__art svg {
+  width: 20px;
+  height: 20px;
+}
+
+.card__cover {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+}
+
+.card__cover.is-loaded {
+  display: block;
+}
+
+.card__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.card__title,
+.card__artist {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.card__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.card__artist {
+  font-size: 12px;
+  color: rgba(255, 255, 255, .66);
+}
+
+.card__tools {
+  flex: 0 0 auto;
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tool {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, .86);
+  cursor: pointer;
+  padding: 0;
+}
+
+.tool svg {
+  width: 18px;
+  height: 18px;
+}
+
+.tool:hover,
+.tool:focus-visible {
+  background: rgba(255, 255, 255, .14);
+  color: #fff;
+}
+
+.tool__letter {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  /* The 字号 affordance in the reference is an underlined "A". */
+  border-bottom: 2px solid currentColor;
+}
+
+.card__tools .tool--active {
+  color: var(--lyric-accent, #ffd166);
+}
+
+.tool--close {
+  flex: 0 0 auto;
+  /* The third grid column: 关闭 is the one control the reference keeps alone on
+     the right, so that the transport cluster can sit in the middle. */
+  justify-self: end;
+  width: 26px;
+  height: 26px;
+  color: rgba(255, 255, 255, .6);
+}
+
+/* ------------------------------------------------------------------ *
+ * The lyric line
+ * ------------------------------------------------------------------ */
 .lyric__line {
+  position: relative;
+  /*
+   * Back on the list for the mouse: this box is shrink-to-fit, so it is exactly
+   * the width of the line being read — which is what makes the drag handle follow
+   * the text instead of the window. It also has to be live while the card is
+   * collapsed, or there would be no way left to move the strip.
+   */
+  pointer-events: auto;
+  cursor: grab;
   font-size: var(--lyric-size, 28px);
   line-height: 1.25;
   font-weight: 700;
   letter-spacing: .01em;
   color: var(--lyric-accent, #ffd166);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   max-width: 100%;
   /*
    * A stroke rather than a shadow: `paint-order: stroke` puts the outline behind
@@ -65,16 +449,50 @@ body.is-locked {
   text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
 }
 
+/* Both copies carry the same text and the same box, so they overlay exactly. */
+.lyric__text {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.lyric__text--lit {
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: #fff;
+  /*
+   * The wipe itself: the lit copy is clipped from the right by `--lit`, which the
+   * script recomputes per frame. Clipping a duplicate rather than colouring whole
+   * spans is what lets the highlight sit *inside* a glyph mid-word, which is what
+   * "逐字渐进" actually looks like.
+   */
+  clip-path: inset(0 var(--lit, 100%) 0 0);
+}
+
 /* The title/artist placeholder stands in until the first lyric timestamp, and
    must not be mistaken for a lyric line. */
-.lyric__line.is-fallback {
+.lyric__line.is-fallback .lyric__text {
   color: #fff;
   opacity: .72;
   font-weight: 600;
   font-size: calc(var(--lyric-size, 28px) * .62);
 }
 
+.lyric__line.is-fallback .lyric__text--lit {
+  /* No timing to wipe against, so show the placeholder whole rather than half-lit. */
+  clip-path: none;
+  opacity: 1;
+}
+
 .lyric__sub {
+  /* The translation line is part of what is visible, so it is part of what the
+     mouse can reach. Empty (translation off) it generates no line box and is
+     therefore not a target at all — the hot area tracks the content by itself. */
+  pointer-events: auto;
+  cursor: grab;
   font-size: calc(var(--lyric-size, 28px) * .56);
   line-height: 1.2;
   font-weight: 500;

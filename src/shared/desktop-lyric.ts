@@ -9,6 +9,13 @@
  * clamp is unit-tested here instead of being trusted inside a BrowserWindow.
  */
 
+/** One word of an enhanced lyric line, timed from the start of its line. */
+export interface DesktopLyricWord {
+  text: string
+  offset: number
+  duration: number
+}
+
 /** What the overlay draws. Sent on every lyric or preference change. */
 export interface DesktopLyricPayload {
   /** The active lyric line; empty before the first timestamp is reached. */
@@ -25,6 +32,14 @@ export interface DesktopLyricPayload {
   artist: string
   fontSize: number
   showTranslation: boolean
+  /**
+   * Whether the romanization layer may take the sub-line.
+   *
+   * A separate flag from `translation` because they compete for one slot: the
+   * overlay has no third line, so which of the two copies wins is the user's
+   * call in 显示翻译 / 显示音译, not something this window can decide.
+   */
+  showRomanization: boolean
   locked: boolean
   /**
    * The app's resolved accent colour.
@@ -33,25 +48,111 @@ export interface DesktopLyricPayload {
    * its old colour after the accent follows a new cover.
    */
   accent: string
+  /**
+   * Cover art as a `data:` URL, or empty when there is nothing to show.
+   *
+   * A data URL and not a `blob:` or a real address because the overlay's CSP is
+   * `img-src 'self' data:` — deliberately, since that window has no `window.jj`
+   * bridge and must not gain a way to read local files or remote hosts. The main
+   * window therefore decodes and re-encodes the cover and ships the bytes.
+   */
+  cover: string
+  /** Whether audio is playing, so the karaoke wipe can freeze instead of drifting. */
+  playing: boolean
+  /**
+   * Per-word timing for the active line, when the source is an enhanced lyric.
+   *
+   * Empty for ordinary `[mm:ss]` files, in which case the fill is interpolated
+   * across the whole line instead — see `lyricLit`.
+   */
+  words: DesktopLyricWord[]
+  /** Milliseconds into the line when this payload was produced. */
+  elapsedMs: number
+  /** How long the line lasts, so the overlay can run the wipe on its own clock. */
+  spanMs: number
+}
+
+/**
+ * How far through a lyric line the highlight has travelled, 0..1.
+ *
+ * The overlay animates this locally — the main window pushes a payload per line,
+ * not per frame — so the maths lives here where it can be unit-tested without a
+ * window. Two shapes of input matter:
+ *
+ *  - Enhanced lyrics carry per-word offsets. The wipe then has to reach the end of
+ *    word *k* exactly when word *k* ends, which is not the same as a linear sweep
+ *    across the line: a short word followed by a long one would otherwise light up
+ *    in proportion to nothing at all. So progress is measured in characters, and
+ *    time only decides how far into the current character run we are.
+ *  - Plain `[mm:ss]` lyrics have no word timing, so the fill is linear across the
+ *    line's span. Better than nothing and never wrong about the endpoints.
+ *
+ * Between two words (a rest) the highlight holds at the previous boundary rather
+ * than running ahead into a word that has not been sung yet.
+ */
+export function lyricLit(
+  words: DesktopLyricWord[],
+  spanMs: number,
+  elapsedMs: number
+): number {
+  if (spanMs <= 0) return 1
+  const t = Math.min(Math.max(elapsedMs, 0), spanMs)
+  if (words.length === 0) return t / spanMs
+  const total = words.reduce((sum, word) => sum + word.text.length, 0)
+  if (total === 0) return 1
+  let done = 0
+  for (const word of words) {
+    const start = word.offset
+    const end = word.offset + Math.max(0, word.duration)
+    if (t < start) return done / total
+    if (t < end) return (done + word.text.length * ((t - start) / (end - start))) / total
+    done += word.text.length
+  }
+  return 1
 }
 
 /**
  * What the overlay can ask for.
  *
- * Every one of these is applied by the main window as a settings write, not by
- * the main process: the overlay owns no state, so `AppSettings` stays the single
- * source of truth and the toolbar button, the 更多 menu and the overlay's own
- * right-click menu can never disagree about what is on, locked or how big.
+ * Everything except `transport` and `moved` is applied by the main window as a
+ * settings write, not by the main process: the overlay owns no state, so
+ * `AppSettings` stays the single source of truth and the toolbar button, the 更多
+ * menu and the overlay's own right-click menu can never disagree about what is on,
+ * locked or how big.
  *
- * `moved` is the odd one out — it comes from the main process after the user
- * drags the strip, and the renderer persists it.
+ * `moved` is the odd one out — it comes from the main process after the user drags
+ * the strip, and the renderer persists it. `transport` is the other one: it is a
+ * player action rather than a preference, so the main window routes it to the
+ * player store instead of to settings.
  */
 export type DesktopLyricCommand =
   | { type: 'toggle-lock' }
   | { type: 'toggle-translation' }
+  | { type: 'toggle-romanization' }
   | { type: 'set-font'; size: number }
   | { type: 'close' }
   | { type: 'moved'; x: number; y: number }
+  /** The card's ⏮ / ▶❚❚ / . Playback belongs to the main window, not to this one. */
+  | { type: 'transport'; action: 'toggle' | 'previous' | 'next' }
+  /**
+   * The pointer has moved onto (or off) the unlock button, while the strip is
+   * locked.
+   *
+   * This one exists because of a measured property of click-through: a locked
+   * window forwards pointer *motion* but delivers no clicks, so a button drawn on
+   * that window cannot be pressed. That was the original reason a locked strip
+   * showed no controls at all — a toolbar of dead buttons is a lie. It is also
+   * what made 锁定位置 impossible to undo from the strip itself.
+   *
+   * So the page reports the one moment where being clickable is required, and the
+   * main process stops ignoring the mouse for exactly that long. It is the only
+   * affordance that appears while locked, which is what keeps the old objection
+   * answered: nothing is shown that the user then cannot press.
+   *
+   * Not a capability grant either — the overlay can already send `toggle-lock`,
+   * which turns click-through off permanently. This asks for it transiently.
+   */
+  | { type: 'hover-unlock'; over: boolean }
 
 /**
  * The sizes the overlay offers.
@@ -66,6 +167,43 @@ export const DESKTOP_LYRIC_FONTS: Array<{ size: number; label: string }> = [
   { size: 36, label: '大' },
   { size: 46, label: '特大' }
 ]
+
+/**
+ * The commands the overlay may ask for, checked field by field.
+ *
+ * Returns null for anything else. The shapes are narrow on purpose: a number that
+ * reaches `set-font` becomes a persisted preference, and a string that reaches
+ * `transport` becomes an action on the user's audio.
+ *
+ * Lives beside the type it validates, because a command that only the main
+ * process could see was a command no test could reach — and this one sits on the
+ * only input channel the transparent, always-on-top window accepts.
+ */
+export function sanitiseRequest(command: unknown): DesktopLyricCommand | null {
+  if (typeof command !== 'object' || command === null) return null
+  const ask = command as Record<string, unknown>
+  switch (ask.type) {
+    case 'toggle-lock':
+    case 'toggle-translation':
+    case 'toggle-romanization':
+    case 'close':
+      return { type: ask.type }
+    case 'set-font':
+      return DESKTOP_LYRIC_FONTS.some(font => font.size === ask.size)
+        ? { type: 'set-font', size: ask.size as number }
+        : null
+    case 'transport':
+      return ask.action === 'toggle' || ask.action === 'previous' || ask.action === 'next'
+        ? { type: 'transport', action: ask.action }
+        : null
+    // A boolean, not a path or a payload: the only thing this can do is decide
+    // whether the strip is clickable for the next moment.
+    case 'hover-unlock':
+      return typeof ask.over === 'boolean' ? { type: 'hover-unlock', over: ask.over } : null
+    default:
+      return null
+  }
+}
 
 export interface Box {
   x: number

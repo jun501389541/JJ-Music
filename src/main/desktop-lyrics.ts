@@ -26,6 +26,7 @@ import {
   clampToDisplays,
   distanceToBox,
   restingPosition,
+  sanitiseRequest,
   type Box,
   type DesktopLyricCommand,
   type DesktopLyricPayload
@@ -37,9 +38,18 @@ const __dirname_ = dirname(fileURLToPath(import.meta.url))
 /**
  * Wide enough for a long line at 特大, short enough that the transparent margin
  * around the text is not a dead zone the user has to aim around.
+ *
+ * The height used to be 104, which was exactly enough for the lyric line and the
+ * translation under it. The hover card sits *above* that (so revealing it cannot
+ * move the text you are reading), so the window has to be tall enough for card +
+ * line + translation at the largest offered font: 56 for the card, 58 for a 46px
+ * line, 31 for the translation sub-line, plus the gaps and the bottom padding.
+ * Measured against the real page rather than arithmetic: at 特大 with the
+ * translation row forced on, the content needs 153 px, and the check that
+ * re-measures it is `.cache/lyric-card-check.mjs` (check 1 and 2).
  */
 const WIDTH = 820
-const HEIGHT = 104
+const HEIGHT = 156
 
 /**
  * How long to wait after the last `moved` event before persisting.
@@ -407,6 +417,36 @@ export class DesktopLyrics {
   }
 
   /**
+   * A control on the overlay's card was pressed.
+   *
+   * Validated rather than trusted: this arrives from a renderer over which we have
+   * no source control, and the command it forwards ends up writing settings or
+   * driving playback. `moved` in particular is main's own message — an overlay that
+   * could send it would be choosing where the window is parked.
+   */
+  request(event: IpcMainEvent, command: unknown): void {
+    if (!this.window || !this.fromOverlay(event)) return
+    const allowed = sanitiseRequest(command)
+    if (!allowed) return
+    /*
+     * Consumed here rather than forwarded: this is a property of *this* window
+     * (whether the OS delivers clicks to it), and the renderer has no way to
+     * change it itself. It only applies while locked — an unlocked strip already
+     * receives clicks, and letting the page toggle the flag then would be a way to
+     * make the window click-through against the setting that says otherwise.
+     */
+    if (allowed.type === 'hover-unlock') {
+      if (!this.hooks.settings().desktopLyricLocked) return
+      this.window.setIgnoreMouseEvents(!allowed.over, { forward: true })
+      return
+    }
+    // 锁定位置 hides the card, but a request already in flight (or a page that
+    // ignores the rule) must not be able to drive the player behind the user's back.
+    if (this.hooks.settings().desktopLyricLocked && allowed.type !== 'toggle-lock') return
+    this.hooks.forward(allowed)
+  }
+
+  /**
    * The overlay's right-click menu.
    *
    * Built here because a sandboxed renderer has no Menu API, and the strip is
@@ -429,6 +469,12 @@ export class DesktopLyrics {
         type: 'checkbox',
         checked: settings.lyricTranslation,
         click: () => send({ type: 'toggle-translation' })
+      },
+      {
+        label: '显示音译',
+        type: 'checkbox',
+        checked: settings.lyricRomanization,
+        click: () => send({ type: 'toggle-romanization' })
       },
       {
         label: '字号',

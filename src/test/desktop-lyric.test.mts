@@ -8,7 +8,9 @@ import {
   activeLines,
   clampPosition,
   clampToDisplays,
+  lyricLit,
   restingPosition,
+  sanitiseRequest,
   unionBox
 } from './shared/desktop-lyric.js'
 import { DEFAULT_SETTINGS, SettingsStore } from './store/settings-store.js'
@@ -16,7 +18,15 @@ import { DEFAULT_SETTINGS, SettingsStore } from './store/settings-store.js'
 // These suites are copied to `out/test` verbatim and run by Node, so no type
 // syntax is allowed anywhere in this file.
 const screen = { x: 0, y: 0, width: 1920, height: 1080 }
-const size = { width: 820, height: 104 }
+/*
+ * The strip's real window size, kept in sync with `WIDTH`/`HEIGHT` in
+ * `src/main/desktop-lyrics.ts`. It grew from 104 to 156 when the hover card was
+ * added (the card sits above the lyric line, so the window has to hold card +
+ * line + translation at the largest font). Every expectation below that encodes a
+ * bottom edge is a function of this number, which is why the two literal positions
+ * in the offset-monitor tests changed with it.
+ */
+const size = { width: 820, height: 156 }
 
 test('a position that already fits is left exactly where the user put it', () => {
   assert.deepEqual(clampPosition({ x: 400, y: 700 }, size, screen), { x: 400, y: 700 })
@@ -108,13 +118,16 @@ const offsetDisplays = [
 ]
 
 test('the far corner of the second panel is where the union clamp actually puts it', () => {
-  // (2062, 2528) is not made up: that is where the strip landed on the real
-  // two-display desktop when the remembered position was pushed out of range.
-  assert.deepEqual(clampToDisplays({ x: 99999, y: 99999 }, size, offsetDisplays), { x: 2062, y: 2528 })
+  // (2062, 2476) is not made up: it is the lower panel's right edge minus the
+  // strip's width, and its bottom edge minus the strip's height — the same place
+  // the real two-display desktop pushed an out-of-range remembered position, with
+  // the y moved up by the 52px the hover card added.
+  assert.deepEqual(clampToDisplays({ x: 99999, y: 99999 }, size, offsetDisplays), { x: 2062, y: 2476 })
   // A genuine cross-monitor park spot, centre well inside the second panel.
   assert.deepEqual(clampToDisplays({ x: 1500, y: 2000 }, size, offsetDisplays), { x: 1500, y: 2000 })
-  // Hanging off the left edge of the lower panel is allowed: 498 of the 820px
-  // are on screen and the centred text with them.
+  // Hanging off the left edge of the lower panel is allowed: 498 of the 820px are
+  // on screen and the centred text with them. The strip's centre is 78px down from
+  // its top, so a taller window reaches further into the panel, not less far.
   assert.deepEqual(clampToDisplays({ x: 0, y: 2000 }, size, offsetDisplays), { x: 0, y: 2000 })
 })
 
@@ -131,7 +144,7 @@ test('a strip dragged into the gap between offset monitors lands on a real scree
   const onSomeScreen = gapped.some(d =>
     centre.x >= d.x && centre.x <= d.x + d.width && centre.y >= d.y && centre.y <= d.y + d.height)
   assert.ok(onSomeScreen, `中心 ${JSON.stringify(centre)} 不在任何一块屏上：${JSON.stringify(dead)}`)
-  assert.deepEqual(dead, { x: 600, y: 976 }, '拉回最近那块屏的下边界')
+  assert.deepEqual(dead, { x: 600, y: 924 }, '拉回最近那块屏的下边界（1080 - 156）')
 })
 
 test('the resting position is bottom-centred, which is where a strip is expected', () => {
@@ -139,6 +152,78 @@ test('the resting position is bottom-centred, which is where a strip is expected
   assert.equal(parked.x, Math.round((screen.width - size.width) / 2))
   assert.ok(parked.y > screen.height / 2, `y=${parked.y}`)
   assert.ok(parked.y + size.height <= screen.height, `y=${parked.y}`)
+})
+
+/* ------------------------------------------------------------------ *
+ * The karaoke wipe
+ *
+ * `lyricLit` is the whole of 逐字渐进高亮's timing, and every way it can be wrong
+ * is silent: the highlight just drifts a little early or late and nobody notices
+ * while the words still light up. So the boundaries are pinned here rather than
+ * trusted to a screenshot.
+ * ------------------------------------------------------------------ */
+
+test('a plain lyric with no word timing fills linearly across the line', () => {
+  assert.equal(lyricLit([], 4000, 0), 0)
+  assert.equal(lyricLit([], 4000, 2000), 0.5)
+  assert.equal(lyricLit([], 4000, 4000), 1)
+})
+
+test('the elapsed time is clamped to the line, so a late push cannot overshoot', () => {
+  assert.equal(lyricLit([], 4000, -500), 0)
+  assert.equal(lyricLit([], 4000, 99000), 1)
+})
+
+test('a zero-length span is fully lit rather than NaN', () => {
+  // Division by zero here would freeze the highlight at an invisible value and
+  // the line would look like it never started.
+  assert.equal(lyricLit([], 0, 0), 1)
+  assert.equal(Number.isNaN(lyricLit([], 0, 0)), false)
+})
+
+test('word timing decides the boundaries, not the clock', () => {
+  // Two characters, 100ms of the first and 900ms of the second. The whole point
+  // of carrying word timing is that the halfway point of the *line* is where the
+  // first character ends — 100ms in, not 500ms in. Linear timing would put the
+  // boundary at 10%, so the second character would sit unlit for most of its own
+  // duration and then snap.
+  const words = [
+    { text: '早', offset: 0, duration: 100 },
+    { text: '安', offset: 100, duration: 900 }
+  ]
+  assert.equal(lyricLit(words, 1000, 100), 0.5, 'the first character is done at 100ms')
+  assert.equal(lyricLit([], 1000, 100), 0.1, 'linear would still be at 10%')
+  // Four tenths into the long second character: half of the line plus that much.
+  assert.ok(Math.abs(lyricLit(words, 1000, 460) - (0.5 + 0.4 / 2)) < 1e-9)
+  assert.equal(lyricLit(words, 1000, 1000), 1)
+})
+
+test('inside a word the fill is proportional to that word, not the line', () => {
+  const words = [
+    { text: 'abc', offset: 0, duration: 300 },
+    { text: 'def', offset: 300, duration: 300 }
+  ]
+  // Halfway through a three-character word is half of those three characters.
+  assert.ok(Math.abs(lyricLit(words, 600, 150) - 0.25) < 1e-9)
+})
+
+test('a rest between words holds the highlight at the previous boundary', () => {
+  const words = [
+    { text: 'hi', offset: 0, duration: 100 },
+    { text: 'there', offset: 500, duration: 500 }
+  ]
+  // 'hi' is 2 of the 7 characters on the line, so the rest holds the fill at 2/7
+  // for the whole 400ms gap — not at 20%, which is where the clock alone would
+  // have put it and which would light up 'there' before it is sung.
+  const held = 2 / 7
+  assert.equal(lyricLit(words, 1000, 200), held)
+  assert.equal(lyricLit(words, 1000, 499), held)
+  assert.ok(lyricLit(words, 1000, 500) >= held)
+})
+
+test('words whose total text is empty are treated as a finished line', () => {
+  // A line can be all whitespace; dividing by zero characters would be NaN.
+  assert.equal(lyricLit([{ text: '', offset: 0, duration: 100 }], 100, 50), 1)
 })
 
 test('the player has no active line before the first timestamp', () => {
@@ -181,4 +266,44 @@ test('a settings file from before the overlay gains its keys instead of losing i
   const persisted = JSON.parse(readFileSync(file, 'utf8'))
   assert.deepEqual(persisted.desktopLyricPosition, { x: 120, y: 340 })
   assert.equal((await reread.load()).desktopLyricFontSize, 28)
+})
+
+/* ------------------------------------------------------------------ *
+ * The overlay's one input channel
+ *
+ * `desktop-lyric:request` is the only thing the always-on-top, click-through
+ * window accepts from the page, and every command it can name becomes either a
+ * persisted preference or an action on the user's audio. Until the 音译 switch
+ * moved into that menu, nothing tested the gate: a new command that is not added
+ * to the allow-list is silently dead in a native menu no probe can click.
+ * ------------------------------------------------------------------ */
+
+test('every command the overlay menu can name passes the gate', () => {
+  for (const type of ['toggle-lock', 'toggle-translation', 'toggle-romanization', 'close']) {
+    assert.deepEqual(sanitiseRequest({ type }), { type }, `${type} rejected`)
+  }
+  assert.deepEqual(sanitiseRequest({ type: 'set-font', size: 36 }), { type: 'set-font', size: 36 })
+  assert.deepEqual(sanitiseRequest({ type: 'transport', action: 'next' }), { type: 'transport', action: 'next' })
+  assert.deepEqual(sanitiseRequest({ type: 'hover-unlock', over: true }), { type: 'hover-unlock', over: true })
+})
+
+test('a size, action or flag outside the offered set is refused, not coerced', () => {
+  assert.equal(sanitiseRequest({ type: 'set-font', size: 99 }), null)
+  assert.equal(sanitiseRequest({ type: 'set-font', size: '36' }), null)
+  assert.equal(sanitiseRequest({ type: 'transport', action: 'quit' }), null)
+  assert.equal(sanitiseRequest({ type: 'hover-unlock', over: 'yes' }), null)
+})
+
+test('anything the type union does not describe reaches the main process as nothing', () => {
+  // `moved` is legitimate but one-way: the main process records where a drag
+  // ended, the page may not name a position for itself.
+  assert.equal(sanitiseRequest({ type: 'moved', x: 10, y: 20 }), null)
+  for (const junk of [null, undefined, 0, '', 'toggle-lock', [], {}, { type: 1 }, { type: 'webContentsSend' }]) {
+    assert.equal(sanitiseRequest(junk), null, JSON.stringify(junk) + ' accepted')
+  }
+})
+
+test('a recognised command keeps only its type, so extra keys carry nothing', () => {
+  assert.deepEqual(sanitiseRequest({ type: 'toggle-romanization', size: 1 }), { type: 'toggle-romanization' })
+  assert.deepEqual(sanitiseRequest({ type: 'close', path: 'C:/Users/x/private.txt' }), { type: 'close' })
 })

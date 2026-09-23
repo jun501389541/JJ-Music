@@ -9,6 +9,13 @@
       it by the main window, so the tight set is free: nothing here loads or
       fetches anything remote, and the only dynamic styling is custom properties
       set through CSSOM (`--lyric-size`, `--lyric-accent`).
+
+      `img-src 'self' data:` is deliberately *not* widened now that the card shows
+      cover art. This window has no `window.jj` bridge precisely so it cannot read
+      local files; adding `jjmedia:` would hand back exactly that ability through
+      the back door, and `blob:` would let the main window smuggle any object URL
+      in. So the main window decodes the cover, re-encodes it small, and ships the
+      bytes as a data URL — see `DesktopLyricPayload.cover`.
     -->
     <meta
       http-equiv="Content-Security-Policy"
@@ -19,12 +26,77 @@
   <body>
     <div id="lyric" class="lyric">
       <!--
-        The live region sits on the current line, not on the container. As a
-        container live region it announced on every rewrite, so a screen reader
-        read the translation too and re-read the whole block each lyric tick.
+        The card is the hover-only chrome: cover, what is playing, transport,
+        lock, close. It is `visibility`-hidden rather than removed, so revealing
+        it cannot reflow the lyric line underneath — a strip whose text jumps when
+        the mouse arrives is worse than one with no controls at all.
+
+        Icons are inline SVG because `script-src 'self'` rules out an icon font or
+        a JS sprite, and this page has no Vue to borrow `AppIcon` from.
       -->
-      <div class="lyric__line" id="line" aria-live="polite"></div>
-      <div class="lyric__sub" id="sub"></div>
+      <div class="card" id="card">
+        <span class="card__left">
+          <span class="card__art" id="art">
+            <svg class="card__placeholder" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5" fill="currentColor"/><circle cx="16.5" cy="16" r="2.5" fill="currentColor"/></svg>
+            <img class="card__cover" id="cover" alt="" />
+          </span>
+          <span class="card__meta">
+            <b class="card__title" id="metaTitle"></b>
+            <span class="card__artist" id="metaArtist"></span>
+          </span>
+        </span>
+        <span class="card__tools">
+          <button class="tool" id="fontBtn" type="button" title="字号" aria-label="字号"><span class="tool__letter">A</span></button>
+          <button class="tool" id="prevBtn" type="button" title="上一首" aria-label="上一首"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 5h2v14H7zM19 5v14l-9-7z"/></svg></button>
+          <button class="tool" id="playBtn" type="button" title="播放 / 暂停" aria-label="播放 / 暂停"><svg id="playIcon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button>
+          <button class="tool" id="nextBtn" type="button" title="下一首" aria-label="下一首"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M15 5h2v14h-2zM5 5v14l9-7z"/></svg></button>
+          <button class="tool" id="lockBtn" type="button" title="锁定位置" aria-label="锁定位置"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H5v12h14V10h-2V7a5 5 0 0 0-5-5m0 2a3 3 0 0 1 3 3v3H9V7a3 3 0 0 1 3-3"/></svg></button>
+        </span>
+        <button class="tool tool--close" id="closeBtn" type="button" title="关闭桌面歌词" aria-label="关闭桌面歌词"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <!--
+        The one control a locked strip shows. It sits directly above the lyric line
+        rather than in a corner, because the hot area is the text: an affordance
+        parked in the dead band could never be reached without first crossing
+        territory that drops the hover.
+
+        Only 解锁 appears. The rest of the toolbar stays hidden while locked, which
+        is what keeps the original objection answered — a locked window forwards
+        pointer motion but delivers no clicks, so every other button shown here
+        would be one the user cannot press.
+      -->
+      <div class="unlock-bar" id="unlockBar">
+        <button class="tool unlock-bar__btn" id="unlockBtn" type="button" title="解锁位置" aria-label="解锁位置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 1 5 5v3h-2V7a3 3 0 0 0-6 0v3h8v12H5V10h2.9V7A5 5 0 0 1 12 2"/></svg>
+          <span>解锁</span>
+        </button>
+      </div>
+      <!--
+        The two text rows, wrapped so there is one thing wide enough to carry the
+        hover plate. `.lyric__line` is deliberately shrink-to-fit (its width is the
+        current sentence), which is what makes the drag handle follow the words
+        rather than the window; a background on it would therefore be a karaoke
+        highlight bar whose width jumps every line. The plate belongs to the wrapper,
+        which spans the same content box the card does, so the two line up at the
+        left and right edges no matter how short the lyric is.
+      -->
+      <div class="verse">
+        <!--
+          The live region sits on the current line, not on the container. As a
+          container live region it announced on every rewrite, so a screen reader
+          read the translation too and re-read the whole block each lyric tick.
+
+          The line is drawn twice — a dim copy and a lit copy clipped from the left
+          — because that is the only way to wipe *through* a glyph rather than snap
+          word by word. The lit copy is aria-hidden so the announcement is still the
+          line once, not twice.
+        -->
+        <div class="lyric__line" id="line" aria-live="polite">
+          <span class="lyric__text" id="dim"></span>
+          <span class="lyric__text lyric__text--lit" id="lit" aria-hidden="true"></span>
+        </div>
+        <div class="lyric__sub" id="sub"></div>
+      </div>
     </div>
     <script type="module" src="/src/desktop-lyrics/main.ts"></script>
   </body>

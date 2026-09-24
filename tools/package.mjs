@@ -16,7 +16,8 @@
  *      plain Node and the app cannot launch. It is cleared for the child.
  *
  * A full `dist` also writes `release/SHA256SUMS.txt` for the version in
- * `package.json`, and stops if that version produced no artifacts.
+ * `package.json`, and stops if that version produced no artifacts. Publishing
+ * is always explicit: electron-builder otherwise tries to publish when CI=true.
  *
  * Usage:
  *   node tools/package.mjs          # NSIS installer → release/JJ Music-<v>-x64.exe
@@ -96,6 +97,8 @@ run(
     ELECTRON_BUILDER,
     '--win',
     ...(wantDirOnly ? ['--dir'] : []),
+    '--publish',
+    'never',
     '--config',
     'electron-builder.yml',
     `--config.directories.output=${releaseDir}`

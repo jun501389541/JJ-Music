@@ -96,6 +96,7 @@ interface ScriptRuntime {
   /** Set when the process died; further requests fail fast. */
   dead: boolean
   logs: string[]
+  stopFileLifecycle?: () => void
   /**
    * Set when the exit looked like a hard kill rather than a clean shutdown, so
    * the UI can explain it instead of showing a generic failure.
@@ -278,13 +279,12 @@ export class SourceEngine {
     /**
      * Two launch modes:
      *
-     *   restricted (Windows, default) — `runas /trustlevel:0x20000` strips
+     *   restricted (Windows) — `runas /trustlevel:0x20000` strips
      *   SeShutdownPrivilege from the child's token, so a hostile source's
      *   shutdown call fails at the OS level. Protocol carried over files
      *   (runas detaches the child; no IPC channel exists).
      *
-     *   fork (fallback) — plain `fork()` with IPC, used on non-Windows and as
-     *   an escape hatch if the restricted launch itself fails.
+     *   fork — plain `fork()` with IPC, used on non-Windows.
      */
     const restricted = supportsRestrictedLaunch()
     let child: ChildProcess
@@ -454,11 +454,15 @@ export class SourceEngine {
     const POLL_MS = 200
     let logOffset = 0
     let settled = false
+    const stopLifecycle = (): void => {
+      clearInterval(pollTimer)
+      clearInterval(heartbeatWatch)
+    }
+    runtime.stopFileLifecycle = stopLifecycle
     const settleOnce = (error?: Error): void => {
       if (settled) return
       settled = true
-      clearInterval(pollTimer)
-      clearInterval(heartbeatWatch)
+      if (error) stopLifecycle()
       settle(error)
     }
 
@@ -501,12 +505,16 @@ export class SourceEngine {
       // The ready.json already settled this lifecycle, so this failure has to
       // be surfaced separately — it triggers the same disable-and-quarantine
       // path as any other death.
-      if (ready?.ok === false && settled) {
+      if (ready?.ok === false && settled && !runtime.dead) {
         runtime.dead = true
         this.rebuildOwners()
         runtime.crashReason = `音源脚本执行出错（${ready.error ?? '未知原因'}）`
         const error = new Error(ready.error ?? '音源脚本执行出错')
         this.failAllPending(runtime, error)
+        this.store.setError(runtime.api.meta.id, error.message)
+        this.store.setEnabled(runtime.api.meta.id, false)
+        this.emit('sourcesChanged')
+        stopLifecycle()
         this.emit('scriptError', runtime.api.meta.id, ready.error ?? '音源脚本执行出错')
       }
 
@@ -564,7 +572,11 @@ export class SourceEngine {
         runtime.crashReason = reason
         const error = new Error(reason)
         this.failAllPending(runtime, error)
-        settleOnce(error)
+        if (settled) {
+          this.store.quarantine(runtime.api.meta.id, reason)
+          this.emit('sourcesChanged')
+          stopLifecycle()
+        } else settleOnce(error)
         this.emit('scriptError', runtime.api.meta.id, reason)
       }
     }, 1_000)
@@ -779,6 +791,7 @@ export class SourceEngine {
    */
   private async teardown(runtime: ScriptRuntime, reason: Error): Promise<void> {
     runtime.dead = true
+    runtime.stopFileLifecycle?.()
     this.fileModeRuntimes.delete(runtime.api.meta.id)
     this.failAllPending(runtime, reason)
 
@@ -886,8 +899,10 @@ export class SourceEngine {
     apiId: string,
     source: SourceId,
     action: SourceAction,
-    info: Record<string, unknown>
+    info: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<T> {
+    if (signal?.aborted) throw new Error('请求已取消')
     const runtime = this.runtimes.get(apiId)
     if (!runtime || runtime.dead) throw new Error(`音源「${source}」已停止`)
 
@@ -895,16 +910,28 @@ export class SourceEngine {
     const payload = { source, action, info }
 
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const settle = (error?: Error, value?: T): void => {
+        clearTimeout(timer)
         runtime.pending.delete(id)
-        reject(new Error(`音源请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`))
+        signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve(value as T)
+      }
+      const onAbort = (): void => settle(new Error('请求已取消'))
+      const timer = setTimeout(() => {
+        settle(new Error(`音源请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`))
       }, REQUEST_TIMEOUT_MS)
 
       runtime.pending.set(id, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
+        resolve: (value: unknown) => settle(undefined, value as T),
+        reject: (error: Error) => settle(error),
         timer
       })
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
 
       // Dispatch. File mode writes a request file the detached child watches
       // for; IPC mode sends over the channel. In both cases a dispatch failure
@@ -916,9 +943,7 @@ export class SourceEngine {
           runtime.child.send({ type: 'request', id, payload })
         }
       } catch (error) {
-        clearTimeout(timer)
-        runtime.pending.delete(id)
-        reject(error instanceof Error ? error : new Error(String(error)))
+        settle(error instanceof Error ? error : new Error(String(error)))
       }
     })
   }
@@ -933,9 +958,10 @@ export class SourceEngine {
   async request<T = unknown>(
     source: SourceId,
     action: SourceAction,
-    info: Record<string, unknown>
+    info: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<T> {
-    return this.requestWithFallback<T>(source, action, info)
+    return this.requestWithFallback<T>(source, action, info, signal)
   }
 
   /**
@@ -949,8 +975,10 @@ export class SourceEngine {
   private async requestWithFallback<T>(
     source: SourceId,
     action: SourceAction,
-    info: Record<string, unknown>
+    info: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<T> {
+    if (signal?.aborted) throw new Error('请求已取消')
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
       if (!runtime || runtime.dead) return false
@@ -963,6 +991,7 @@ export class SourceEngine {
 
     const failures: string[] = []
     for (const apiId of candidates) {
+      if (signal?.aborted) throw new Error('请求已取消')
       const runtime = this.runtimes.get(apiId)
       // Skip scripts that do not implement this action at all — asking them is
       // just a guaranteed "Request event is not defined".
@@ -970,8 +999,9 @@ export class SourceEngine {
       if (declared && !declared.actions.includes(action)) continue
 
       try {
-        return await this.requestFrom<T>(apiId, source, action, info)
+        return await this.requestFrom<T>(apiId, source, action, info, signal)
       } catch (error) {
+        if (signal?.aborted) throw new Error('请求已取消')
         const name = runtime?.api.meta.name ?? apiId
         const reason = error instanceof Error ? error.message : String(error)
         failures.push(`${name}: ${reason}`)
@@ -1067,7 +1097,8 @@ export class SourceEngine {
   /** Fetch lyrics when the source implements the `lyric` action. */
   async getLyric(
     source: SourceId,
-    musicInfo: OnlineMusicInfo
+    musicInfo: OnlineMusicInfo,
+    signal?: AbortSignal
   ): Promise<{ lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string }> {
     if (!this.supports(source, 'lyric')) {
       return { lyric: '' }
@@ -1080,7 +1111,7 @@ export class SourceEngine {
       tlyric?: string
       rlyric?: string
       lxlyric?: string
-    }>(source, 'lyric', { type: 'music', musicInfo: toLegacyOnline(musicInfo) })
+    }>(source, 'lyric', { type: 'music', musicInfo: toLegacyOnline(musicInfo) }, signal)
 
     // LX silently drops oversized translation/romanisation payloads; mirror
     // those ceilings so a bloated response degrades instead of breaking layout.
@@ -1094,15 +1125,16 @@ export class SourceEngine {
   }
 
   /** Fetch cover art when the source implements the `pic` action. */
-  async getPic(source: SourceId, musicInfo: OnlineMusicInfo): Promise<string> {
+  async getPic(source: SourceId, musicInfo: OnlineMusicInfo, signal?: AbortSignal): Promise<string> {
     if (!this.supports(source, 'pic')) return ''
     try {
       const url = await this.request<unknown>(source, 'pic', {
         type: 'music',
         musicInfo: toLegacyOnline(musicInfo)
-      })
+      }, signal)
       return isValidMusicUrl(url) ? url : ''
     } catch {
+      if (signal?.aborted) throw new Error('请求已取消')
       return ''
     }
   }

@@ -53,30 +53,12 @@ export interface RestrictedLaunch {
 /**
  * True when the restricted-token launch path should be used.
  *
- * ## Currently DISABLED by user decision (rollback)
- *
- * The mechanism works end-to-end (verified: SeShutdownPrivilege is stripped,
- * the file handoff protocol boots sources, crash detection works). But in
- * real-world use it shipped a chain of experience regressions — init
- * timeouts, a visible console window per source, and state desyncs — and
- * after several fix rounds the user chose stability over the extra hardening.
- *
- * The complete implementation is kept intact and this flag is the only switch:
- * flip it to `true` (or wire it to a settings toggle) to re-enable restricted
- * launches. The security layers that remain active without it:
- *   - pre-flight validation (source-validator.ts), including the
- *     combined-trait rule that blocks the known shutdown-capable source;
- *   - persistent quarantine (SourceStore.quarantine);
- *   - in-process capability stripping (source-host.ts lockDownProcess).
- *
- * Known residual risk without the restricted token: a source whose malicious
- * call is hidden inside an encrypted string table AND which does not match any
- * static rule can still invoke shutdown.exe with the user's privileges. The
- * known such source is caught by the combined-trait rule; keep it quarantined.
+ * Windows uses the restricted-token path after repairing its boot and request
+ * file contracts. This strips SeShutdownPrivilege but still allows ordinary
+ * access to the user's files and network; it is not a general-purpose sandbox.
  */
 export function supportsRestrictedLaunch(platform: string = process.platform): boolean {
-  const RESTRICTED_LAUNCH_ENABLED = false // ← rollback switch: set true to re-enable
-  return RESTRICTED_LAUNCH_ENABLED && platform === 'win32'
+  return platform === 'win32'
 }
 
 /**
@@ -89,11 +71,9 @@ export function supportsRestrictedLaunch(platform: string = process.platform): b
  * file, where the interpreter's own parser handles it, and `runas` only sees
  * one quoted path with no nesting.
  *
- * The wrapper is a `.vbs` run by `wscript.exe`, not a `.cmd`. `cmd.exe` is a
- * console program, so `runas` allocating it a visible console window left one
- * black window parked on the user's screen per enabled source. `wscript.exe`
- * is a GUI host: no console is allocated, and the Node process it starts
- * inherits that windowless state.
+ * The wrapper uses a short `.cmd` bootstrap followed by a hidden VBScript host.
+ * `windowsHide` also hides the runas process; a visible long-lived console is
+ * never needed for the source process.
  *
  * `nodeExec` is the Electron binary in `ELECTRON_RUN_AS_NODE` mode, matching
  * what `fork()` would use internally. The scratch directory must already
@@ -150,6 +130,7 @@ export function launchRestricted(options: {
 
   const wrapper = spawn('runas', ['/trustlevel:0x20000', `"${cmdFile}"`], {
     stdio: 'ignore',
+    windowsHide: true,
     windowsVerbatimArguments: true
   })
 
@@ -176,7 +157,9 @@ export interface FileResponse {
 export function writeRequest(scratchDir: string, request: FileRequest): void {
   const final = join(scratchDir, `req-${request.id}.json`)
   const tmp = `${final}.tmp`
-  writeFileSync(tmp, JSON.stringify(request), 'utf8')
+  writeFileSync(tmp, JSON.stringify({ type: 'request', id: request.id, payload: {
+    source: request.source, action: request.action, info: request.info
+  } }), 'utf8')
   renameSync(tmp, final)
 }
 

@@ -190,7 +190,7 @@ function buildPatch(
  */
 export async function matchMetadata(
   local: LocalMusicInfo,
-  options: MatchOptions = {}
+  options: MatchOptions & { signal?: AbortSignal } = {}
 ): Promise<MatchCandidate[]> {
   const limit = options.limit ?? 8
   const overwrite = options.overwrite ?? false
@@ -203,7 +203,7 @@ export async function matchMetadata(
 
   const settled = await Promise.allSettled(
     sources.map(async (source) => {
-      const page = await searchOnline(source, query, 1)
+      const page = await searchOnline(source, query, 1, options.signal)
       return page.list
     })
   )

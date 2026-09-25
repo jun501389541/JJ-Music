@@ -4,7 +4,10 @@ import { performance } from 'node:perf_hooks'
 import { createLocalSearchIndex } from '../out/test/renderer/utils/local-search.js'
 import { createSettingsWriter } from '../out/test/renderer/utils/settings-writer.js'
 
-const tracks = Array.from({ length: 10000 }, (_, i) => ({ id: String(i), path: `D:/Music/${i}.flac`, name: `Song ${i % 2000}`, singer: `Artist ${i % 100}`, albumName: `Album ${i % 300}` }))
+const countArg = process.argv.find(arg => arg.startsWith('--tracks='))
+const trackCount = countArg ? Number(countArg.slice('--tracks='.length)) : 10000
+if (!Number.isInteger(trackCount) || trackCount < 1 || trackCount > 100000) throw new Error('--tracks must be 1..100000')
+const tracks = Array.from({ length: trackCount }, (_, i) => ({ id: String(i), path: `D:/Music/${i}.flac`, name: `Song ${i % 2000}`, singer: `Artist ${i % 100}`, albumName: `Album ${i % 300}` }))
 const queries = ['Song 1', 'Artist 5', 'Album 7', 'Song 999', 'Song 2 Artist 2']
 const normalize = value => value.normalize('NFKC').toLocaleLowerCase().trim()
 function before(query) {

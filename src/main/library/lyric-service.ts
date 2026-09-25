@@ -70,11 +70,14 @@ export function lyricSourceOrder(
  */
 export async function resolveOnlineLyricByOrder(
   order: OnlineLyricSource[],
-  steps: Record<OnlineLyricSource, () => Promise<LyricResult>>
+  steps: Record<OnlineLyricSource, () => Promise<LyricResult>>,
+  signal?: AbortSignal
 ): Promise<{ lyric: LyricResult; asset: AssetRef | null }> {
   for (const source of order) {
+    if (signal?.aborted) break
     try {
       const result = await steps[source]()
+      if (signal?.aborted) break
       if (result?.lyric?.trim()) return { lyric: result, asset: { origin: 'remote', provider: source, at: Date.now() } }
     } catch {
       /* try the next one */
@@ -98,7 +101,8 @@ export async function lyricFromOtherPlatforms(
   deps: {
     match?: typeof matchMetadata
     fetchLyric?: typeof fetchOnlineLyric
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<LyricResult> {
   const match = deps.match ?? matchMetadata
   const fetchLyric = deps.fetchLyric ?? fetchOnlineLyric
@@ -121,13 +125,14 @@ export async function lyricFromOtherPlatforms(
 
   let matches
   try {
-    matches = await match(query, { sources: others, limit: 6 })
+    matches = await match(query, { sources: others, limit: 6, signal })
   } catch {
     return { lyric: '' }
   }
   for (const candidate of matches) {
+    if (signal?.aborted) break
     if (candidate.score < MIN_OTHER_PLATFORM_SCORE) continue
-    const result = await fetchLyric(candidate.music)
+    const result = await fetchLyric(candidate.music, signal)
     if (result.lyric.trim()) return result
   }
   return { lyric: '' }

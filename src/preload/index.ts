@@ -204,26 +204,25 @@ const api = {
   },
 
   music: {
-    search: (source: SourceId, keyword: string, page = 1) =>
+    cancel: (requestId: string) => ipcRenderer.send(IPC.musicCancel, requestId),
+    search: (source: SourceId, keyword: string, page = 1, requestId?: string) =>
       invoke<{ list: OnlineMusicInfo[]; total?: number; allPage?: number }>(
         IPC.musicSearch,
-        source,
-        keyword,
-        page
+        source, keyword, page, requestId
       ),
     /**
      * Aggregate search across every platform with a built-in adapter. Results
      * are interleaved round-robin, and platforms that failed are reported
      * rather than silently missing.
      */
-    searchAll: (keyword: string, page = 1) =>
+    searchAll: (keyword: string, page = 1, requestId?: string) =>
       invoke<{
         list: OnlineMusicInfo[]
         total: number
         allPage: number
         failed: Array<{ source: SourceId; error: string }>
         sources: Array<{ source: SourceId; count: number }>
-      }>(IPC.musicSearchAll, keyword, page),
+      }>(IPC.musicSearchAll, keyword, page, requestId),
     /** Platforms with a built-in search adapter, for the UI's tab list. */
     providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.musicSearchProviders),
     /**
@@ -248,11 +247,10 @@ const api = {
      * carries provenance for both assets, so the UI can say where they came from
      * instead of guessing from whichever field happened to be filled.
      */
-    enrich: (musicInfo: OnlineMusicInfo, only?: OnlineLyricSource) =>
+    enrich: (musicInfo: OnlineMusicInfo, only?: OnlineLyricSource, requestId?: string) =>
       invoke<LyricResult & { picUrl: string; asset: AssetRef | null; cover: AssetRef | undefined }>(
         IPC.musicEnrich,
-        musicInfo,
-        only
+        musicInfo, only, requestId
       )
   },
 

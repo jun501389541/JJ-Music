@@ -160,7 +160,7 @@ export async function safeFetchResponse(
 /** A caller-supplied URL whose body is read under a hard byte limit. */
 export async function safeFetchBytes(
   raw: string | URL,
-  options: SafeFetchOptions = {}
+  options: SafeFetchOptions & { init?: RequestInit } = {}
 ): Promise<{ body: Buffer; contentType: string | null }> {
   const response = await safeFetchResponse(raw, options)
   try {
@@ -171,7 +171,7 @@ export async function safeFetchBytes(
 }
 
 /** As `safeFetchBytes`, decoded as UTF-8 text. */
-export async function safeFetchText(raw: string | URL, options: SafeFetchOptions = {}): Promise<string> {
+export async function safeFetchText(raw: string | URL, options: SafeFetchOptions & { init?: RequestInit } = {}): Promise<string> {
   const response = await safeFetchResponse(raw, options)
   try {
     return (await readBounded(response, options.maxBytes ?? DEFAULT_MAX_BYTES)).toString('utf8')

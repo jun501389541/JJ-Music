@@ -26,6 +26,7 @@ import { isLocalTrack, ONLINE_SOURCE_IDS } from '@shared/types'
 import type { ResolvedLyric } from '@shared/library-types'
 import { WebAudioEngine } from '../audio/web-audio-engine'
 import { activeLineIndex, parseLyrics, type ParsedLyrics } from '../audio/lyrics'
+import { cancellableMusic } from '../utils/cancellable-music'
 
 /** How to reach a queued track's audio. */
 interface ResolvedSource {
@@ -329,6 +330,7 @@ export const usePlayerStore = defineStore('player', () => {
    */
   let playGeneration = 0
   let lyricGeneration = 0
+  let lyricAbort: AbortController | null = null
   let failureGeneration = -1
   let mayRetryUrl = true
   let loadedTrackId: string | null = null
@@ -438,6 +440,8 @@ export const usePlayerStore = defineStore('player', () => {
    * stale responses out while letting a still-valid request finish.
    */
   function beginLyricRequest(track: PlayableTrack): () => boolean {
+    lyricAbort?.abort()
+    lyricAbort = new AbortController()
     const generation = ++lyricGeneration
     return () =>
       generation === lyricGeneration && currentTrack.value?.id === track.id
@@ -466,6 +470,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (index < 0 || index >= queue.value.length) return
     const generation = ++playGeneration
     lyricGeneration += 1
+    lyricAbort?.abort()
     mayRetryUrl = options.retryUrl !== false
     const track = queue.value[index]
     currentIndex.value = index
@@ -1045,6 +1050,7 @@ export const usePlayerStore = defineStore('player', () => {
     flushSession()
     playGeneration += 1
     lyricGeneration += 1
+    lyricAbort?.abort()
     clearStallTimer()
     loadedTrackId = null
     engine.value?.stop()
@@ -1106,6 +1112,7 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
     const isCurrent = beginLyricRequest(track)
+    const signal = lyricAbort!.signal
     lyricLoading.value = true
     lyricError.value = null
     try {
@@ -1130,7 +1137,7 @@ export const usePlayerStore = defineStore('player', () => {
         // from the host's built-in platform adapters. This matters because a
         // track found by search rarely carries either field.
         const onlineTrack = { ...toIpcPayload(track) } as OnlineMusicInfo
-        const enriched = await window.jj.music.enrich(onlineTrack, lyricSourceChoice.value ?? undefined)
+        const enriched = await cancellableMusic(signal, id => window.jj.music.enrich(onlineTrack, lyricSourceChoice.value ?? undefined, id))
         if (!isCurrent()) return
 
         lyricAsset.value = enriched.asset ?? null

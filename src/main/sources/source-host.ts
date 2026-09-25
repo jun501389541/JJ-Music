@@ -118,7 +118,7 @@ const fileSend = (message: Record<string, unknown>): void => {
   try {
     switch (message.type) {
       case 'ready':
-        writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify(message), 'utf8')
+        writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify({ ok: true, sources: message.sources }), 'utf8')
         break
       case 'boot-error':
         writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify({ ok: false, error: message.error }), 'utf8')
@@ -128,7 +128,12 @@ const fileSend = (message: Record<string, unknown>): void => {
         if (typeof message.id === 'number') {
           const final = join(scratchDir, `res-${message.id}.json`)
           const tmp = `${final}.tmp`
-          writeFileSync(tmp, JSON.stringify(message), 'utf8')
+          writeFileSync(tmp, JSON.stringify({
+            id: message.id,
+            ok: message.type === 'response',
+            data: message.data,
+            error: message.error
+          }), 'utf8')
           renameSync(tmp, final)
         }
         break
@@ -469,6 +474,7 @@ const lx = {
       return Promise.reject(new Error(`The event is not supported: ${name}`))
     }
     if (name === EVENT_NAMES.inited) {
+      if (initFailed) return Promise.reject(new Error('Script initialization already failed'))
       if (hasInited) return Promise.reject(new Error('Script is inited'))
       hasInited = true
       const payload = (data ?? {}) as { sources?: Record<string, unknown> }

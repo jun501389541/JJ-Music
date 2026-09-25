@@ -305,6 +305,30 @@ export class MusicLibrary {
     }
     const seen = new Set<string>()
     let lastReport = 0
+    const pendingReads: Array<{
+      file: string
+      isRefresh: boolean
+      result: Promise<{ track?: LocalMusicInfo; failed?: true }>
+    }> = []
+
+    // Four concurrent metadata parses overlap disk I/O while keeping cover
+    // decoding and memory bounded. Commit in walk order so list order is stable.
+    const flushReads = async (): Promise<void> => {
+      if (pendingReads.length === 0) return
+      const batch = pendingReads.splice(0)
+      const results = await Promise.all(batch.map(item => item.result))
+      for (let i = 0; i < batch.length; i++) {
+        const item = batch[i]
+        const result = results[i]
+        if (result.failed || !result.track) progress.failed += 1
+        else {
+          this.tracks.set(item.file, result.track)
+          if (item.isRefresh) progress.unchanged += 1
+          else progress.added += 1
+        }
+      }
+      report()
+    }
 
     const report = (force = false): void => {
       const now = Date.now()
@@ -346,15 +370,20 @@ export class MusicLibrary {
           // counting it as "added" would overstate what the scan did.
           const isRefresh = Boolean(existing) && existing?.mtimeMs === info.mtimeMs && existing?.size === info.size
 
-          const track = await this.readTrack(file, info.size, info.mtimeMs)
-          this.tracks.set(file, track)
-          if (isRefresh) progress.unchanged += 1
-          else progress.added += 1
+          pendingReads.push({
+            file,
+            isRefresh,
+            result: this.readTrack(file, info.size, info.mtimeMs)
+              .then(track => ({ track }), () => ({ failed: true as const }))
+          })
+          if (pendingReads.length >= 4) await flushReads()
         } catch {
           progress.failed += 1
         }
       }
     }
+
+    await flushReads()
 
     // Prune entries whose files disappeared.
     for (const path of [...this.tracks.keys()]) {

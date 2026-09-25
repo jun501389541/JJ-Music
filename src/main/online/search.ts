@@ -39,14 +39,13 @@ const BROWSER_UA =
 interface FetchOptions {
   headers?: Record<string, string>
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 async function httpGet(url: string, options: FetchOptions = {}): Promise<string> {
-  const controller = new AbortController()
-  const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const timer = setTimeout(() => controller.abort(), timeout)
-  try {
-    const response = await fetch(url, {
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline
+  const response = await fetch(url, {
       headers: {
         'User-Agent': BROWSER_UA,
         Accept: 'application/json, text/plain, */*',
@@ -54,17 +53,14 @@ async function httpGet(url: string, options: FetchOptions = {}): Promise<string>
         ...options.headers
       },
       redirect: 'follow',
-      signal: controller.signal
-    })
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} ${response.statusText}`)
-    }
-    // Bounded rather than `response.text()`: the destination here is a host we
-    // chose, but the size still comes from someone else's answer.
-    return (await readBounded(response, SEARCH_MAX_BYTES)).toString('utf8')
-  } finally {
-    clearTimeout(timer)
+      signal
+  })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
   }
+  // Bounded rather than `response.text()`: the destination here is a host we
+  // chose, but the size still comes from someone else's answer.
+  return (await readBounded(response, SEARCH_MAX_BYTES)).toString('utf8')
 }
 
 /**
@@ -142,7 +138,7 @@ export interface SearchPage {
 export interface SearchProvider {
   id: SourceId
   name: string
-  search(keyword: string, page: number): Promise<SearchPage>
+  search(keyword: string, page: number, signal?: AbortSignal): Promise<SearchPage>
 }
 
 /* ------------------------------------------------------------------ *
@@ -171,7 +167,7 @@ interface TencentSong {
 const tencentProvider: SearchProvider = {
   id: 'tx',
   name: 'QQ音乐',
-  async search(keyword, page) {
+  async search(keyword, page, signal) {
     const url =
       'https://c.y.qq.com/soso/fcgi-bin/client_search_cp?' +
       new URLSearchParams({
@@ -184,7 +180,7 @@ const tencentProvider: SearchProvider = {
         t: '0'
       }).toString()
 
-    const text = await httpGet(url, { headers: { Referer: 'https://y.qq.com/' } })
+    const text = await httpGet(url, { headers: { Referer: 'https://y.qq.com/' }, signal })
     const payload = JSON.parse(text) as {
       data?: { song?: { list?: TencentSong[]; totalnum?: number } }
     }
@@ -309,17 +305,17 @@ const NETEASE_TIERS: Array<readonly [string, Quality]> = [
  */
 const NETEASE_DETAIL_BATCH = 100
 
-export async function fetchNeteaseDetails(ids: number[]): Promise<Map<number, NeteaseDetail>> {
+export async function fetchNeteaseDetails(ids: number[], signal?: AbortSignal): Promise<Map<number, NeteaseDetail>> {
   const out = new Map<number, NeteaseDetail>()
   const unique = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))]
   for (let offset = 0; offset < unique.length; offset += NETEASE_DETAIL_BATCH) {
-    const batch = await fetchNeteaseDetailBatch(unique.slice(offset, offset + NETEASE_DETAIL_BATCH))
+    const batch = await fetchNeteaseDetailBatch(unique.slice(offset, offset + NETEASE_DETAIL_BATCH), signal)
     for (const [id, detail] of batch) out.set(id, detail)
   }
   return out
 }
 
-async function fetchNeteaseDetailBatch(ids: number[]): Promise<Map<number, NeteaseDetail>> {
+async function fetchNeteaseDetailBatch(ids: number[], signal?: AbortSignal): Promise<Map<number, NeteaseDetail>> {
   const out = new Map<number, NeteaseDetail>()
   if (ids.length === 0) return out
 
@@ -329,7 +325,7 @@ async function fetchNeteaseDetailBatch(ids: number[]): Promise<Map<number, Netea
     new URLSearchParams({ ids: JSON.stringify(ids), id: String(ids[0]) }).toString()
 
   try {
-    const text = await httpGet(url, { headers: { Referer: 'https://music.163.com/' } })
+    const text = await httpGet(url, { headers: { Referer: 'https://music.163.com/' }, signal })
     const json = JSON.parse(text) as {
       songs?: Array<{
         id?: number
@@ -360,7 +356,7 @@ async function fetchNeteaseDetailBatch(ids: number[]): Promise<Map<number, Netea
 const neteaseProvider: SearchProvider = {
   id: 'wy',
   name: '网易云音乐',
-  async search(keyword, page) {
+  async search(keyword, page, signal) {
     const offset = (page - 1) * 20
     const url =
       'https://music.163.com/api/search/get/web?' +
@@ -371,7 +367,7 @@ const neteaseProvider: SearchProvider = {
         limit: '20'
       }).toString()
 
-    const text = await httpGet(url, { headers: { Referer: 'https://music.163.com/' } })
+    const text = await httpGet(url, { headers: { Referer: 'https://music.163.com/' }, signal })
     const payload = JSON.parse(text) as {
       result?: { songs?: NeteaseSong[]; songCount?: number }
     }
@@ -382,7 +378,7 @@ const neteaseProvider: SearchProvider = {
     // has. Both used to be guessed here — covers because the search response omits
     // them, qualities because availability is per-track only.
     const details = await fetchNeteaseDetails(
-      songs.map((s) => Number(s.id)).filter((id) => Number.isFinite(id) && id > 0)
+      songs.map((s) => Number(s.id)).filter((id) => Number.isFinite(id) && id > 0), signal
     )
 
     return {
@@ -432,7 +428,7 @@ interface KuwoSong {
 const kuwoProvider: SearchProvider = {
   id: 'kw',
   name: '酷我音乐',
-  async search(keyword, page) {
+  async search(keyword, page, signal) {
     // `pn` is zero-based on this endpoint.
     const url =
       'https://search.kuwo.cn/r.s?' +
@@ -447,7 +443,7 @@ const kuwoProvider: SearchProvider = {
         encoding: 'utf8'
       }).toString()
 
-    const text = await httpGet(url, { headers: { Referer: 'http://www.kuwo.cn/' } })
+    const text = await httpGet(url, { headers: { Referer: 'http://www.kuwo.cn/' }, signal })
     const payload = parseObjectLiteral(text) as {
       abslist?: KuwoSong[]
       TOTAL?: string
@@ -522,7 +518,7 @@ interface KugouSong {
 const kugouProvider: SearchProvider = {
   id: 'kg',
   name: '酷狗音乐',
-  async search(keyword, page) {
+  async search(keyword, page, signal) {
     const url =
       'https://songsearch.kugou.com/song_search_v2?' +
       new URLSearchParams({
@@ -531,7 +527,7 @@ const kugouProvider: SearchProvider = {
         pagesize: '20'
       }).toString()
 
-    const text = await httpGet(url, { headers: { Referer: 'https://www.kugou.com/' } })
+    const text = await httpGet(url, { headers: { Referer: 'https://www.kugou.com/' }, signal })
     const payload = JSON.parse(text) as {
       data?: { lists?: KugouSong[]; total?: number }
     }
@@ -680,7 +676,7 @@ export function miguSongToInfo(item: MiguSong): OnlineMusicInfo {
 const miguProvider: SearchProvider = {
   id: 'mg',
   name: '咪咕音乐',
-  async search(keyword, page) {
+  async search(keyword, page, signal) {
     const url =
       'https://app.u.nf.migu.cn/pc/resource/song/item/search/v1.0?' +
       new URLSearchParams({
@@ -690,7 +686,7 @@ const miguProvider: SearchProvider = {
       }).toString()
 
     const text = await httpGet(url, {
-      headers: { Referer: 'https://music.migu.cn/', Origin: 'https://music.migu.cn' }
+      headers: { Referer: 'https://music.migu.cn/', Origin: 'https://music.migu.cn' }, signal
     })
     const payload = JSON.parse(text) as MiguSong[]
     // A bare array is the normal shape; an error envelope is not, and must not
@@ -731,7 +727,8 @@ export function hasSearchProvider(source: SourceId): boolean {
 export async function searchOnline(
   source: SourceId,
   keyword: string,
-  page = 1
+  page = 1,
+  signal?: AbortSignal
 ): Promise<SearchPage> {
   const provider = PROVIDERS.find((item) => item.id === source)
   if (!provider) {
@@ -739,18 +736,19 @@ export async function searchOnline(
   }
   const trimmed = keyword.trim()
   if (!trimmed) return { list: [], total: 0, allPage: 0 }
-  return provider.search(trimmed, page)
+  return provider.search(trimmed, page, signal)
 }
 
 /** Search every provider in parallel; failed platforms are reported, not fatal. */
 export async function searchAll(
   keyword: string,
-  page = 1
+  page = 1,
+  signal?: AbortSignal
 ): Promise<Array<SearchPage & { source: SourceId; error?: string }>> {
   const results = await Promise.all(
     PROVIDERS.map(async (provider) => {
       try {
-        const page_ = await provider.search(keyword.trim(), page)
+        const page_ = await provider.search(keyword.trim(), page, signal)
         return { ...page_, source: provider.id }
       } catch (error) {
         return {

@@ -12,6 +12,7 @@ import AppIcon from '../components/AppIcon.vue'
 import { useSearchSuggest } from '../composables/use-search-suggest'
 import { useViewState } from '../composables/view-state'
 import { mergeSearchPages } from '../utils/search-merge'
+import { cancellableMusic } from '../utils/cancellable-music'
 
 const library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore(), ui = useUiStore()
 const router = useRouter(), route = useRoute()
@@ -42,7 +43,8 @@ const loadingMore = ref(false)
 /** 某一页追加后一行都没多（全是重复，或平台给空页）—— 别再自动请求了。 */
 const exhausted = ref(false)
 let generation = 0
-onUnmounted(() => { generation++ })
+let activeSearch: AbortController | null = null
+onUnmounted(() => { generation++; activeSearch?.abort() })
 const localResults = computed(() => library.searchTracks(submittedQuery.value))
 /** Whether this tab answers from the local library at all. */
 const localScope = computed(() => activeSource.value === 'all' || activeSource.value === 'local')
@@ -99,15 +101,15 @@ function pickSuggestion(track: PlayableTrack): void {
 /** 结果列表。整体替换时要把它拨回顶部，追加时不碰。 */
 const searchList = ref<{ scrollToTop(): void } | null>(null)
 /** 问一页。`全部` 打五家并行再交错合并，单平台页签只打那一家。 */
-async function fetchPage(query: string, targetPage: number): Promise<{ list: OnlineMusicInfo[]; total: number; allPage: number; failed: Array<{ source: SourceId }> }> {
+async function fetchPage(query: string, targetPage: number, signal: AbortSignal): Promise<{ list: OnlineMusicInfo[]; total: number; allPage: number; failed: Array<{ source: SourceId }> }> {
   // 发出去的请求次数。"到底之后不该再发请求"这条只能靠计数证明：一页如果失败或
   // 全是重复，`page` 和条数都不动，从外面看和"根本没发"一模一样。
   fetchCount.value++
   if (activeSource.value === 'all') {
-    const result = await window.jj.music.searchAll(query, targetPage)
+    const result = await cancellableMusic(signal, id => window.jj.music.searchAll(query, targetPage, id))
     return { list: result.list, total: result.total, allPage: result.allPage, failed: result.failed }
   }
-  const result = await window.jj.music.search(activeSource.value, query, targetPage)
+  const result = await cancellableMusic(signal, id => window.jj.music.search(activeSource.value, query, targetPage, id))
   return { list: result.list, total: result.total ?? result.list.length, allPage: result.allPage ?? 1, failed: [] }
 }
 function failureNote(failed: Array<{ source: SourceId }>): string {
@@ -117,6 +119,7 @@ function failureNote(failed: Array<{ source: SourceId }>): string {
 
 /** 整体替换：新搜索、切页签、改关键词都走这里，回到顶部、回到第 1 页。 */
 async function runSearch(): Promise<void> {
+  activeSearch?.abort()
   const query = keyword.value.trim(), request = ++generation
   // Recorded before the search itself: a query that finds nothing is still
   // something the user typed and may want again.
@@ -135,9 +138,11 @@ async function runSearch(): Promise<void> {
    */
   searchList.value?.scrollToTop()
   if (!query || activeSource.value === 'local') return
+  const controller = new AbortController()
+  activeSearch = controller
   searching.value = true
   try {
-    const result = await fetchPage(query, 1)
+    const result = await fetchPage(query, 1, controller.signal)
     if (request !== generation) return
     onlineResults.value = result.list; total.value = result.total; allPage.value = result.allPage
     searchError.value = failureNote(result.failed)
@@ -145,7 +150,10 @@ async function runSearch(): Promise<void> {
   } catch(error) {
     if (request !== generation) return
     searchError.value = `在线搜索暂不可用：${error instanceof Error ? error.message : '请求失败'}`
-  } finally { if (request === generation) searching.value = false }
+  } finally {
+    if (activeSearch === controller) activeSearch = null
+    if (request === generation) searching.value = false
+  }
 }
 
 /**
@@ -157,9 +165,11 @@ async function loadMore(): Promise<void> {
   // `local` 页签的答案就是整个曲库匹配集，本来就在列表里，没有下一页。
   if (!query || searching.value || loadingMore.value || activeSource.value === 'local' || atEnd.value) return
   const request = ++generation, next = page.value + 1
+  const controller = new AbortController()
+  activeSearch = controller
   loadingMore.value = true
   try {
-    const result = await fetchPage(query, next)
+    const result = await fetchPage(query, next, controller.signal)
     if (request !== generation) return
     /*
      * 跨页去重按 `track.id`（形如 `wy_1842784921`，全应用唯一键）。主进程合并处
@@ -183,7 +193,10 @@ async function loadMore(): Promise<void> {
     if (request !== generation) return
     // 失败不说"没有更多了"：按钮要留着可以重试，这正是保留它的第二个理由。
     searchError.value = `加载更多失败：${error instanceof Error ? error.message : '请求失败'}，可点「加载更多」重试`
-  } finally { if (request === generation) loadingMore.value = false }
+  } finally {
+    if (activeSearch === controller) activeSearch = null
+    if (request === generation) loadingMore.value = false
+  }
 }
 /**
  * 清空输入框 = 回到起始态。
@@ -212,6 +225,7 @@ async function loadMore(): Promise<void> {
  * 在线搜索会在清空之后落回一个空输入框下面。
  */
 function resetToStart(): void {
+  activeSearch?.abort()
   generation++
   submittedQuery.value = ''
   searched.value = false

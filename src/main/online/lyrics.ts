@@ -29,25 +29,20 @@ const TIMEOUT_MS = 12_000
 /** Lyrics are tens of kilobytes; anything larger is not a lyric file. */
 const LYRIC_MAX_BYTES = 512 * 1024
 
-async function httpGet(url: string, referer: string): Promise<string> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': UA,
-        Referer: referer,
-        Accept: 'application/json, text/plain, */*'
-      },
-      signal: controller.signal
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    // Bounded: these hosts are fixed, but a body is still a body, and `text()`
-    // would happily materialise whatever size an upstream decides to send.
-    return (await readBounded(response, LYRIC_MAX_BYTES)).toString('utf8')
-  } finally {
-    clearTimeout(timer)
-  }
+async function httpGet(url: string, referer: string, signal?: AbortSignal): Promise<string> {
+  const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS)
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': UA,
+      Referer: referer,
+      Accept: 'application/json, text/plain, */*'
+    },
+    signal: requestSignal
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  // Bounded: these hosts are fixed, but a body is still a body, and `text()`
+  // would happily materialise whatever size an upstream decides to send.
+  return (await readBounded(response, LYRIC_MAX_BYTES)).toString('utf8')
 }
 
 /**
@@ -66,7 +61,7 @@ function decodeQqLyric(value: unknown): string {
  * Per-platform lookups
  * ------------------------------------------------------------------ */
 
-async function lyricFromTencent(music: OnlineMusicInfo): Promise<LyricResult> {
+async function lyricFromTencent(music: OnlineMusicInfo, signal?: AbortSignal): Promise<LyricResult> {
   const songmid = String(music.meta?.songmid ?? '')
   if (!songmid) return { lyric: '' }
 
@@ -79,7 +74,7 @@ async function lyricFromTencent(music: OnlineMusicInfo): Promise<LyricResult> {
       g_tk: '5381'
     }).toString()
 
-  const text = await httpGet(url, 'https://y.qq.com/portal/player.html')
+  const text = await httpGet(url, 'https://y.qq.com/portal/player.html', signal)
   const json = JSON.parse(text) as { lyric?: string; trans?: string }
 
   return {
@@ -89,7 +84,7 @@ async function lyricFromTencent(music: OnlineMusicInfo): Promise<LyricResult> {
   }
 }
 
-async function lyricFromNetease(music: OnlineMusicInfo): Promise<LyricResult> {
+async function lyricFromNetease(music: OnlineMusicInfo, signal?: AbortSignal): Promise<LyricResult> {
   const id = String(music.meta?.songmid ?? '')
   if (!id) return { lyric: '' }
 
@@ -97,7 +92,7 @@ async function lyricFromNetease(music: OnlineMusicInfo): Promise<LyricResult> {
     'https://music.163.com/api/song/lyric?' +
     new URLSearchParams({ id, lv: '-1', kv: '-1', tv: '-1', rv: '-1' }).toString()
 
-  const text = await httpGet(url, 'https://music.163.com/')
+  const text = await httpGet(url, 'https://music.163.com/', signal)
   const json = JSON.parse(text) as {
     lrc?: { lyric?: string }
     tlyric?: { lyric?: string }
@@ -111,7 +106,7 @@ async function lyricFromNetease(music: OnlineMusicInfo): Promise<LyricResult> {
   }
 }
 
-async function lyricFromKuwo(music: OnlineMusicInfo): Promise<LyricResult> {
+async function lyricFromKuwo(music: OnlineMusicInfo, signal?: AbortSignal): Promise<LyricResult> {
   const id = String(music.meta?.songmid ?? '')
   if (!id) return { lyric: '' }
 
@@ -119,7 +114,7 @@ async function lyricFromKuwo(music: OnlineMusicInfo): Promise<LyricResult> {
     'https://m.kuwo.cn/newh5/singles/songinfoandlrc?' +
     new URLSearchParams({ musicId: id }).toString()
 
-  const text = await httpGet(url, 'https://m.kuwo.cn/')
+  const text = await httpGet(url, 'https://m.kuwo.cn/', signal)
   const json = JSON.parse(text) as {
     data?: { lrclist?: Array<{ time?: string; lineLyric?: string }> }
   }
@@ -164,7 +159,7 @@ async function lyricFromKuwo(music: OnlineMusicInfo): Promise<LyricResult> {
  * encoding is undocumented here and unverified, so it is carried through and
  * left unused rather than guessed at.
  */
-async function lyricFromMigu(music: OnlineMusicInfo): Promise<LyricResult> {
+async function lyricFromMigu(music: OnlineMusicInfo, signal?: AbortSignal): Promise<LyricResult> {
   const url = music.meta?.lrcUrl
   if (typeof url !== 'string' || !url) return { lyric: '' }
 
@@ -174,7 +169,8 @@ async function lyricFromMigu(music: OnlineMusicInfo): Promise<LyricResult> {
       headers: { 'User-Agent': UA, Referer: 'https://music.migu.cn/' },
       allowedHosts: ['migu.cn'],
       maxBytes: LYRIC_MAX_BYTES,
-      timeoutMs: TIMEOUT_MS
+      timeoutMs: TIMEOUT_MS,
+      ...(signal ? { init: { signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) } } : {})
     })
   } catch {
     // A rejected or unreachable lyric file is a missing lyric, not an error the
@@ -188,7 +184,7 @@ async function lyricFromMigu(music: OnlineMusicInfo): Promise<LyricResult> {
   return { lyric: text }
 }
 
-const PROVIDERS: Record<string, (music: OnlineMusicInfo) => Promise<LyricResult>> = {
+const PROVIDERS: Record<string, (music: OnlineMusicInfo, signal?: AbortSignal) => Promise<LyricResult>> = {
   tx: lyricFromTencent,
   wy: lyricFromNetease,
   kw: lyricFromKuwo,
@@ -210,12 +206,12 @@ export function lyricProviders(): SourceId[] {
  * adapter or the track simply has no lyrics — a missing lyric is a normal
  * outcome, not an error the UI should surface as a failure.
  */
-export async function fetchOnlineLyric(music: OnlineMusicInfo): Promise<LyricResult> {
+export async function fetchOnlineLyric(music: OnlineMusicInfo, signal?: AbortSignal): Promise<LyricResult> {
   const provider = PROVIDERS[music.source]
   if (!provider) return { lyric: '' }
 
   try {
-    const result = await provider(music)
+    const result = await provider(music, signal)
     return {
       lyric: result.lyric ?? '',
       ...(result.tlyric ? { tlyric: result.tlyric } : {}),

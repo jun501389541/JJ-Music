@@ -27,6 +27,7 @@ import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { guardedFetch, safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
+import { assertIpcArgs } from './ipc-validation'
 import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
@@ -282,7 +283,7 @@ interface Services {
    * it, and `only` lets the now-playing menu re-fetch from a single source
    * without going through the order at all.
    */
-  onlineLyric: (music: OnlineMusicInfo, only?: OnlineLyricSource) => Promise<{ lyric: LyricResult; asset: AssetRef | null }>
+  onlineLyric: (music: OnlineMusicInfo, only?: OnlineLyricSource, signal?: AbortSignal) => Promise<{ lyric: LyricResult; asset: AssetRef | null }>
 }
 
 let services: Services | null = null
@@ -317,15 +318,16 @@ async function createServices(): Promise<Services> {
    * through here, so one setting moves all three and there is no second copy of
    * the "script first, then the platform, then everything else" chain to drift.
    */
-  const onlineLyric = (music: OnlineMusicInfo, only?: OnlineLyricSource) => {
+  const onlineLyric = (music: OnlineMusicInfo, only?: OnlineLyricSource, signal?: AbortSignal) => {
     const preference = settings.get()
     return resolveOnlineLyricByOrder(
       lyricSourceOrder(preference.onlineLyricSource, preference.onlineLyricFallback, only),
       {
-        script: () => sourceEngine.getLyric(music.source, music),
-        platform: () => fetchOnlineLyric(music),
-        search: () => lyricFromOtherPlatforms(music)
-      }
+        script: () => sourceEngine.getLyric(music.source, music, signal),
+        platform: () => fetchOnlineLyric(music, signal),
+        search: () => lyricFromOtherPlatforms(music, {}, signal)
+      },
+      signal
     )
   }
 
@@ -1082,11 +1084,24 @@ function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): v
   ipcMain.handle(channel, async (event, ...args) => {
     try {
       if (!fromMainWindow(event)) throw new Error('不允许的 IPC 来源')
+      assertIpcArgs(channel, args)
       return ok(await fn(...(args as never[])))
     } catch (error) {
       return fail(error)
     }
   })
+}
+
+const activeRequests = new Map<string, AbortController>()
+async function cancellableRequest<T>(id: unknown, work: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+  if (id === undefined) return work()
+  if (typeof id !== 'string' || !/^search-\d{13}-\d{1,12}$/.test(id) || activeRequests.has(id)) {
+    throw new Error('搜索请求编号无效')
+  }
+  const controller = new AbortController()
+  activeRequests.set(id, controller)
+  try { return await work(controller.signal) }
+  finally { activeRequests.delete(id) }
 }
 
 /**
@@ -1138,6 +1153,9 @@ function relaxCorsForMedia(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.on(IPC.musicCancel, (event, id: unknown) => {
+    if (fromMainWindow(event) && typeof id === 'string') activeRequests.get(id)?.abort()
+  })
   /* ---------------- desktop lyrics ---------------- */
   /*
    * The overlay is the one window that is not the app: it draws a line of text
@@ -1654,18 +1672,18 @@ function registerIpc(): void {
   handle(IPC.sourcesLogs, (id: string) => requireServices().sourceEngine.getLogs(id))
 
   /* ---------------- online music ---------------- */
-  handle(IPC.musicSearch, async (source: SourceId, keyword: string, page = 1) => {
+  handle(IPC.musicSearch, async (source: SourceId, keyword: string, page = 1, requestId?: string) => cancellableRequest(requestId, async signal => {
     const { sourceEngine } = requireServices()
     // Aggregate across every searchable platform when the caller asks for one
     // that has no adapter but does have a 音源-provided sibling.
     if (source === 'all') {
-      const results = await searchAll(keyword, page)
+      const results = await searchAll(keyword, page, signal)
       const list = results.flatMap((r) => r.list)
       return { list, total: list.length }
     }
     void sourceEngine
-    return searchOnline(source, keyword, page)
-  })
+    return searchOnline(source, keyword, page, signal)
+  }))
 
   /** Platforms with a built-in adapter, for the search UI's tab list. */
   handle(IPC.musicSearchProviders, () => searchProviders())
@@ -1689,8 +1707,8 @@ function registerIpc(): void {
    * the top of the list shows each platform's best match instead of one
    * platform's page 1 followed by unrelated results.
    */
-  handle(IPC.musicSearchAll, async (keyword: string, page = 1) => {
-    const results = await searchAll(keyword, page)
+  handle(IPC.musicSearchAll, async (keyword: string, page = 1, requestId?: string) => cancellableRequest(requestId, async signal => {
+    const results = await searchAll(keyword, page, signal)
 
     const merged: OnlineMusicInfo[] = []
     const failed: Array<{ source: SourceId; error: string }> = []
@@ -1715,7 +1733,7 @@ function registerIpc(): void {
       failed,
       sources: results.map((r) => ({ source: r.source, count: r.list.length }))
     }
-  })
+  }))
 
   /**
    * Fill in lyrics and cover art for an online track.
@@ -1725,23 +1743,25 @@ function registerIpc(): void {
    * two round-trips from the renderer, this resolves both together and returns
    * whatever it could find — a missing cover is not a failure.
    */
-  handle(IPC.musicEnrich, async (music: OnlineMusicInfo, only?: unknown) => {
+  handle(IPC.musicEnrich, async (music: OnlineMusicInfo, only?: unknown, requestId?: string) => cancellableRequest(requestId, async signal => {
     const { sourceEngine, onlineLyric } = requireServices()
     // The renderer may name one source (the now-playing menu's switch); anything
     // it sends that is not one of the three is ignored rather than obeyed.
     const picked: OnlineLyricSource | undefined =
       only === 'script' || only === 'platform' || only === 'search' ? only : undefined
-    const { lyric, asset } = await onlineLyric(music, picked)
+    const { lyric, asset } = await onlineLyric(music, picked, signal)
+    if (signal?.aborted) throw new Error('请求已取消')
 
     let cover: AssetRef | undefined = music.assets?.cover?.[0]
     let picUrl = music.picUrl ?? ''
     if (!picUrl) {
-      picUrl = await sourceEngine.getPic(music.source, music)
+      picUrl = await sourceEngine.getPic(music.source, music, signal)
       if (picUrl) cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
     } else if (!cover) {
       cover = { origin: 'remote', provider: '平台搜索结果', at: Date.now() }
     }
 
+    if (signal?.aborted) throw new Error('请求已取消')
     return {
       lyric: lyric.lyric ?? '',
       tlyric: lyric.tlyric ?? '',
@@ -1751,7 +1771,7 @@ function registerIpc(): void {
       asset,
       cover
     }
-  })
+  }))
 
   handle(
     IPC.musicUrl,

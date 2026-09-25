@@ -185,6 +185,8 @@ const engine = new SourceEngine(store, workerPath)
 
 section('5b. Restricted-token launch (file handoff)')
 
+check('Windows enables restricted source launch', process.platform !== 'win32' || supportsRestrictedLaunch())
+
 if (!supportsRestrictedLaunch()) {
   console.log('  SKIP  not Windows: restricted launch unavailable')
 } else {
@@ -240,11 +242,7 @@ if (!supportsRestrictedLaunch()) {
       check('restricted-mode request round-trips', isValidMusicUrl(result.url), result.url.slice(0, 60))
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      check(
-        'restricted-mode request fails cleanly, not by hanging',
-        msg.length > 0,
-        msg.slice(0, 80)
-      )
+      check('restricted-mode request round-trips', false, msg.slice(0, 80))
     }
   } else {
     console.log('  NOTE  no wy source in restricted mode; skipping round-trip')
@@ -586,6 +584,37 @@ mixed.requestFrom = async (apiId, source, action, info) => {
 const guarded = await mixed.getMusicUrl('wy', track, 'flac')
 check('a source lacking musicUrl is skipped', guarded.apiId === 'b', String(guarded.apiId))
 check('the lyric-only source was never asked', actionGuard.calls.join(',') === 'b', actionGuard.calls.join(','))
+
+// Cancelling an online lyric/cover lookup must release the source request now,
+// rather than waiting for the host's 20-second timeout or trying another script.
+const stalledSource = { id: 'wy', type: 'music', actions: ['lyric', 'pic'], qualitys: [] }
+const stalledRuntime = fakeRuntime('stalled', '卡住的音源', [stalledSource])
+let dispatched = 0
+stalledRuntime.child = { send: () => { dispatched++ } }
+const cancellable = multiSourceEngine(
+  [{ meta: { id: 'stalled', enabled: true } }],
+  [stalledRuntime]
+)
+const lyricAbort = new AbortController()
+const stalledLyric = cancellable.getLyric('wy', track, lyricAbort.signal)
+lyricAbort.abort()
+const lyricOutcome = await Promise.race([
+  stalledLyric.then(() => 'resolved', () => 'cancelled'),
+  new Promise((resolve) => setTimeout(() => resolve('timed out'), 250))
+])
+check('script lyric cancellation rejects promptly', lyricOutcome === 'cancelled', String(lyricOutcome))
+check('cancelled lyric request is removed from pending', stalledRuntime.pending.size === 0, String(stalledRuntime.pending.size))
+
+const picAbort = new AbortController()
+const stalledPic = cancellable.getPic('wy', track, picAbort.signal)
+picAbort.abort()
+const picOutcome = await Promise.race([
+  stalledPic.then(() => 'resolved', () => 'cancelled'),
+  new Promise((resolve) => setTimeout(() => resolve('timed out'), 250))
+])
+check('script cover cancellation rejects promptly', picOutcome === 'cancelled', String(picOutcome))
+check('cancelled cover request is removed from pending', stalledRuntime.pending.size === 0, String(stalledRuntime.pending.size))
+check('only the requested script actions were dispatched', dispatched === 2, String(dispatched))
 
 /* ------------------------------------------------------------------ *
  * 9. Shutdown guard and quarantine

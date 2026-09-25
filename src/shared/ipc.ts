@@ -97,6 +97,7 @@ export const IPC = {
   musicSearch: 'music:search',
   /** Search every platform in parallel and merge the results. */
   musicSearchAll: 'music:search-all',
+  musicCancel: 'music:cancel',
   /** Platforms that have a built-in search adapter. */
   musicSearchProviders: 'music:search-providers',
   /** What each platform's users are searching right now, for the search page. */

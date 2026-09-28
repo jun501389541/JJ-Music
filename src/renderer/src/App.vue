@@ -26,6 +26,7 @@ import NowPlayingView from './views/NowPlayingView.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useLibraryStore } from './stores/library'
 import { usePlayerStore } from './stores/player'
+import type { UpdateStatus } from '@shared/update-types'
 import { startScrollMemory } from './composables/use-scroll-memory'
 import { startMediaSession } from './composables/use-media-session'
 import { accentApplied, applyAccent, applyAccentFromImage, resetAccent } from './theme/accent'
@@ -37,6 +38,29 @@ const router = useRouter()
 const toast = useToastStore()
 
 const ui = useUiStore()
+let offUpdateChanged: (() => void) | undefined
+const promptedUpdates = new Set<string>()
+function onUpdateChanged(state: UpdateStatus): void {
+  if (!state.version) return
+  const promptKey = `${state.phase}:${state.version}`
+  if (promptedUpdates.has(promptKey)) return
+  if (state.phase === 'available' || state.phase === 'ready') promptedUpdates.add(promptKey)
+  else return
+  if (ui.dialog) {
+    toast.info(state.phase === 'available' ? `发现新版本 ${state.version}，可在设置中下载` : `新版本 ${state.version} 已就绪，可在设置中安装`)
+    return
+  }
+  if (state.phase === 'available') {
+    const summary = state.notes?.trim().slice(0, 160)
+    void ui.confirm(`发现新版本 ${state.version}`, `${summary ? summary + '\n' : ''}安装包 ${((state.size ?? 0) / 1048576).toFixed(1)} MB。现在下载吗？`).then(answer => {
+      if (answer) void window.jj.updates.download().catch(error => toast.error(error instanceof Error ? error.message : '下载更新失败'))
+    })
+  } else {
+    void ui.confirm(`新版本 ${state.version} 已就绪`, '现在重启并安装吗？').then(answer => {
+      if (answer) void window.jj.updates.install().catch(error => toast.error(error instanceof Error ? error.message : '无法安装更新'))
+    })
+  }
+}
 const nowPlayingOpen = toRef(ui, 'nowPlaying')
 /** The routed views render here, which is the whole scope scroll memory covers. */
 const contentEl = ref<HTMLElement | null>(null)
@@ -363,6 +387,7 @@ async function onDrop(event: DragEvent): Promise<void> {
 }
 
 onUnmounted(() => {
+  offUpdateChanged?.()
   systemTheme.removeEventListener('change', onSystemTheme)
   offTransportCommand?.()
   offDesktopLyricCommand?.()
@@ -410,6 +435,7 @@ watch(
 )
 
 onMounted(async () => {
+  offUpdateChanged = window.jj.updates.onChanged(onUpdateChanged)
   /*
    * Before `library.init()`: the pages below it can be scrolled as soon as they
    * paint, and an offset that is missed is a page that opens at the top.

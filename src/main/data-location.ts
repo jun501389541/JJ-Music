@@ -26,6 +26,7 @@ export const PORTABLE_DIR = 'data'
 
 /** File next to the executable recording a user-chosen data directory. */
 export const POINTER_FILE = 'data-location.json'
+export const NSIS_INSTALL_MARKER = 'nsis-install.marker'
 
 export type DataDirSource = 'switch' | 'pointer' | 'portable' | 'appdata'
 
@@ -39,6 +40,8 @@ export interface DataDirInput {
   /** Electron's own default: `%APPDATA%/jj-music`. */
   appDataDir: string
   packaged: boolean
+  /** True only for an NSIS-installed copy carrying the installer marker. */
+  installed?: boolean
   /** Target recorded by an earlier relocation, or null. */
   pointer: string | null
   /**
@@ -70,7 +73,7 @@ export function resolveDataDir(input: DataDirInput): DataDirChoice {
   // what the user expects: they chose the folder they installed into. An installed
   // build under `Program Files` is not writable, and writing next to the exe in
   // development would drop a gigabyte of data into `node_modules/electron/dist`.
-  const portable = input.packaged && input.writable(input.exeDir) ? join(input.exeDir, PORTABLE_DIR) : null
+  const portable = input.packaged && !input.installed && input.writable(input.exeDir) ? join(input.exeDir, PORTABLE_DIR) : null
   if (input.pointer) {
     // 记下的目录必须**既在又能写**。只看 `exists` 的话，路径上留着一个同名普通文件、
     // 或者那块盘变成了只读挂载，都会被当成数据目录接受下来——然后每一次保存都失败，
@@ -135,10 +138,10 @@ export function relocationProblem(
 }
 
 /** Where the relocation pointer is kept: next to the exe, or beside the old data. */
-export function pointerPath(exeDir: string, appDataDir: string, writable: (path: string) => boolean): string {
+export function pointerPath(exeDir: string, appDataDir: string, writable: (path: string) => boolean, installed = false): string {
   // The app-data directory's parent always exists by the time a relocation can
   // happen, while the executable's folder may be a read-only install location.
-  return writable(exeDir)
+  return !installed && writable(exeDir)
     ? join(exeDir, POINTER_FILE)
     : join(dirname(appDataDir), `.${basename(appDataDir)}-${POINTER_FILE}`)
 }

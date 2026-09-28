@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { AppSettings, PendingAsset } from '@shared/types'
 import { UI_DEFAULTS } from '@shared/preferences'
@@ -9,8 +9,43 @@ import { useToastStore } from '../stores/toast'
 import { useUiStore } from '../stores/ui'
 import { SETTINGS_PAGES, type SettingItem } from '../utils/settings-pages'
 import AppIcon from '../components/AppIcon.vue'
+import type { UpdateStatus } from '@shared/update-types'
 const route = useRoute(), router = useRouter(), library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore(), ui = useUiStore()
 const jj = window.jj
+const updateStatus = ref<UpdateStatus>({ phase: 'idle', currentVersion: __APP_VERSION__ })
+let offUpdateChanged: (() => void) | undefined
+onMounted(() => {
+  offUpdateChanged = jj.updates.onChanged(state => { updateStatus.value = state })
+  void jj.updates.status().then(state => { updateStatus.value = state }, () => {})
+})
+onUnmounted(() => offUpdateChanged?.())
+const updateMessage = computed(() => {
+  const state = updateStatus.value
+  if (state.phase === 'checking') return '正在检查官方稳定版…'
+  if (state.phase === 'current') return '已是最新版本'
+  if (state.phase === 'available') return `发现 ${state.version} · ${((state.size ?? 0) / 1048576).toFixed(1)} MB`
+  if (state.phase === 'downloading') return `正在下载 ${state.version} · ${Math.round(state.progress ?? 0)}%`
+  if (state.phase === 'ready') return `${state.version} 已下载并校验，可以重启安装`
+  if (state.phase === 'error') return state.message || '检查或下载失败'
+  return state.message || '可检查官方稳定版更新'
+})
+async function checkUpdate(): Promise<void> {
+  try { updateStatus.value = await jj.updates.check() }
+  catch (error) { toast.error(error instanceof Error ? error.message : '检查更新失败') }
+}
+async function downloadUpdate(): Promise<void> {
+  try { updateStatus.value = await jj.updates.download() }
+  catch (error) { toast.error(error instanceof Error ? error.message : '下载更新失败') }
+}
+async function cancelUpdate(): Promise<void> {
+  try { updateStatus.value = await jj.updates.cancel() }
+  catch (error) { toast.error(error instanceof Error ? error.message : '取消下载失败') }
+}
+async function installUpdate(): Promise<void> {
+  if (!await ui.confirm('重启并安装更新', '安装前请保存正在进行的操作。')) return
+  try { await jj.updates.install() }
+  catch (error) { toast.error(error instanceof Error ? error.message : '无法安装更新') }
+}
 const search = ref('')
 const defaultDownloadFolder = ref('系统下载目录 / JJ Music')
 // A rejected IPC must leave the placeholder standing, not an empty label, and an
@@ -243,8 +278,21 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
     </div>
   </div>
   <div v-if="section === 'about'" class="about-mark"><span>J</span><div><strong>JJ Music</strong><p>本地收藏，在线发现。</p></div></div>
+  <section v-if="section === 'about'" class="setting-row update-panel" aria-label="软件更新">
+    <span class="setting-label"><strong>软件更新</strong><small>当前版本 {{ updateStatus.currentVersion }} · {{ updateMessage }}</small>
+      <small v-if="updateStatus.notes && updateStatus.phase !== 'unavailable'" class="update-notes">{{ updateStatus.notes }}</small>
+      <a v-if="updateStatus.phase === 'error'" href="https://github.com/jun501389541/JJ-Music/releases/latest" target="_blank" rel="noopener noreferrer">前往官方 Release 手动下载</a>
+    </span>
+    <span class="setting-buttons">
+      <button v-if="updateStatus.phase === 'idle' || updateStatus.phase === 'current' || updateStatus.phase === 'error'" class="btn" @click="checkUpdate">检查更新</button>
+      <button v-if="updateStatus.phase === 'available'" class="btn" @click="downloadUpdate">下载更新</button>
+      <button v-if="updateStatus.phase === 'downloading'" class="btn" @click="cancelUpdate">取消下载</button>
+      <button v-if="updateStatus.phase === 'ready'" class="btn" @click="installUpdate">重启安装</button>
+    </span>
+  </section>
   <p v-if="section === 'appearance'" class="settings-footnote">云母和亚克力效果取决于 Windows 版本与系统透明效果设置。</p>
 </div></template>
 <style scoped>
 .settings-page{padding:20px 42px 48px}.settings-topline{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}.breadcrumbs{display:flex;align-items:center;gap:10px;color:var(--text-tertiary);font-size:12px}.breadcrumbs button{border:0;background:none;color:var(--text-secondary);font:inherit;cursor:pointer}.breadcrumbs button:last-child{color:var(--text-primary)}.settings-search{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border-subtle);border-radius:5px;color:var(--text-tertiary);background:var(--bg-input)}.settings-search input{border:0;background:none;outline:none;color:var(--text-primary);font:inherit;width:130px;font-size:11px}.settings-heading{display:flex;gap:10px;align-items:center;margin-bottom:28px}.settings-heading h1{font-size:var(--text-2xl);font-weight:550;margin:0}.settings-heading p{margin:9px 0 0;color:var(--text-secondary);font-size:12px}.settings-items{display:flex;flex-direction:column;gap:5px;max-width:950px}.setting-row{min-height:76px;display:flex;align-items:center;gap:22px;border:1px solid var(--border-subtle);border-radius:6px;padding:17px 22px;background:var(--bg-panel);color:var(--text-primary);font:inherit;text-align:left;width:100%;margin-bottom:1px}.setting-link{cursor:pointer}.setting-link:hover{background:var(--bg-hover)}.setting-link>svg:first-child{color:var(--text-secondary)}.setting-label{display:flex;flex:1;flex-direction:column;gap:7px;min-width:0}.setting-label strong{font-size:14px;font-weight:450}.setting-label small{font-size:11px;line-height:1.6;color:var(--text-secondary)}.setting-row select{min-width:150px;max-width:220px;font-size:12px}.salt-switch{width:40px;height:21px;border:1px solid var(--text-tertiary);border-radius:30px;background:transparent;padding:3px;flex:none;cursor:pointer}.salt-switch span{display:block;width:13px;height:13px;background:var(--text-secondary);border-radius:50%;transition:transform .15s}.salt-switch.on{background:var(--accent);border-color:var(--accent)}.salt-switch.on span{transform:translateX(17px);background:#182126}.setting-range{display:flex;gap:14px;align-items:center;width:245px}.setting-range input{min-width:100px;flex:1;accent-color:var(--accent)}.setting-range span{font-size:12px;min-width:44px;text-align:right}.accent-control{display:flex;align-items:center;gap:12px}.setting-flags,.setting-buttons{display:flex;gap:8px;flex-wrap:wrap;flex:none}.setting-flags .btn,.setting-buttons .btn{font-size:12px;padding:7px 13px}.accent-control input{width:30px;height:30px;padding:0;border:0;background:none;cursor:pointer}.theme-previews{display:flex;gap:16px;margin:0 0 24px;max-width:600px}.theme-preview{flex:1;background:none;color:var(--text-primary);border:0;font:inherit;cursor:pointer;padding:0}.mock-window{display:flex;border:3px solid transparent;border-radius:8px;height:93px;background:#e5e7ea;padding:9px;gap:9px;box-shadow:inset 0 0 0 1px #8883}.mock-window i{width:25%;background:#c6c9ce;border-radius:3px}.mock-window>span{flex:1;display:flex;flex-direction:column;gap:6px}.mock-window b{height:18px;background:#fafafa;border-radius:3px}.dark .mock-window{background:#27282e}.dark .mock-window i{background:#373941}.dark .mock-window b{background:#42454f}.system .mock-window{background:linear-gradient(110deg,#27282e 50%,#e5e7ea 50%)}.chosen .mock-window{border-color:var(--accent)}.theme-preview>span:last-child{display:flex;justify-content:center;align-items:center;gap:9px;margin-top:10px;font-size:12px}.settings-footnote{font-size:11px;color:var(--text-tertiary);margin-top:20px}.eq-presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}.equalizer-panel{display:flex;justify-content:space-between;gap:12px;padding:32px 24px;border-radius:8px;background:var(--bg-panel)}.equalizer-panel>div{display:flex;flex:1;flex-direction:column;align-items:center;gap:20px}.equalizer-panel input{writing-mode:vertical-lr;direction:rtl;height:190px;width:20px;accent-color:var(--accent)}.equalizer-panel output{font-size:14px}.equalizer-panel small,.equalizer-panel span{font-size:10px;color:var(--text-secondary)}.lyric-preview{padding:36px;margin-top:18px;display:flex;flex-direction:column;gap:18px;border-radius:8px;background:var(--bg-panel)}.lyric-preview>span{opacity:.25}.lyric-preview strong{font-weight:600}.lyric-preview small{font-size:.45em;opacity:.55}.data-actions{display:flex;gap:12px;margin-top:24px}.about-mark{display:flex;gap:25px;align-items:center;margin:44px 0}.about-mark>span{display:grid;place-items:center;font:italic 600 54px Georgia;color:white;width:88px;height:88px;border-radius:24px;background:linear-gradient(140deg,#6ebdcc,#7689c9)}.about-mark strong{font-size:28px;font-weight:500}.about-mark p{font-size:12px;color:var(--text-secondary)}
+.update-panel{margin-top:-20px}.update-notes{white-space:pre-wrap;max-height:120px;overflow:auto}.update-panel a{color:var(--accent);font-size:11px}
 </style>

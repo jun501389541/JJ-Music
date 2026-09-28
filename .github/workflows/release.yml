@@ -1,0 +1,96 @@
+name: Signed Windows Release Draft
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify exact stable tag
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag must equal package version v$version" }
+      - run: npm ci
+      - run: npm run verify
+  draft:
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: signed-release
+    permissions:
+      contents: write
+    env:
+      CI: 'true'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      JJ_UPDATE_U0_APPROVED: ${{ vars.JJ_UPDATE_U0_APPROVED }}
+      JJ_UPDATE_PUBLIC_KEY_PEM: ${{ vars.JJ_UPDATE_PUBLIC_KEY_PEM }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify release gate and exact version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag must equal package version v$version" }
+          if ($env:JJ_UPDATE_U0_APPROVED -ne 'true') { throw 'U0 upgrade data-safety gate is not approved' }
+          if (-not $env:JJ_UPDATE_PUBLIC_KEY_PEM) {
+            throw 'Protected Ed25519 public key is not configured'
+          }
+      - run: npm ci
+      - run: npm run dist
+      - name: Sign and check the complete asset set
+        shell: pwsh
+        env:
+          JJ_UPDATE_SIGNING_KEY_PEM: ${{ secrets.JJ_UPDATE_SIGNING_KEY_PEM }}
+        run: |
+          if (-not $env:JJ_UPDATE_SIGNING_KEY_PEM) { throw 'Protected signing key is not configured' }
+          $version = node -p "require('./package.json').version"
+          node tools/release/update-manifest.mjs create release $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/release/update-manifest.mjs verify release $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/release/check-assets.mjs release $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload complete assets to a draft Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $tag = "v$version"
+          $assets = @(
+            "release/JJ-Music-$version-Setup-x64.exe",
+            "release/JJ-Music-$version-Portable-x64.zip",
+            'release/SHA256SUMS.txt',
+            'release/latest.yml',
+            'release/update-manifest.json',
+            'release/update-manifest.sig'
+          )
+          gh release create $tag $assets --draft --verify-tag --title $tag --generate-notes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $actual = gh release view $tag --json assets --jq '.assets[].name' | Sort-Object
+          $expected = $assets | ForEach-Object { Split-Path $_ -Leaf } | Sort-Object
+          if (@(Compare-Object $actual $expected).Count -ne 0) { throw 'Draft Release asset list differs from verified files' }

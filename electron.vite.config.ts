@@ -32,6 +32,10 @@ function copyMainAssets() {
 
 export default defineConfig({
   main: {
+    define: {
+      __JJ_UPDATE_PUBLIC_KEY_PEM__: JSON.stringify(process.env['JJ_UPDATE_PUBLIC_KEY_PEM'] ?? ''),
+      __JJ_UPDATE_U0_APPROVED__: JSON.stringify(process.env['JJ_UPDATE_U0_APPROVED'] === 'true')
+    },
     plugins: [externalizeDepsPlugin(), copyMainAssets()],
     resolve: {
       alias: {

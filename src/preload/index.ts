@@ -33,6 +33,7 @@ import type { ChosenLyric, LyricCandidate, AssetExportResult, MatchApplyOptions,
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import type { ValidationReport, SourceToggleResult } from '@shared/validation'
+import type { UpdateStatus } from '@shared/update-types'
 
 /** Unwrap the `{ ok, data, error }` envelope, throwing on failure. */
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -42,6 +43,18 @@ async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 }
 
 const api = {
+  updates: {
+    status: () => invoke<UpdateStatus>(IPC.updateStatus),
+    check: () => invoke<UpdateStatus>(IPC.updateCheck),
+    download: () => invoke<UpdateStatus>(IPC.updateDownload),
+    cancel: () => invoke<UpdateStatus>(IPC.updateCancel),
+    install: () => invoke<void>(IPC.updateInstall),
+    onChanged: (handler: (status: UpdateStatus) => void) => {
+      const listener = (_event: unknown, status: UpdateStatus): void => handler(status)
+      ipcRenderer.on(IPC.updateChanged, listener)
+      return () => ipcRenderer.removeListener(IPC.updateChanged, listener)
+    }
+  },
   downloads: {
     list: () => invoke<DownloadTask[]>(IPC.downloadsList),
     add: (tracks: OnlineMusicInfo[], quality: Quality) => invoke<string[]>(IPC.downloadsAdd, tracks, quality),

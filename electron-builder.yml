@@ -25,6 +25,14 @@ directories:
   output: release
   buildResources: build
 
+# `--publish never` remains the local/default packaging behavior. This metadata
+# makes electron-builder emit app-update.yml and latest.yml for the fixed repo;
+# only the separate protected Release workflow is allowed to upload assets.
+publish:
+  provider: github
+  owner: jun501389541
+  repo: JJ-Music
+
 files:
   - out/main/**/*
   - out/preload/**/*
@@ -132,6 +140,7 @@ electronFuses:
 #   resetAdHocDarwinSignature — macOS-only, and this build is Windows-only.
 
 nsis:
+  include: build/installer.nsh
   artifactName: JJ-Music-${version}-Setup-${arch}.${ext}
   oneClick: false
   perMachine: false

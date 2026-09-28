@@ -21,6 +21,13 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const quality = (value: unknown): boolean => LX_QUALITIES.includes(value as (typeof LX_QUALITIES)[number])
 
   switch (channel) {
+    case IPC.updateStatus:
+    case IPC.updateCheck:
+    case IPC.updateDownload:
+    case IPC.updateCancel:
+    case IPC.updateInstall:
+      if (args.length !== 0) bad()
+      break
     case IPC.musicSearch:
       if (args.length > 4 || !source(args[0]) || !str(args[1], 200) ||
         !page(args[2]) || !request(args[3])) bad()

@@ -1,6 +1,6 @@
 {
   "name": "jj-music",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "JJ Music — 支持本地与联网的音乐播放器，兼容 LX Music 音源脚本，UI 参考 Salt Player",
   "main": "./out/main/index.js",
   "author": "JJ Music",
@@ -26,9 +26,11 @@
     "build:win": "npm run dist"
   },
   "dependencies": {
+    "electron-updater": "6.7.3",
     "iconv-lite": "^0.7.3",
     "music-metadata": "^11.9.0",
-    "node-id3": "^0.2.9"
+    "node-id3": "^0.2.9",
+    "yaml": "2.8.1"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.1",

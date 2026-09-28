@@ -2,15 +2,15 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.2.0** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.3.0** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.2.0/JJ-Music-0.2.0-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.2.0/JJ-Music-0.2.0-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.2.0/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.3.0/JJ-Music-0.3.0-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.3.0/JJ-Music-0.3.0-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.3.0/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。更新前请先退出旧版；安装版和免安装版默认共用当前用户的配置。
 
@@ -63,8 +63,8 @@
 打包输出：
 
     release/
-      JJ-Music-0.2.0-Setup-x64.exe
-      JJ-Music-0.2.0-Portable-x64.zip
+      JJ-Music-0.3.0-Setup-x64.exe
+      JJ-Music-0.3.0-Portable-x64.zip
       SHA256SUMS.txt          # 由 npm run dist 生成，只列本次版本的两个文件
       win-unpacked/
 
@@ -72,7 +72,7 @@ npm 缓存放在 `.cache`。打包时 Electron 与打包工具的二进制**默�
 
 ## 数据与限制
 
-- **数据目录**：便携版（ZIP）与"程序目录可写"的安装版，把全部数据放在 exe 旁边的 `data/`；程序目录不可写（如装进 `Program Files`）时回退到 `%APPDATA%/jj-music`。Chromium 的缓存随数据目录一起走，不会单独留在 C 盘。首次以便携版启动时会把旧的 `%APPDATA%/jj-music` 复制过来（原目录保留，浏览器缓存等可再生数据不复制）。设置 → App 数据 显示当前目录与来源，并提供「迁移到其它目录」：选完目录后复制并写入 `data-location.json` 指针，需重启生效。目标目录不能与当前数据目录互相包含——选它里面的文件夹会让递归复制一层层套进自己，选上级则会把应用文件散开，这两种在弹确认框之前就会被拒绝。迁移过的便携版如果那块盘当天没插，会回到程序旁边的 `data/` 并在设置页说明，不会改到 C 盘去建新库；记录里的目录"在但写不进去"（同名普通文件、只读挂载）同样不会被采用，并且会说清。命令行显式传 `--user-data-dir` 时以它为准（测试与自动化入口依赖这一点）。
+- **数据目录**：NSIS 安装版把数据放在当前账户的 `%APPDATA%/jj-music`，便携版（ZIP）把数据放在 exe 旁边的 `data/`；两者都可迁移到用户指定的外部目录。Chromium 的缓存随数据目录一起走，不会另留一份。0.2.0 安装版首次升级时，新安装器会在卸载旧版前迁移并校验安装目录中的资料；全机安装留下且无法确定账户归属的共享资料会安全停止安装，并要求先按发布说明备份与恢复。设置 → App 数据 显示当前目录与来源，并提供「迁移到其它目录」：选完目录后复制并写入数据位置指针，需重启生效。目标目录不能与当前数据目录互相包含——选它里面的文件夹会让递归复制一层层套进自己，选上级则会把应用文件散开，这两种在弹确认框之前就会被拒绝。迁移过的便携版如果那块盘当天没插，会回到程序旁边的 `data/` 并在设置页说明，不会改到 C 盘去建新库；记录里的目录"在但写不进去"（同名普通文件、只读挂载）同样不会被采用，并且会说清。命令行显式传 `--user-data-dir` 时以它为准（测试与自动化入口依赖这一点）。
 - 支持 Chromium 可解码的 MP3、FLAC、M4A、AAC、OGG、Opus、WAV；APE、DSD、WMA 暂不支持播放。
 - **可以安全删掉的东西**：`data/`（或 `%APPDATA%/jj-music`）里的 `Cache`、`Code Cache`、`GPUCache`、`blob_storage`、`DIPS` 等是 Chromium 自己的缓存；`library/covers`（抽出来的封面）与 `library/flac-repair`（无损播放时的修复副本）是派生文件。删了都不会丢数据：应用启动时会发现封面引用失效，自己重新抽取，不需要手动点「重新扫描」。真正不能删的是 `settings.json`、`playlists.json`、`downloads.json`、`library/index.json` 与 `sources/`。
 - **封面与歌词的来源会被记录**：每首曲目的封面和歌词在索引里存成一条有序来源链（文件内嵌 / 同目录 `.lrc` / 应用缓存 / 平台接口 / 用户手工），播放页徽标与右键「音轨信息」都会写出现在用的是哪一处。解析优先级是"用户放的 > 文件自带的 > 联网抓的"；这张表只影响读取与显示，写标签仍然只在你点「写入标签」时发生。索引版本随之从 3 升到 4，首次启动会自动在后台重读曲库补齐，无需手动重扫。

@@ -26,7 +26,7 @@ const shared = {
   logLevel: 'info',
   // Node built-ins and installed packages stay external; they resolve normally
   // at runtime from node_modules.
-  external: ['electron', 'iconv-lite', 'music-metadata', 'node-id3'],
+  external: ['electron', 'iconv-lite', 'music-metadata', 'node-id3', 'yaml', 'electron-updater'],
   alias: {
     '@shared': join(repoRoot, 'src', 'shared'),
     '@main': join(repoRoot, 'src', 'main')
@@ -53,6 +53,9 @@ await build({
     join(repoRoot, 'src', 'main', 'sources', 'legacy-music-info.ts'),
     join(repoRoot, 'src', 'main', 'library', 'music-library.ts'),
     join(repoRoot, 'src', 'main', 'data-location.ts'),
+    join(repoRoot, 'src', 'main', 'updates', 'manifest.ts'),
+    join(repoRoot, 'src', 'main', 'updates', 'service.ts'),
+    join(repoRoot, 'src', 'main', 'updates', 'release-source.ts'),
     join(repoRoot, 'src', 'main', 'library', 'embedded-lyrics.ts'),
     join(repoRoot, 'src', 'main', 'library', 'lyric-service.ts'),
     join(repoRoot, 'src', 'main', 'library', 'metadata-match.ts'),

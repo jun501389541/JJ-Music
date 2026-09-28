@@ -24,4 +24,8 @@ rejects(IPC.filesDropped, [Array.from({ length: 10001 }, (_, i) => `C:\\Music\\$
 rejects(IPC.libraryRemoveTracks, [[123]])
 rejects(IPC.downloadsAdd, [[], 'invalid'])
 accepts(IPC.downloadsAdd, [[], 'flac'])
+for (const channel of ['update:status', 'update:check', 'update:download', 'update:cancel', 'update:install']) {
+  accepts(channel, [])
+  rejects(channel, ['unexpected renderer data'])
+}
 console.log('IPC validation passes')

@@ -71,6 +71,15 @@ test('a packaged build with a writable program folder keeps its data there', () 
   assert.equal(chosen.source, 'portable')
 })
 
+test('an NSIS install uses AppData even when its program folder is writable', () => {
+  const chosen = pick({ installed: true })
+  assert.equal(chosen.dir, APPDATA)
+  assert.equal(chosen.source, 'appdata')
+  const pointer = pointerPath(EXE, APPDATA, () => true, true)
+  assert.equal(pointer, join('C:/Users/me/AppData/Roaming', '.jj-music-data-location.json'))
+  assert.equal(pick({ installed: true, pointer: 'E:/Moved' }).dir, 'E:/Moved')
+})
+
 test('an install under Program Files does not try to write next to the exe', () => {
   const chosen = pick({ exeDir: 'C:/Program Files/JJ Music', writable: () => false })
   assert.equal(chosen.dir, APPDATA)

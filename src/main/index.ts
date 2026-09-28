@@ -19,9 +19,9 @@ import { flushJsonWrites } from './store/json-file'
 import { applyImportOrder, fetchImportCover, importPlaylist } from './online/playlist-import'
 import type { ImportedPlaylist } from '@shared/types'
 import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path'
-import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { cp, mkdir, readFile } from 'node:fs/promises'
-import { resolveDataDir, migrationSource, pointerPath, relocationProblem, type DataDirChoice } from './data-location'
+import { resolveDataDir, migrationSource, pointerPath, relocationProblem, NSIS_INSTALL_MARKER, type DataDirChoice } from './data-location'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
@@ -58,10 +58,49 @@ import { PendingAssetStore, pendingKey } from './library/pending-assets'
 import type { TagPatch } from './library/tag-writer'
 import type { AssetExportInput, AssetExportResult, ChosenLyric, MatchApplyOptions, ResolvedLyric } from '@shared/library-types'
 import { DesktopLyrics } from './desktop-lyrics'
+import electronUpdater from 'electron-updater'
+import type { CancellationToken as UpdaterCancellationToken } from 'electron-updater'
+import { UpdateService } from './updates/service'
+import { loadOfficialRelease } from './updates/release-source'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
+
+// electron-updater is CommonJS. Electron loads this externalized dependency from
+// the ESM main bundle, where named imports are not available at runtime.
+const { autoUpdater, CancellationToken } = electronUpdater
 
 const __dirname_ = dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged
+const isNsisInstalled = app.isPackaged && process.platform === 'win32' &&
+  existsSync(join(process.resourcesPath, NSIS_INSTALL_MARKER))
+declare const __JJ_UPDATE_PUBLIC_KEY_PEM__: string
+declare const __JJ_UPDATE_U0_APPROVED__: boolean
+
+// U0 gates availability even when an NSIS-owned marker is present. ZIP builds
+// have no marker; installer builds cannot enable updates until U0 is approved.
+const updateService = new UpdateService({
+  currentVersion: app.getVersion(),
+  publicKey: __JJ_UPDATE_PUBLIC_KEY_PEM__,
+  available: process.platform === 'win32' && process.arch === 'x64' && app.isPackaged &&
+    __JJ_UPDATE_U0_APPROVED__ && !!__JJ_UPDATE_PUBLIC_KEY_PEM__ &&
+    isNsisInstalled,
+  source: { load: loadOfficialRelease },
+  updater: {
+    checkForUpdates: async () => {
+      const result = await autoUpdater.checkForUpdates()
+      return result?.updateInfo ?? null
+    },
+    downloadUpdate: token => autoUpdater.downloadUpdate(token as UpdaterCancellationToken),
+    quitAndInstall: () => autoUpdater.quitAndInstall(false, true),
+    onProgress: listener => { autoUpdater.on('download-progress', info => listener(info.percent)) },
+    onDownloaded: listener => { autoUpdater.on('update-downloaded', event => listener(event.downloadedFile)) }
+  },
+  token: () => new CancellationToken()
+})
+autoUpdater.autoDownload = false
+autoUpdater.autoInstallOnAppQuit = false
+autoUpdater.disableDifferentialDownload = true
+autoUpdater.allowPrerelease = false
+autoUpdater.allowDowngrade = false
 
 /**
  * Resolve a path to a file that is kept outside the asar archive.
@@ -153,13 +192,14 @@ function readPointer(file: string): { dir: string | null; problem: string | null
 function locateDataDir(appDataDir: string): DataDirChoice {
   const exeDir = dirname(process.execPath)
   const switchDir = app.commandLine.getSwitchValue('user-data-dir')
-  const pointer = readPointer(pointerPath(exeDir, appDataDir, isWritableDir))
+  const pointer = readPointer(pointerPath(exeDir, appDataDir, isWritableDir, isNsisInstalled))
   return resolveDataDir({
     switchDir: switchDir && isAbsolute(switchDir) ? switchDir : null,
     envDir: isDev && debugPort && testDataDir && isAbsolute(testDataDir) ? testDataDir : null,
     exeDir,
     appDataDir,
     packaged: app.isPackaged,
+    installed: isNsisInstalled,
     pointer: pointer.dir,
     pointerProblem: pointer.problem,
     exists: existsSync,
@@ -173,10 +213,14 @@ function locateDataDir(appDataDir: string): DataDirChoice {
  */
 const defaultDataDir = app.getPath('userData')
 const dataLocation = locateDataDir(defaultDataDir)
+// Electron requires setPath's target to exist. A first NSIS launch has no
+// migrated profile yet, so create the chosen directory before redirecting
+// Chromium and the app's stores into it.
+mkdirSync(dataLocation.dir, { recursive: true })
 app.setPath('userData', dataLocation.dir)
 
 /** Where the pointer recording a user-chosen data directory lives. */
-const dataPointerFile = pointerPath(dirname(process.execPath), defaultDataDir, isWritableDir)
+const dataPointerFile = pointerPath(dirname(process.execPath), defaultDataDir, isWritableDir, isNsisInstalled)
 
 /**
  * Chromium-managed subtrees that rebuild themselves. A gigabyte of shader cache
@@ -1153,6 +1197,11 @@ function relaxCorsForMedia(): void {
 }
 
 function registerIpc(): void {
+  handle(IPC.updateStatus, () => updateService.getState())
+  handle(IPC.updateCheck, () => updateService.check())
+  handle(IPC.updateDownload, () => updateService.download())
+  handle(IPC.updateCancel, () => updateService.cancel())
+  handle(IPC.updateInstall, () => updateService.install())
   ipcMain.on(IPC.musicCancel, (event, id: unknown) => {
     if (fromMainWindow(event) && typeof id === 'string') activeRequests.get(id)?.abort()
   })
@@ -2360,6 +2409,12 @@ if (!app.requestSingleInstanceLock()) {
     services = await createServices()
     registerIpc()
     mainWindow = createWindow()
+    updateService.onState(state => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.updateChanged, state)
+    })
+    if (updateService.getState().phase === 'idle') {
+      mainWindow.webContents.once('did-finish-load', () => { void updateService.check().catch(() => {}) })
+    }
 
     // Restore the tray if the user had it enabled in a previous session.
     if (services.settings.get().minimizeToTray) ensureTray()

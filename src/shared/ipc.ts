@@ -5,6 +5,12 @@
  * a channel name is a compile error rather than a silently dead handler.
  */
 export const IPC = {
+  updateStatus: 'update:status',
+  updateCheck: 'update:check',
+  updateDownload: 'update:download',
+  updateCancel: 'update:cancel',
+  updateInstall: 'update:install',
+  updateChanged: 'update:changed',
   downloadsList: 'downloads:list',
   downloadsAdd: 'downloads:add',
   downloadsCancel: 'downloads:cancel',

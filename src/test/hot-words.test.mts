@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HOT_WORD_AGGREGATE_LIMIT, HOT_WORD_LIMIT, HOT_WORD_SOURCES, HotWordSource } from './online/hot-words.js'
@@ -268,5 +268,129 @@ test('失败不把今天写成"没有"：保留昨天的词，并在退避期内
   await broken.words('tx')
   assert.equal(asks, 2, '半小时之后可以再试一次')
   assert.deepEqual((await broken.words('tx')).map((word) => word.text), ['昨天的词'], '一直失败就一直留着旧的')
+  await rm(dir, { recursive: true, force: true })
+})
+
+/* ------------------------------------------------------------------ *
+ * 按音源版本隔离。
+ *
+ * 这是 E6 遗留的那条 Constraints：「更新后按音源版本隔离平台缓存」。
+ * `providerId` 不够——`stableId` 按设计跨版本不变，所以"版本"那一半必须是
+ * 脚本内容摘要，见 `source-store.ts` 的 `versionOf`。
+ *
+ * 下面每条都断言**要么答旧词、要么重新发请求**，而不是只看返回值的形状：
+ * 一个只把旧条目从返回值里过滤掉、却仍不发请求的实现，会让用户看到空榜
+ * 且永远等不到新数据。
+ *
+ * 变异验证的真实结果（2026-09-28，别把它读成"验过"）：
+ * 三道版本防线是**串联冗余**的——`load()` 的读盘过滤、`showNow()` 对异版本的
+ * 剔除、`refresh()` 的 `usable` 判据。去掉其中任何**单独**一条，另两条都会让
+ * "不展示旧版本的词"这个可观察结论继续成立，所以针对单条的变异在下面这套
+ * 断言下**全部逃逸**（实测：`load()` 过滤→`if (false)`、`showNow()` 剔除→
+ * `if (false)`、`usable` 判据→`const usable = previous`，三次都 18/18 全绿）。
+ * 更下游的两处甚至无从生效：探针显示 `load()` 过滤生效时 `entries` 已是空的，
+ * `showNow()`/`refresh()` 根本没有条目可处理。
+ *
+ * 因此这套测试证明的是**行为契约**（换版本之后用户看到的必须是新脚本的词，
+ * 且确实重新问过），不是"上一段实现里的某一行被覆盖"。要让单行可变异，只能
+ * 直接读私有的 `entries`——那验的是实现而不是契约，不值当。**"变异通过"这句
+ * 话在本分组上不成立，任何后续读者不应据此认为这三条防线各自被验证过。**
+ * ------------------------------------------------------------------ */
+
+test('版本没变时照旧读缓存，一个请求都不发', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jj-hot-ver-'))
+  const file = join(dir, 'hot-words.json')
+  const clock = dayAt(9, 22)
+  const seed = new HotWordSource(async () => qqPayload(['脚本给的词']), { now: () => clock, file, version: () => 'src@aaaa' })
+  await seed.words('tx')
+
+  const sameVersion = new HotWordSource(async () => { throw new Error('同版本不该再问') }, { now: () => clock, file, version: () => 'src@aaaa' })
+  await sameVersion.load()
+  assert.deepEqual(
+    (await sameVersion.words('tx')).map((word) => word.text),
+    ['脚本给的词'],
+    '版本一致就是同一条记录，读盘即命中'
+  )
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('脚本换了版本：磁盘上旧版本写的词不再被展示，而是重新去问', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jj-hot-ver-'))
+  const file = join(dir, 'hot-words.json')
+  const clock = dayAt(9, 22)
+  const seed = new HotWordSource(async () => qqPayload(['旧版本的词']), { now: () => clock, file, version: () => 'src@aaaa' })
+  await seed.words('tx')
+
+  // 升级：同一个音源身份，不同内容指纹。这一格的关键是"答了旧词"和"没去问"
+  // 是两种不同的失败，所以两边都断言。
+  let asks = 0
+  const upgraded = new HotWordSource(async () => { asks += 1; return qqPayload(['新版本的词']) }, { now: () => clock, file, version: () => 'src@bbbb' })
+  await upgraded.load()
+  const shown = (await upgraded.words('tx')).map((word) => word.text)
+  assert.ok(asks >= 1, '旧版本的记录不该被当成"今天已经问过了"：必须重新去问')
+  if (shown[0] === '旧版本的词') {
+    assert.fail('旧版本写的词不该出现在新版本身边：那份意见已不代表任何在跑的东西')
+  }
+  assert.deepEqual(shown, ['新版本的词'], '拿到的该是新版本自己的答案')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('运行中换版本：setVersion 立刻清掉旧版本的条目，不是只在读时忽略', async () => {
+  const clock = dayAt(9, 22)
+  const spy = recorder()
+  const source = new HotWordSource(spy.fetchText, { now: () => clock, version: () => 'src@aaaa' })
+  await source.words('tx')
+
+  // 切到新版本：内存里那份必须当场作废，否则切回旧脚本的用户会继续看到新脚本的榜。
+  source.setVersion('src@bbbb')
+  await source.words('tx')
+  assert.equal(
+    spy.calls.filter(url => url.includes('gethotkey')).length,
+    2,
+    '换版本之后必须重新去问：条目是被删掉了，不是被读时过滤掉了'
+  )
+})
+
+test('没有音源版本时不隔离，行为与隔离前完全一样', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jj-hot-ver-'))
+  const file = join(dir, 'hot-words.json')
+  const clock = dayAt(9, 22)
+  const seed = new HotWordSource(async () => qqPayload(['内置的词']), { now: () => clock, file })
+  await seed.words('tx')
+
+  // 默认构造：没有 version。这是离线套件与"没有已启用脚本"时的形状。
+  const noVersion = new HotWordSource(async () => { throw new Error('不隔离时该照旧命中') }, { now: () => clock, file })
+  await noVersion.load()
+  assert.deepEqual(
+    (await noVersion.words('tx')).map((word) => word.text),
+    ['内置的词'],
+    '没有版本可归属时不能把记录丢掉——那会让默认安装每天白问一次'
+  )
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('升级前写入的条目（没有 provider 字段）在有版本时被丢弃', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jj-hot-ver-'))
+  const file = join(dir, 'hot-words.json')
+  const clock = dayAt(9, 22)
+  // 老格式：直接写一份没有 provider 的缓存文件。
+  await writeFile(file, JSON.stringify({ tx: { at: clock, words: ['老格式的词'] } }), 'utf8')
+
+  let asks = 0
+  const source = new HotWordSource(async () => { asks += 1; return qqPayload(['新格式的词']) }, { now: () => clock, file, version: () => 'src@aaaa' })
+  await source.load()
+  /*
+   * `load()` 从不去问网络，所以断言必须落在 `words()` 之后：老条目被丢弃的证据是
+   * 「问到的新词」而不是「加载时发了请求」。
+   *
+   * 这条测试验的是**展示结果**，不是 `load()` 那一条防线。三者是冗余的——`load()`
+   * 的过滤、`showNow()` 对异版本的剔除、`refresh()` 的 `usable` 判据，去掉任何单独
+   * 一条，另两条都会让同一个结论成立（变异验证确认：把 `load()` 的过滤整条拿掉，
+   * 这条测试仍全绿）。要看住 `load()` 本身，只能直接读 `entries`；那属于内部状态，
+   * 而它的可观察后果已经由这里和 `运行中换版本` 那条一起覆盖了。
+   */
+  const shown = (await source.words('tx')).map((word) => word.text)
+  assert.ok(asks >= 1, '没人说得清老条目是哪个脚本版本写的，所以不认它——该重新去问')
+  assert.deepEqual(shown, ['新格式的词'], '给出的必须是本次问到的词，不是那份来源不明的老记录')
   await rm(dir, { recursive: true, force: true })
 })

@@ -20,7 +20,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
@@ -504,6 +504,110 @@ section('6. Gaps closed after E2')
     `transport=${String(Reflect.get(autoProbe, 'transport'))}`
   )
   void transportOf
+}
+
+{
+  /*
+   * The IPC start contract, asserted without spawning anything.
+   *
+   * `source-host.ts` reads `argv[2]` as the decoded script and `argv[3]` as the
+   * JSON payload. The shared host used to fork with `[initPath, scratchDir]` —
+   * no script path, and a *directory* where a JSON file belongs — so `readInit()`
+   * failed, the host exited 2, and this branch could never start a script on any
+   * platform that takes it. It went unnoticed because win32 uses the file
+   * transport and nothing here exercised IPC: a real start cannot succeed in this
+   * sandbox (Node may not spawn Node), so the transport tests above only ever
+   * looked at the `transport` field, never at the arguments.
+   *
+   * So read the arguments themselves. `fork` is intercepted rather than invoked:
+   * that is the only way to observe what would be passed without spawning, and it
+   * still fails loudly if the module stops calling `fork` at all.
+   *
+   * Two things this had to get right, both found by running it rather than by
+   * reading it:
+   *
+   *  - `import('node:child_process')` gives a *frozen* ESM namespace object, so
+   *    assigning to `.fork` throws "Cannot assign to read only property". Go
+   *    through `createRequire` to reach the writable CommonJS object, then call
+   *    `syncBuiltinESMExports()` — without that sync the host keeps its original
+   *    `fork` binding and the probe silently records nothing, which is the worst
+   *    possible failure for an assertion like this one.
+   *  - Only IPC mode reaches `fork` at all. File mode goes through `spawn` inside
+   *    `launchRestricted`, so a file-mode assertion here would be empty by
+   *    construction. What file mode needs is its own check on the arguments it
+   *    builds, which is not what this block is for.
+   *
+   * Do not add a "the paths exist on disk" assertion: the stub returns a child
+   * that is already dead, so `start()`'s cleanup removes the scratch directory
+   * before the arguments can be inspected. The ordering assertion below is what
+   * catches the real defect — a missing script path and a directory passed where
+   * a JSON file belongs.
+   *
+   * This block is verified by mutation, not by reading: reverting the call site
+   * in the built artifacts to `[initPath, initPath]` makes the first assertion
+   * fail. Two ways to run that check wrongly, both observed: patching only
+   * `source-runtime-host.js` leaves the copy inlined into `jj-provider-engine.js`
+   * untouched, and reusing one warmed module across the baseline and mutated runs
+   * never re-executes the code under test. Cache-bust the import when repeating an
+   * observation.
+   */
+  const { createRequire, syncBuiltinESMExports } = await import('node:module')
+  const hostPath = join(repoRoot, 'out', 'test', 'sources', 'source-host.js')
+  const childProcess = createRequire(import.meta.url)('node:child_process')
+  const hostModule = pathToFileURL(join(repoRoot, 'out', 'test', 'sources', 'source-runtime-host.js')).href
+  let generation = 0
+
+  async function forkArgsFor(transport) {
+    // Fresh module instance per observation: a warmed one keeps state from the
+    // previous `start()` and would not re-execute the code under test.
+    const { SourceRuntimeHost } = await import(`${hostModule}?v=${generation++}`)
+    const original = childProcess.fork
+    let recorded = null
+    childProcess.fork = (modulePath, args) => {
+      recorded = { modulePath, args }
+      // A stub that satisfies every property the host touches before it gives up.
+      return {
+        stdout: null,
+        stderr: null,
+        on() { return this },
+        once() { return this },
+        send() { return true },
+        kill() { return true },
+        exitCode: 1,
+        signalCode: null
+      }
+    }
+    syncBuiltinESMExports()
+    try {
+      const host = new SourceRuntimeHost(hostPath, callbacks, process.execPath, transport)
+      await host.start(fakeApi, 'void 0').catch(() => {})
+    } finally {
+      childProcess.fork = original
+      syncBuiltinESMExports()
+    }
+    return recorded
+  }
+
+  const ipc = await forkArgsFor('ipc')
+  check(
+    'IPC start passes the script path and the init file, in that order',
+    ipc !== null &&
+      ipc.args.length === 2 &&
+      ipc.args[0].endsWith('script.js') &&
+      ipc.args[1].endsWith('init.json'),
+    ipc ? `args=${JSON.stringify(ipc.args)}` : 'fork was never called'
+  )
+  check(
+    'IPC start passes two arguments, never a directory in the init slot',
+    ipc !== null && ipc.args.length === 2 && ipc.args[1] !== dirname(ipc.args[1]),
+    ipc ? `args=${JSON.stringify(ipc.args)}` : 'fork was never called'
+  )
+  const fileMode = await forkArgsFor('file')
+  check(
+    'file mode never routes through fork',
+    fileMode === null,
+    fileMode ? `args=${JSON.stringify(fileMode.args)}` : ''
+  )
 }
 
 /* ------------------------------------------------------------------ *

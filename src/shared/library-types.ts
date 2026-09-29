@@ -36,6 +36,16 @@ export interface ResolvedLyric {
    * `search`) when the text came from the network.
    */
   asset?: import('./types').AssetRef
+  /**
+   * Which source version produced this lyric, when it came from one that can be
+   * updated. Used to key the in-memory lyric cache (`lyric-service.ts`
+   * `cacheKeyFor`), so an updated script does not go on being credited for text
+   * its previous release returned.
+   *
+   * Optional because a lyric from a sidecar file, an embedded tag, or a
+   * built-in adapter has no script version to name.
+   */
+  provider?: string
   /** Explains an empty result, e.g. which sources were tried. */
   note?: string
 }

@@ -138,7 +138,7 @@ export async function lyricFromOtherPlatforms(
   return { lyric: '' }
 }
 
-/** LRU-ish cache keyed by track id, so re-opening a track is instant. */
+/** LRU-ish cache keyed by source version + track id, so re-opening a track is instant. */
 const cache = new Map<string, ResolvedLyric>()
 const CACHE_LIMIT = 64
 
@@ -150,9 +150,49 @@ function cacheSet(key: string, value: ResolvedLyric): void {
   cache.set(key, value)
 }
 
+/**
+ * Cache identity for one resolution of a track's lyrics.
+ *
+ * `provider` is the source version that produced the answer, and it is part of
+ * the key because the answer *is* the source's opinion about this track. A
+ * script that parsed lyrics wrongly and then shipped a fix would otherwise keep
+ * serving its old output from a cache whose key never changed — the cache would
+ * be more durable than the bug.
+ *
+ * `provider` is optional so the offline suites, which never inject one, keep
+ * their existing single-bucket behaviour. When it is absent the key is exactly
+ * `track.id`, the same string the pre-isolation cache used.
+ */
+function cacheKeyFor(trackId: string, provider?: string): string {
+  return provider ? `${provider}\u0000${trackId}` : trackId
+}
+
+/**
+ * Drop every cached entry recorded under one source version.
+ *
+ * Called when a source the user just updated (or removed) had produced cached
+ * answers. Waiting for the 64-entry LRU to evict them would leave the old
+ * script's output winning for as long as that took.
+ */
+export function clearLyricCacheFor(provider: string): void {
+  const prefix = `${provider}\u0000`
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) cache.delete(key)
+  }
+}
+
 export function clearLyricCache(trackId?: string): void {
-  if (trackId) cache.delete(trackId)
-  else cache.clear()
+  if (!trackId) {
+    cache.clear()
+    return
+  }
+  // Without a provider, the isolated entries for this track cannot be named —
+  // so drop them by identity rather than pretending a bare-id delete covered
+  // them. A caller that knows the provider should use `clearLyricCacheFor`.
+  const suffix = `\u0000${trackId}`
+  for (const key of cache.keys()) {
+    if (key === trackId || key.endsWith(suffix)) cache.delete(key)
+  }
 }
 
 /**
@@ -163,9 +203,14 @@ export function clearLyricCache(trackId?: string): void {
  * Without this, the second read of the same track comes from the cache and
  * reports the lyric as if nothing were pending, so the badge would blink the
  * truth once and then lie.
+ *
+ * `provider` must be the same source version the caller passed to
+ * `resolveLocalLyric`, or the decorated record lands in a different bucket than
+ * the one the next read looks in — which would bring back exactly the
+ * once-true-then-lying badge this function exists to prevent.
  */
-export function primeLyricCache(trackId: string, resolved: ResolvedLyric): void {
-  cacheSet(trackId, resolved)
+export function primeLyricCache(trackId: string, resolved: ResolvedLyric, provider?: string): void {
+  cacheSet(cacheKeyFor(trackId, provider), resolved)
 }
 
 /**
@@ -228,11 +273,20 @@ export async function resolveLocalLyric(
   deps: {
     search?: SearchOnlineForMatch
     fetchLyric?: typeof fetchOnlineLyric
+    /**
+     * The version of the source that will answer, for cache isolation.
+     *
+     * See `cacheKeyFor`. Absent means the caller has no source version to
+     * offer — the offline suites do exactly that, and get the single-bucket
+     * cache the app had before isolation.
+     */
+    provider?: string
   } = {}
 ): Promise<ResolvedLyric> {
   const allowOnline = options.allowOnline !== false
+  const key = cacheKeyFor(track.id, deps.provider)
   if (!options.force) {
-    const cached = cache.get(track.id)
+    const cached = cache.get(key)
     if (cached) return cached
   }
 
@@ -254,7 +308,7 @@ export async function resolveLocalLyric(
       const sidecar = await readSidecar(sidecarPathFor(track.path))
       if (sidecar?.trim()) {
         const resolved: ResolvedLyric = { lyric: sidecar, source: 'sidecar', synchronized: looksSynchronized(sidecar), asset: source }
-        cacheSet(track.id, resolved)
+        cacheSet(key, resolved)
         return resolved
       }
       continue
@@ -270,7 +324,7 @@ export async function resolveLocalLyric(
           synchronized: embedded.synchronized,
           asset: { ...source, synced: embedded.synchronized }
         }
-        cacheSet(track.id, resolved)
+        cacheSet(key, resolved)
         return resolved
       }
     }
@@ -282,7 +336,7 @@ export async function resolveLocalLyric(
   if (allowOnline) {
     const online = await searchLyricOnline(track, deps)
     if (online.lyric.trim()) {
-      cacheSet(track.id, online)
+      cacheSet(key, online)
       return online
     }
   }
@@ -312,6 +366,15 @@ export async function searchLyricOnline(
   deps: {
     search?: SearchOnlineForMatch
     fetchLyric?: typeof fetchOnlineLyric
+    /**
+     * The version of the source that will answer, for cache isolation.
+     *
+     * This entry point reads no cache itself, but the fetch it performs goes on
+     * to be staged under this key by the caller (`primeLyricCache`), so the key
+     * has to be decided in one place and carried — see `primeLyricCache` for
+     * what happens when the two disagree.
+     */
+    provider?: string
   } = {}
 ): Promise<ResolvedLyric> {
   const candidates = await lyricCandidates(track, deps)
@@ -322,6 +385,13 @@ export async function searchLyricOnline(
     lyric: best.lyric,
     ...(best.tlyric ? { tlyric: best.tlyric } : {}),
     ...(best.rlyric ? { rlyric: best.rlyric } : {}),
+    /*
+     * Recorded with the version key alongside the lyric, so the caller staging
+     * this into the cache does not have to be told a second time which version
+     * answered — a second telling is a second chance to disagree. `primeLyricCache`
+     * prefers this over anything passed separately.
+     */
+    ...(deps.provider ? { provider: deps.provider } : {}),
     source: 'online',
     synchronized: looksSynchronized(best.lyric),
     matchedMusic: best.music,
@@ -380,6 +450,12 @@ export async function lyricCandidates(
   deps: {
     search?: SearchOnlineForMatch
     fetchLyric?: typeof fetchOnlineLyric
+    /**
+     * The version of the source that will answer, carried through so the caller
+     * can stage the result under the same cache key it resolved with. This
+     * function reads no cache itself.
+     */
+    provider?: string
   } = {}
 ): Promise<LyricCandidate[]> {
   const search = deps.search ?? defaultSearch

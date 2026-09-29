@@ -24,11 +24,24 @@
  *  - route a request to whichever script claims the target source
  *  - apply LX-compatible quality fallback (ask for FLAC, accept 320k)
  *  - **survive** a script that kills itself, and report it clearly
+ *
+ * ## What this class does not do any more
+ *
+ * The process lifecycle — forking, the restricted-token launch, the file
+ * transport, the init timeout, the heartbeat watchdog, crash classification and
+ * reaping — lives in `source-runtime-host.ts`, which the JJ provider engine
+ * already used. This file used to carry a second, independent copy of all of
+ * it. The two had to stay behaviourally identical while being edited
+ * separately, and they had already drifted: the shared host's `fork` branch was
+ * launching with the wrong argv for an unknown length of time (see
+ * `source-runtime-host.ts`), and the two copies disagreed about `cwd`.
+ *
+ * What remains here is *policy*: which scripts may start, what a crash means
+ * for the stored "enabled" flag, who owns which platform, and how a request
+ * fails over between competing scripts. Those are decisions about sources, not
+ * about processes, and they stay in the engine.
  */
-import { fork, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { existsSync } from 'node:fs'
 import type {
   OnlineMusicInfo,
   Quality,
@@ -41,16 +54,8 @@ import { toLegacyOnline } from './legacy-music-info'
 import { assertPublicHttpUrl } from '../online/url-guard'
 import type { LoadedApi, SourceStore } from './source-store'
 import { validateSourceBeforeStart, type ValidationReport } from './source-validator'
-import {
-  supportsRestrictedLaunch,
-  launchRestricted,
-  writeRequest,
-  readResponse,
-  readReady,
-  readHeartbeat,
-  readConsoleLog,
-  killChildTree
-} from './restricted-launch'
+import { SourceRuntimeHost, type ExitInfo, type RuntimeState } from './source-runtime-host'
+import { MAX_LOG_LINES } from './source-runtime-host'
 
 /**
  * The custom-source API version reported to scripts as `lx.version`.
@@ -58,16 +63,6 @@ import {
  * than our own app version.
  */
 export const CUSTOM_SOURCE_API_VERSION = '2.0.0'
-
-/** How long a script gets to call `lx.send(inited, ...)` before we give up. */
-const INIT_TIMEOUT_MS = 15_000
-/**
- * How long a single request may take. LX cancels a request handler after
- * 20 000 ms, and scripts are written expecting that ceiling.
- */
-const REQUEST_TIMEOUT_MS = 20_000
-/** Memory ceiling per source process. Exceeding it kills only that process. */
-const SOURCE_MEMORY_LIMIT_MB = 512
 
 /**
  * How many source processes may be booting at once.
@@ -78,30 +73,26 @@ const SOURCE_MEMORY_LIMIT_MB = 512
  */
 const START_CONCURRENCY = 4
 
-interface PendingRequest {
-  resolve: (value: unknown) => void
-  reject: (error: Error) => void
-  timer: NodeJS.Timeout
-}
-
+/**
+ * A live script, as this engine sees it.
+ *
+ * Everything about the *process* lives on `host` (the shared
+ * `RuntimeState`); what remains here is the part that is a decision about
+ * sources rather than about processes — namely, which platforms this script can
+ * serve and how it is indexed.
+ */
 interface ScriptRuntime {
   api: LoadedApi
-  child: ChildProcess
-  /** Directory holding this script's temp handoff file; removed on stop. */
-  scratchDir: string
-  sources: SourceInfo[]
-  ready: Promise<void>
-  pending: Map<number, PendingRequest>
-  nextId: number
-  /** Set when the process died; further requests fail fast. */
-  dead: boolean
-  logs: string[]
-  stopFileLifecycle?: () => void
+  /** The shared host's record for this launch: child, logs, crash reason. */
+  host: RuntimeState
   /**
-   * Set when the exit looked like a hard kill rather than a clean shutdown, so
-   * the UI can explain it instead of showing a generic failure.
+   * Convenience mirrors of the host state this engine reads constantly.
+   *
+   * Kept as accessor-free fields because the host mutates its own record and
+   * the two must not be allowed to disagree: `sources` is refreshed in
+   * `onReady`, and `dead`/`crashReason` are read straight off the host.
    */
-  crashReason?: string
+  sources: SourceInfo[]
 }
 
 export interface SourceEngineEvents {
@@ -127,16 +118,73 @@ export class SourceEngine {
    * rest were discarded as "future priority", which threw that redundancy away.
    */
   private sourceProviders = new Map<SourceId, string[]>()
-  /**
-   * Scripts running under the restricted-token launcher, whose protocol goes
-   * over files rather than IPC. Tracked per launch so `requestFrom` dispatches
-   * through the right transport.
-   */
-  private readonly fileModeRuntimes = new Set<string>()
 
   constructor(store: SourceStore, hostPath: string) {
     this.store = store
     this.hostPath = hostPath
+  }
+
+  /**
+   * The shared process host, configured with this engine's protocol policy.
+   *
+   * Created lazily rather than in the constructor so constructing an engine
+   * stays free of side effects (the tests build engines for stores that never
+   * start anything).
+   *
+   * The only LX-specific thing the host needs is the `init.json` body: it is
+   * built here, without the `source` key the JJ protocol adds, so what a script
+   * receives over this path is byte-identical to what this engine used to write
+   * itself.
+   */
+  private host?: SourceRuntimeHost
+
+  private getHost(): SourceRuntimeHost {
+    if (this.host) return this.host
+    this.host = new SourceRuntimeHost(
+      this.hostPath,
+      {
+        buildInit: (api) => ({
+          env: 'desktop',
+          // The custom-source API version scripts are written against. Do not
+          // bump this to the app version: scripts branch on it.
+          version: CUSTOM_SOURCE_API_VERSION,
+          apiId: api.meta.id,
+          // Exposed to the script as `lx.currentScriptInfo`.
+          scriptInfo: {
+            name: api.meta.name,
+            description: api.meta.description,
+            version: api.meta.version,
+            author: api.meta.author,
+            homepage: api.meta.homepage
+          }
+        }),
+        // The host has already normalised `state.sources`; indexing them is
+        // this engine's job, because ownership is a policy of the LX side.
+        onReady: (state) => {
+          this.rebuildOwners()
+          this.emit('sourcesChanged')
+          void state
+        },
+        onExit: (state, info) => this.handleHostExit(state, info),
+        onLog: (apiId, line) => {
+          const runtime = this.runtimes.get(apiId)
+          if (runtime) this.pushLog(runtime, line)
+        }
+      },
+      process.execPath,
+      // Derive the transport from the platform, exactly as before: the
+      // restricted launcher is what win32 uses and what the file transport
+      // exists for.
+      'auto'
+    )
+    return this.host
+  }
+
+  private pushLog(runtime: ScriptRuntime, line: string): void {
+    const text = line.trim()
+    if (!text) return
+    runtime.host.logs.push(text)
+    if (runtime.host.logs.length > MAX_LOG_LINES) runtime.host.logs.shift()
   }
 
   on(listeners: Partial<SourceEngineEvents>): () => void {
@@ -239,6 +287,11 @@ export class SourceEngine {
     // inside an archive. When that unpack rule is missing the app still starts
     // and simply reports zero online platforms — a confusing symptom for what is
     // really a packaging mistake. Naming the path makes it obvious.
+    //
+    // The shared host performs the same check immediately before launching; it
+    // is repeated here because this is the layer that can attach the reason to
+    // the *stored script* and tell the UI, and because it must happen before the
+    // record below is created.
     if (!existsSync(this.hostPath)) {
       const reason =
         `音源运行时缺失: ${this.hostPath}\n` +
@@ -249,125 +302,43 @@ export class SourceEngine {
       throw new Error(reason)
     }
 
-    // The script is handed over through a file rather than argv or an env var:
-    // installed sources reach 740 KB, well past the ~32 KB command-line limit
-    // and the ~8 KB environment limit on Windows.
-    const scratchDir = mkdtempSync(join(tmpdir(), 'jj-source-'))
-    const scriptPath = join(scratchDir, 'script.js')
-    const initPath = join(scratchDir, 'init.json')
-    writeFileSync(scriptPath, api.source, 'utf8')
-    writeFileSync(
-      initPath,
-      JSON.stringify({
-        env: 'desktop',
-        // The custom-source API version scripts are written against. Do not
-        // bump this to the app version: scripts branch on it.
-        version: CUSTOM_SOURCE_API_VERSION,
-        apiId: api.meta.id,
-        // Exposed to the script as `lx.currentScriptInfo`.
-        scriptInfo: {
-          name: api.meta.name,
-          description: api.meta.description,
-          version: api.meta.version,
-          author: api.meta.author,
-          homepage: api.meta.homepage
-        }
-      }),
-      'utf8'
-    )
-
-    /**
-     * Two launch modes:
-     *
-     *   restricted (Windows) — `runas /trustlevel:0x20000` strips
-     *   SeShutdownPrivilege from the child's token, so a hostile source's
-     *   shutdown call fails at the OS level. Protocol carried over files
-     *   (runas detaches the child; no IPC channel exists).
-     *
-     *   fork — plain `fork()` with IPC, used on non-Windows.
-     */
-    const restricted = supportsRestrictedLaunch()
-    let child: ChildProcess
-    if (restricted) {
-      // Restricted mode: runas + file handoff. The host detects the mode from
-      // argv[4] (the scratch directory), which runas passes through.
-      child = launchRestricted({
-        nodeExec: process.execPath,
-        hostPath: this.hostPath,
-        scriptPath,
-        initPath,
-        scratchDir,
-        memoryLimitMb: SOURCE_MEMORY_LIMIT_MB
-      }).wrapper
-    } else {
-      child = fork(this.hostPath, [scriptPath, initPath], {
-        // The memory ceiling means a runaway script is killed by its own
-        // process rather than exhausting the host's memory.
-        execArgv: [`--max-old-space-size=${SOURCE_MEMORY_LIMIT_MB}`],
-        // `pipe` gives us the script's console output; the IPC channel is
-        // separate and always present with fork().
-        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-        // The working directory stays at the app root. Pointing it at the
-        // scratch directory (which lives under the OS temp dir) breaks
-        // module resolution: the host requires `iconv-lite` and
-        // `music-metadata`, and Node resolves those relative to cwd, so the
-        // child would die with "Cannot find module 'iconv-lite'" before
-        // running any script.
-        cwd: dirname(this.hostPath)
-      })
+    // Everything about launching the child — the scratch directory, the
+    // restricted-token wrapper, `fork` with IPC, the init timeout, the
+    // heartbeat watchdog and crash classification — belongs to the shared host.
+    // This engine supplies only what is LX-specific: the `init.json` body (see
+    // `getHost`) and what a death should mean for the stored script.
+    //
+    // `host.start()` resolves only once the script reported in, so a launch that
+    // fails at the fork/spawn step (EPERM, a missing interpreter) or times out
+    // at init rejects from *here*, before any runtime record exists. That case
+    // used to be handled by this engine's own fork path; now it has to be
+    // handled here, or the script's stored record keeps no trace of why it never
+    // came up and the settings page shows a silent failure.
+    const host = this.getHost()
+    let state: RuntimeState
+    try {
+      state = await host.start(api, api.source)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.store.setError(api.meta.id, message)
+      this.store.setEnabled(api.meta.id, false)
+      this.rebuildOwners()
+      this.emit('sourcesChanged')
+      this.emit('scriptError', api.meta.id, message)
+      throw error
     }
-
-    const runtime: ScriptRuntime = {
-      api,
-      child,
-      scratchDir,
-      sources: [],
-      ready: Promise.resolve(),
-      pending: new Map(),
-      nextId: 1,
-      dead: false,
-      logs: []
-    }
+    const runtime: ScriptRuntime = { api, host: state, sources: state.sources }
     this.runtimes.set(api.meta.id, runtime)
 
-    // The ready promise is created first and its settle function handed to the
-    // mode-specific lifecycle, which decides when init has succeeded.
-    let settleReady!: (error?: Error) => void
-    runtime.ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`音源初始化超时（${INIT_TIMEOUT_MS / 1000}s）`))
-      }, INIT_TIMEOUT_MS)
-      settleReady = (error?: Error): void => {
-        clearTimeout(timer)
-        if (error) reject(error)
-        else resolve()
-      }
-    })
-
-    if (restricted) {
-      this.fileModeRuntimes.add(api.meta.id)
-      this.attachFileProtocolLifecycle(runtime, settleReady)
-    } else {
-      this.fileModeRuntimes.delete(api.meta.id)
-      this.attachIpcLifecycle(runtime, child, settleReady)
-    }
-
-    // Keep script console output for the settings page, bounded (IPC mode only;
-    // file mode captures logs through the console.log scratch file).
-    if (!restricted) {
-      child.stdout?.on('data', (chunk: Buffer) => this.captureLog(runtime, chunk))
-      child.stderr?.on('data', (chunk: Buffer) => this.captureLog(runtime, chunk))
-    }
-
     try {
-      await runtime.ready
+      await state.ready
       this.store.setError(api.meta.id, undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // Reap the child. Disabling the source below bypasses `stop()`, so without
       // this a script that hangs on init keeps its process — and its memory
       // ceiling — resident until the app exits.
-      await this.teardown(runtime, new Error(message))
+      await host.teardown(state, new Error(message))
       // A script that terminates itself silently on startup is the signature of
       // an anti-tamper / environment-probe design — the class that includes the
       // source observed shutting a machine down. Quarantining it means the user
@@ -377,7 +348,7 @@ export class SourceEngine {
       // Only for a *silent* self-termination: an ordinary error is reported but
       // left enabled, because most failures are benign (dead relay, changed
       // API) and quarantining those would be hostile.
-      if (runtime.crashReason && runtime.logs.length === 0) {
+      if (state.crashReason && state.logs.length === 0) {
         const reason =
           `${message}\n该脚本在启动时静默结束了自己的进程，符合自我保护型脚本特征。` +
           `已自动隔离停用；确认安全后可在音源管理里解除隔离。`
@@ -398,310 +369,31 @@ export class SourceEngine {
     }
   }
 
-  private captureLog(runtime: ScriptRuntime, chunk: Buffer): void {
-    const text = chunk.toString('utf8').trim()
-    if (!text) return
-    runtime.logs.push(text)
-    if (runtime.logs.length > 200) runtime.logs.shift()
-  }
-
   /**
-   * Lifecycle for the IPC (`fork`) mode.
+   * What a script's death means for the stored record.
    *
-   * Events arrive over the channel; death is observed directly. This is the
-   * original path, kept verbatim apart from the extraction so the two modes
-   * stay reviewable side by side.
+   * The host has already classified the exit and failed the script's pending
+   * requests; the decision left to this engine is whether the "enabled" flag
+   * should be reverted, and that is a statement about the source rather than
+   * about the process.
    */
-  private attachIpcLifecycle(
-    runtime: ScriptRuntime,
-    child: ChildProcess,
-    settle: (error?: Error) => void
-  ): void {
-    child.on('message', (message: HostMessage) => {
-      this.handleMessage(runtime, message, settle)
-    })
-
-    child.on('error', (error) => {
-      runtime.dead = true
-      this.rebuildOwners()
-      this.failAllPending(runtime, error)
-      settle(error)
-      this.emit('scriptError', runtime.api.meta.id, error.message)
-    })
-
-    child.on('exit', (code, signal) => this.handleChildExit(runtime, code, signal, settle))
-  }
-
-  /**
-   * Lifecycle for the restricted-token (file handoff) mode.
-   *
-   * The child is detached, so there are no `message`/`exit` events. Everything
-   * is observed through the scratch directory:
-   *
-   *   - `ready.json` appears when init finished (or a boot error was reported)
-   *   - `res-<id>.json` files answer dispatched requests
-   *   - `heartbeat.json` mtime says the process is alive
-   *   - `console.log` grows with the script's console output
-   *
-   * Polling granularity is 200 ms — imperceptible next to the 20 s request
-   * ceiling, and cheap (a directory read).
-   */
-  private attachFileProtocolLifecycle(
-    runtime: ScriptRuntime,
-    settle: (error?: Error) => void
-  ): void {
-    const dir = runtime.scratchDir
-    const POLL_MS = 200
-    let logOffset = 0
-    let settled = false
-    const stopLifecycle = (): void => {
-      clearInterval(pollTimer)
-      clearInterval(heartbeatWatch)
-    }
-    runtime.stopFileLifecycle = stopLifecycle
-    const settleOnce = (error?: Error): void => {
-      if (settled) return
-      settled = true
-      if (error) stopLifecycle()
-      settle(error)
-    }
-
-    // Drain the script's console output into the bounded ring buffer.
-    const drainLog = (): void => {
-      const { text, nextOffset } = readConsoleLog(dir, logOffset)
-      if (!text) return
-      logOffset = nextOffset
-      for (const line of text.split('\n').filter(Boolean)) {
-        runtime.logs.push(line)
-        if (runtime.logs.length > 200) runtime.logs.shift()
-      }
-    }
-
-    const pollTimer = setInterval(() => {
-      // Console output first, so a boot error is accompanied by its context.
-      drainLog()
-
-      // Init result. The host writes ready.json exactly once: `ok:true` with
-      // the advertised sources, or `ok:false` with a boot error.
-      const ready = readReady(dir)
-      if (ready && !settled) {
-        if (ready.ok === false) {
-          // A boot error carries a crashReason signature: the host died
-          // reporting it, which the silent-self-termination quarantine below
-          // keys off (runtime.logs will be empty for a script that dies
-          // before printing anything).
-          runtime.crashReason = `音源脚本执行出错（${ready.error ?? '未知原因'}）`
-          settleOnce(new Error(ready.error ?? '音源脚本执行出错'))
-          this.emit('scriptError', runtime.api.meta.id, ready.error ?? '音源脚本执行出错')
-          return
-        }
-        runtime.sources = normaliseSources((ready.sources ?? {}) as Record<string, never>)
-        this.rebuildOwners()
-        this.emit('sourcesChanged')
-        settleOnce()
-      }
-
-      // A crash AFTER init: the host reports it as a late boot-error and exits.
-      // The ready.json already settled this lifecycle, so this failure has to
-      // be surfaced separately — it triggers the same disable-and-quarantine
-      // path as any other death.
-      if (ready?.ok === false && settled && !runtime.dead) {
-        runtime.dead = true
-        this.rebuildOwners()
-        runtime.crashReason = `音源脚本执行出错（${ready.error ?? '未知原因'}）`
-        const error = new Error(ready.error ?? '音源脚本执行出错')
-        this.failAllPending(runtime, error)
-        this.store.setError(runtime.api.meta.id, error.message)
-        this.store.setEnabled(runtime.api.meta.id, false)
-        this.emit('sourcesChanged')
-        stopLifecycle()
-        this.emit('scriptError', runtime.api.meta.id, ready.error ?? '音源脚本执行出错')
-      }
-
-      // Responses to dispatched requests.
-      for (const [id, pending] of [...runtime.pending]) {
-        const response = readResponse(dir, id)
-        if (!response) continue
-        clearTimeout(pending.timer)
-        runtime.pending.delete(id)
-        if (response.ok) pending.resolve(response.data)
-        else pending.reject(new Error(response.error ?? '音源请求失败'))
-      }
-    }, POLL_MS)
-
-    // Death watch. The heartbeat is rewritten by the child every second; a
-    // long silence means the process is gone (crashed, OOM-killed, or
-    // terminated by its own script).
-    //
-    // ## Tolerances are deliberately generous — measured, not guessed
-    //
-    // The child's event loop is *shared* with the source script. An obfuscated
-    // 740 KB script blocks that loop for seconds at a time while it decrypts
-    // and evaluates, so heartbeats legitimately pause during boot and during
-    // heavy requests. A 5 s timeout with a 1 s beat only tolerates ~4 missed
-    // beats — nowhere near enough. This timeout was the cause of a real
-    // incident: sources timed out at init en masse because their own
-    // evaluation stalled the heartbeats.
-    //
-    // The margins: 1 s beat × 20 s timeout = 19 missed beats of slack, which
-    // covers script evaluation bursts; 20 s also sits exactly at the request
-    // ceiling, so a hung request and a dead process surface at about the same
-    // time rather than the watchdog winning the race and killing a source that
-    // was about to answer.
-    //
-    // The watchdog never removes the scratch directory. The directory is the
-    // child's only channel; deleting it under a live-but-slow child kills that
-    // child's heartbeat (write fails) and converts a false positive into a
-    // real death. Cleanup stays with stop() and app shutdown, which are the
-    // only moments the child's death is intended.
-    const HEARTBEAT_SILENCE_LIMIT_MS = 20_000
-    const heartbeatWatch = setInterval(() => {
-      if (settled && runtime.dead) {
-        clearInterval(heartbeatWatch)
-        return
-      }
-      const hb = readHeartbeat(dir)
-      if (!hb) return // child has not started beating yet; give it time
-      const silence = Date.now() - hb.at
-      if (silence > HEARTBEAT_SILENCE_LIMIT_MS) {
-        runtime.dead = true
-        this.rebuildOwners()
-        const reason =
-          `音源进程已停止响应（心跳丢失 ${Math.round(silence / 1000)}s）。` +
-          `可能是脚本崩溃或自行终止。已隔离，不影响其他音源。`
-        runtime.crashReason = reason
-        const error = new Error(reason)
-        this.failAllPending(runtime, error)
-        if (settled) {
-          this.store.quarantine(runtime.api.meta.id, reason)
-          this.emit('sourcesChanged')
-          stopLifecycle()
-        } else settleOnce(error)
-        this.emit('scriptError', runtime.api.meta.id, reason)
-      }
-    }, 1_000)
-
-    // Guard: if the wrapper itself failed to spawn (runas missing, policy
-    // denial), fail fast rather than waiting for the init timeout.
-    runtime.child.on('error', (error) => {
-      runtime.dead = true
-      this.rebuildOwners()
-      this.failAllPending(runtime, error)
-      settleOnce(error)
-      this.emit('scriptError', runtime.api.meta.id, error.message)
-    })
-  }
-
-  /**
-   * Shared death handling for the IPC mode's `exit` event.
-   */
-  private handleChildExit(
-    runtime: ScriptRuntime,
-    code: number | null,
-    signal: string | null,
-    settle: (error?: Error) => void
-  ): void {
-    // `stop()` marks the runtime dead before it kills the child, so a runtime
-    // that was already dead on entry is an intentional shutdown and must not be
-    // reported as a crash.
-    const intentional = runtime.dead
-    runtime.dead = true
-    // Drop this script from the routing table immediately: a crashed source
-    // must not be handed further requests, and any platform it was the best
-    // provider for should fall through to the next capable script.
+  private handleHostExit(state: RuntimeState, info: ExitInfo): void {
+    const apiId = state.api.meta.id
     this.rebuildOwners()
+    if (info.intentional) return
 
-    // A signal, or the abort code Windows reports as a large unsigned value,
-    // means the process was terminated rather than exiting cleanly.
-    const aborted =
-      signal !== null || code === null || code === 134 || code === 0xffffffff || code > 128
+    this.emit('scriptError', apiId, info.reason)
+    if (!info.aborted && info.code === 0) return
 
-    const reason = aborted
-      ? `音源进程被脚本强制终止${signal ? `（信号 ${signal}）` : ''}${code ? `（退出码 ${code}）` : ''}。` +
-        `该脚本可能带有反调试/自我保护逻辑。已隔离，不影响其他音源。`
-      : code === 1
-        ? `音源进程退出（退出码 1）。脚本在初始化时结束了自己的进程，且没有输出任何错误信息 —— ` +
-          `常见原因是环境自检失败（缺失的浏览器或 Node 全局对象），或脚本内置的自毁分支。` +
-          `已隔离，不影响其他音源。`
-        : `音源进程退出（退出码 ${code}）`
-
-    runtime.crashReason = aborted ? reason : undefined
-    const error = new Error(reason)
-    this.failAllPending(runtime, error)
-
-    if (code !== 0 || aborted) {
-      settle(error)
-      this.emit('scriptError', runtime.api.meta.id, reason)
-      // A source that came up and then died is no longer running, so leaving the
-      // stored flag alone made the card read 已启用 forever: `scriptError` has no
-      // subscriber in the main process and `getCrashReason()` had no caller, so
-      // the reason was computed and thrown away. Reverting the flag mirrors what
-      // the boot-failure path already does, and the user can flip it again to
-      // retry.
-      if (!intentional) {
-        this.store.setError(runtime.api.meta.id, reason)
-        this.store.setEnabled(runtime.api.meta.id, false)
-        this.emit('sourcesChanged')
-      }
-    }
-    // Reclaim the scratch directory once the process is gone.
-    rmSync(runtime.scratchDir, { recursive: true, force: true })
-  }
-
-  private handleMessage(
-    runtime: ScriptRuntime,
-    message: HostMessage,
-    settle: (error?: Error) => void
-  ): void {
-    switch (message.type) {
-      // The child reports `ready` once `lx.send(inited, …)` fires. Unlike LX we
-      // do not treat a `status: false` field as failure: it was made obsolete in
-      // LX 2.6 and current scripts still send `status: true` harmlessly, so
-      // honouring it would fail sources that work fine.
-      case 'ready': {
-        runtime.sources = normaliseSources(message.sources ?? {})
-        this.rebuildOwners()
-        this.emit('sourcesChanged')
-        settle()
-        break
-      }
-      case 'boot-error':
-        settle(new Error(message.error ?? '音源脚本执行出错'))
-        break
-      case 'update-alert':
-        runtime.logs.push(`[update] ${JSON.stringify(message.data)}`)
-        break
-      case 'log':
-        runtime.logs.push(`[${message.level ?? 'log'}] ${message.message ?? ''}`)
-        if (runtime.logs.length > 200) runtime.logs.shift()
-        break
-      case 'response': {
-        const pending = message.id !== undefined ? runtime.pending.get(message.id) : undefined
-        if (!pending) return
-        clearTimeout(pending.timer)
-        runtime.pending.delete(message.id!)
-        pending.resolve(message.data)
-        break
-      }
-      case 'response-error': {
-        const pending = message.id !== undefined ? runtime.pending.get(message.id) : undefined
-        if (!pending) return
-        clearTimeout(pending.timer)
-        runtime.pending.delete(message.id!)
-        pending.reject(new Error(message.error ?? '音源请求失败'))
-        break
-      }
-      default:
-        break
-    }
-  }
-
-  private failAllPending(runtime: ScriptRuntime, error: Error): void {
-    for (const [, pending] of runtime.pending) {
-      clearTimeout(pending.timer)
-      pending.reject(error)
-    }
-    runtime.pending.clear()
+    // A source that came up and then died is no longer running, so leaving the
+    // stored flag alone made the card read 已启用 forever: `scriptError` has no
+    // subscriber in the main process and `getCrashReason()` had no caller, so
+    // the reason was computed and thrown away. Reverting the flag mirrors what
+    // the boot-failure path already does, and the user can flip it again to
+    // retry.
+    this.store.setError(apiId, info.reason)
+    this.store.setEnabled(apiId, false)
+    this.emit('sourcesChanged')
   }
 
   /**
@@ -731,7 +423,7 @@ export class SourceEngine {
     })
 
     for (const runtime of runtimes) {
-      if (runtime.dead) continue
+      if (runtime.host.dead) continue
       for (const source of runtime.sources) {
         const list = providers.get(source.id) ?? []
         list.push(runtime.api.meta.id)
@@ -745,7 +437,7 @@ export class SourceEngine {
       ids.sort((a, b) => {
         const score = (id: string): number => {
           const runtime = this.runtimes.get(id)
-          if (!runtime || runtime.dead) return 2
+          if (!runtime || runtime.host.dead) return 2
           const info = runtime.sources.find((item) => item.id === sourceId)
           return info?.actions.includes('musicUrl') ? 0 : 1
         }
@@ -783,65 +475,22 @@ export class SourceEngine {
   }
 
   /**
-   * Mark a runtime dead, fail its in-flight requests and reclaim its process.
+   * Mark a runtime dead, reclaim its process, and forget it.
    *
-   * Deliberately does not touch `this.runtimes`: a source that never finished
-   * init is reaped through here too, and the settings page reads that record's
-   * logs and crash reason afterwards.
+   * The mechanical half — the scratch directory, the heartbeat-based kill in
+   * file mode, the SIGTERM-then-SIGKILL wait — belongs to the shared host and is
+   * not duplicated here. What stays is the part the host cannot decide: this
+   * engine's own record of the script, and whether the stored "enabled" flag
+   * still tells the truth.
    */
   private async teardown(runtime: ScriptRuntime, reason: Error): Promise<void> {
-    runtime.dead = true
-    runtime.stopFileLifecycle?.()
-    this.fileModeRuntimes.delete(runtime.api.meta.id)
-    this.failAllPending(runtime, reason)
-
-    // In file mode, removing the scratch directory is the shutdown signal: the
-    // child's next heartbeat write fails and it stops beating (it no longer
-    // exits on that failure — see source-host). The child itself is killed
-    // explicitly via the pid it reports in its heartbeat, because runas
-    // detaches it beyond the reach of wrapper.kill().
-    const hb = readHeartbeat(runtime.scratchDir)
-    if (hb?.pid) killChildTree(hb.pid)
-
-    try {
-      rmSync(runtime.scratchDir, { recursive: true, force: true })
-    } catch {
-      /* best effort */
-    }
-
-    try {
-      // SIGTERM first so the child can exit cleanly; kill() if it does not.
-      // In file mode this reaches only the runas wrapper; the real child was
-      // handled by the tree-kill above.
-      runtime.child.kill()
-      // A child that already exited cannot fire `exit` again, so without this
-      // check the wait always ran to the 2 s SIGKILL fallback — which stalled
-      // both restarting a crashed source (`start()` awaits `stop()`) and quitting
-      // the app with one crashed (`before-quit` awaits `stopAll()`).
-      if (runtime.child.exitCode === null && runtime.child.signalCode === null) {
-        await new Promise<void>((resolveStop) => {
-          const timer = setTimeout(() => {
-            try {
-              runtime.child.kill('SIGKILL')
-            } catch {
-              /* already gone */
-            }
-            resolveStop()
-          }, 2000)
-          runtime.child.once('exit', () => {
-            clearTimeout(timer)
-            resolveStop()
-          })
-        })
-      }
-    } catch {
-      /* already gone */
-    }
+    this.runtimes.delete(runtime.api.meta.id)
+    await this.getHost().teardown(runtime.host, reason)
   }
 
   /** Why a source stopped, when it died abnormally. Shown in the UI. */
   getCrashReason(apiId: string): string | undefined {
-    return this.runtimes.get(apiId)?.crashReason
+    return this.runtimes.get(apiId)?.host.crashReason
   }
 
   async reload(apiId: string): Promise<void> {
@@ -855,7 +504,7 @@ export class SourceEngine {
     const seen = new Set<SourceId>()
     const out: SourceInfo[] = []
     for (const runtime of this.runtimes.values()) {
-      if (runtime.dead) continue
+      if (runtime.host.dead) continue
       for (const source of runtime.sources) {
         if (seen.has(source.id)) continue
         seen.add(source.id)
@@ -868,7 +517,7 @@ export class SourceEngine {
   /** Sources grouped by the script that provides them, for the settings UI. */
   getSourcesByScript(): Array<{ apiId: string; name: string; sources: SourceInfo[] }> {
     return [...this.runtimes.values()]
-      .filter((runtime) => !runtime.dead)
+      .filter((runtime) => !runtime.host.dead)
       .map((runtime) => ({
         apiId: runtime.api.meta.id,
         name: runtime.api.meta.name,
@@ -877,7 +526,7 @@ export class SourceEngine {
   }
 
   getLogs(apiId: string): string[] {
-    return this.runtimes.get(apiId)?.logs ?? []
+    return this.runtimes.get(apiId)?.host.logs ?? []
   }
 
   hasSource(source: SourceId): boolean {
@@ -904,48 +553,20 @@ export class SourceEngine {
   ): Promise<T> {
     if (signal?.aborted) throw new Error('请求已取消')
     const runtime = this.runtimes.get(apiId)
-    if (!runtime || runtime.dead) throw new Error(`音源「${source}」已停止`)
+    if (!runtime || runtime.host.dead) throw new Error(`音源「${source}」已停止`)
 
-    const id = runtime.nextId++
+    // Bookkeeping and dispatch both live on the host: it is the side that knows
+    // which transport this launch took (file handoff vs IPC channel), and the
+    // pending map, timeout and abort handling are mechanical concerns identical
+    // to the JJ engine's.
+    //
+    // `request` takes a protocol payload for its timeout bookkeeping and calls
+    // `send(state, id, source, action, info)` with it; both are passed the same
+    // `{ source, action, info }` object here so the LX wire payload — the thing
+    // `source-host.ts` actually reads — stays byte-identical to what this engine
+    // wrote itself.
     const payload = { source, action, info }
-
-    return new Promise<T>((resolve, reject) => {
-      const settle = (error?: Error, value?: T): void => {
-        clearTimeout(timer)
-        runtime.pending.delete(id)
-        signal?.removeEventListener('abort', onAbort)
-        if (error) reject(error)
-        else resolve(value as T)
-      }
-      const onAbort = (): void => settle(new Error('请求已取消'))
-      const timer = setTimeout(() => {
-        settle(new Error(`音源请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`))
-      }, REQUEST_TIMEOUT_MS)
-
-      runtime.pending.set(id, {
-        resolve: (value: unknown) => settle(undefined, value as T),
-        reject: (error: Error) => settle(error),
-        timer
-      })
-      signal?.addEventListener('abort', onAbort, { once: true })
-      if (signal?.aborted) {
-        onAbort()
-        return
-      }
-
-      // Dispatch. File mode writes a request file the detached child watches
-      // for; IPC mode sends over the channel. In both cases a dispatch failure
-      // is surfaced as a rejected request rather than an uncaught throw.
-      try {
-        if (this.fileModeRuntimes.has(runtime.api.meta.id)) {
-          writeRequest(runtime.scratchDir, { id, source, action, info })
-        } else {
-          runtime.child.send({ type: 'request', id, payload })
-        }
-      } catch (error) {
-        settle(error instanceof Error ? error : new Error(String(error)))
-      }
-    })
+    return this.getHost().request<T>(runtime.host, payload, signal)
   }
 
   /**
@@ -981,7 +602,7 @@ export class SourceEngine {
     if (signal?.aborted) throw new Error('请求已取消')
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
-      if (!runtime || runtime.dead) return false
+      if (!runtime || runtime.host.dead) return false
       return runtime.sources.some((item) => item.id === source)
     })
 
@@ -1006,7 +627,7 @@ export class SourceEngine {
         const reason = error instanceof Error ? error.message : String(error)
         failures.push(`${name}: ${reason}`)
         // A dead script must not be retried for this request, but the loop
-        // already moves on; `runtime.dead` is set by its exit handler.
+        // already moves on; `runtime.host.dead` is set by the host's exit path.
       }
     }
 
@@ -1044,7 +665,9 @@ export class SourceEngine {
   ): Promise<{ url: string; quality: Quality; apiId?: string }> {
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
-      return Boolean(runtime && !runtime.dead && runtime.sources.some((item) => item.id === source))
+      return Boolean(
+        runtime && !runtime.host.dead && runtime.sources.some((item) => item.id === source)
+      )
     })
 
     if (candidates.length === 0) {
@@ -1143,25 +766,6 @@ export class SourceEngine {
 /* ------------------------------------------------------------------ *
  * Helpers
  * ------------------------------------------------------------------ */
-
-interface RawSourceInfo {
-  name?: string
-  type?: string
-  actions?: string[]
-  qualitys?: string[]
-}
-
-/** Messages the source host process sends back over the IPC channel. */
-interface HostMessage {
-  type: string
-  id?: number
-  /** Present on `ready`: the `sources` object the script advertised. */
-  sources?: Record<string, RawSourceInfo>
-  data?: unknown
-  error?: string
-  level?: string
-  message?: string
-}
 
 /*
  * `normaliseSources` and its `PLATFORM_NAMES` table used to be defined here.

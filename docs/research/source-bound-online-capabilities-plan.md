@@ -139,11 +139,11 @@ E1 的 `JJ_LEGACY_COMPATIBLE_CAPABILITIES` 允许脚本同时声明 LX 动作与
 2. ~~**G6 未修**：`normaliseSources` 仍无条件采信脚本声明的 `actions`（`source-engine.ts:1213`），未按 E0 D1-a 校验能力名。~~ → **已于 2026-09-28 清理，见下方「E2 缺口清理」。**
 3. **AC4 残缺**：E0 已证 `url-guard.ts` 非 DNS 感知（rebinding 可穿过，`url-guard.ts:19-22`），修复规则 U9 推给 E4。E2 只做到"每个 URL 与每一跳重定向都过守卫"这一层，**SSRF 部分事实上未满足**。**仍然开放。**
 4. ~~**传输模式不可注入**：宿主走文件协议还是 IPC 由运行平台决定（`supportsRestrictedLaunch()`），无法在测试中强制指定，故 fileSend 那类 bug 无法被测试守住。~~ → **已于 2026-09-28 清理，见下方「E2 缺口清理」。**
-5. **`source-engine.ts` 尚未委托共享宿主**：E2-1 决策的抽取已完成、JJ 引擎已接入，但 LX 引擎仍在跑自己的子进程副本，两套生命周期管理并存的窗口**仍然开放**。**仍然开放**（但见下方「E2 缺口清理」第 4 条：`normaliseSources` 的重复副本已消除，这是同一类漂移的既成事实）。
+5. ~~**`source-engine.ts` 尚未委托共享宿主**：E2-1 决策的抽取已完成、JJ 引擎已接入，但 LX 引擎仍在跑自己的子进程副本，两套生命周期管理并存的窗口**仍然开放**。~~ → **已于 2026-09-28 闭合，见下方「E2-3 本体：LX 引擎委托共享宿主」。**（此前 `normaliseSources` 的重复副本已先经「E2 缺口清理」第 4 条消除，那是同一类漂移的既成事实——而这一次暴露出的既有漂移更严重：宿主的 `fork` 分支 argv 长期是错的，见「E2-3 前置修复」。）
 
 #### E2 缺口清理（2026-09-28，用户指示"先清 E2 缺口"）
 
-五项缺口中的三项已闭合，两项仍然开放（AC4 残缺属 E4、LX 引擎委托属方案 A 最后一步）。
+五项缺口中的**四项**已闭合，**一项仍然开放**（AC4 的 SSRF 残缺属 E4，且已由 E4b 的「地址钉扎」部分闭合，见「E4b 实施状态」）。
 
 **1. G4 已修 —— IPC 响应载荷加尺寸校验（两处传输，非一处）。**
 新增 `MAX_RESPONSE_BYTES = 8 * 1024 * 1024` 与 `responseSize(value)`（`source-runtime-host.ts`），在 `'response'` 分支与**文件轮询分支**各加一次校验，超限以 `音源「X」返回的数据过大（约 N MB，上限 8 MB）` 拒绝。
@@ -535,9 +535,51 @@ Error: spawn EPERM
 
 **E6 仍然开放的事项**：
 1. **`npm run test:e2e` 未跑**（同上）。
-2. **更新后按音源版本隔离平台缓存**（Plan Constraints 里的一条）**未实现**。现状是缓存不区分音源版本，故更新后可能仍读到旧版本产生的缓存条目。当前没有造成可见错误（缓存键含平台与曲目，音源换脚本不改变这两者），但这是 Constraints 里明写的一条，**不记为已达成**。
+2. ~~**更新后按音源版本隔离平台缓存**（Plan Constraints 里的一条）**未实现**。~~ **已于 2026-09-28 补做**，见下文「E6 遗留项补做：按音源版本隔离平台缓存」。原文保留如下以示当初确实未达成：现状是缓存不区分音源版本，故更新后可能仍读到旧版本产生的缓存条目。当前没有造成可见错误（缓存键含平台与曲目，音源换脚本不改变这两者），但这是 Constraints 里明写的一条，**不记为已达成**。
 3. **回退只保留一代**（有意），更早的版本需手动导入。
 4. **`@homepage` 只填官网的音源查不了更新**（E6-1 的有意取舍）。
+
+#### E6 遗留项补做：按音源版本隔离平台缓存（2026-09-28）
+
+这条是 Constraints 里明写、当初明确记为「未达成」的一条。用户先选了「只按音源身份隔离」，随后在我指出**该方案实现不了"版本"二字**后改选「按音源身份 + 脚本内容指纹」。
+
+**为什么只加 `providerId` 不够。** `providerId` 就是 `stableId`，而 `source-store.ts:40-53` 明确写着它是专门为了**跨版本不变**而设计的（`id` is *nearly* stable but not quite… `stableId` survives a rename）。拿它当版本键，脚本换一版后同一个键仍然命中，问题原样保留。所以键必须是两半：`stableId` 管「是哪个音源」（与 `providerId` 盖章对齐），**脚本内容摘要**管「是哪个版本」。
+
+**为什么用摘要而不是作者声明的版本号。** 版本号是作者的声明，大量真实脚本从不改它，同一个 `1.0.0` 下发的修复会被漏掉——那正是这条 Constraints 要防的情形。摘要是对**用户导入时的文本**取，故逐字节相同的重导入**正确地不算**版本变化。
+
+**实施位置（四处）**：
+
+| 文件 | 改动 |
+|---|---|
+| `src/main/sources/source-store.ts` | 新增 `versionOf(id)`，返回 `${stableId ?? id}@${sha256(decodeScript(script)).slice(0,16)}`；`:18` 加 `import { createHash } from 'node:crypto'` |
+| `src/main/library/lyric-service.ts` | 歌词缓存键改为 `cacheKeyFor(trackId, provider?)` = `provider ? `\`${provider}\u0000${trackId}\`` : trackId`；新增 `clearLyricCacheFor(provider)`；`clearLyricCache(trackId?)` 有参时**同时**删裸 id 与带前缀两种键；`primeLyricCache` 加第三参 `provider?` |
+| `src/main/online/hot-words.ts` | `HotWordEntry` 加 `provider?`；新增 `setVersion(version)`（不同则**立即删除**不符条目并落盘，不是只在读时忽略）；`load()` 丢弃 `provider` 不符与缺失的老条目；`showNow()` 对异版本条目剔除并要求重新去问 |
+| `src/main/online/search-router.ts` | `SearchRouterOptions` 加 `providerVersion?`；`hotWords()` 内置分支首行 `this.hotWordSource.setVersion(this.providerVersion())` |
+
+**「无 provider 时键与隔离前完全相同」是有意的**：没有版本可归属时（默认安装、离线套件）行为必须一模一样，否则会把默认安装的缓存每天白白作废一次。
+
+**为什么不只在读时过滤。** 只在读时忽略、内存里留着旧条目，会让**切回旧脚本**的用户继续看到新脚本的榜单——条目必须当场删掉。
+
+**本轮我自己造成的两个返工（都是真缺陷，被既有测试或读回原文抓到）**：
+1. **把退避门改成 `if (usable && failed && …)`**：首次失败时没有 `usable`（`previous` 为空），退避因此永不生效，每次切页签都去撞那台已经挂掉的主机。既有测试「一次结果页签共用，失败的也不反复重试」以 `2 !== 1` 抓到。正确形状是**退避只由失败戳决定，`usable` 只决定「不给就得显示什么」**：`if (failed && this.now() - failed < FAILURE_BACKOFF_MS) return usable?.words ?? []`。
+2. **新测试的断言落在了错误的时刻**：把 `assert.ok(asks >= 1, …)` 放在 `await source.load()` 之后，而 `load()` 从不问网络。用独立探针证实生产代码是对的（`after load asks= 0`、`after words asks= 1`），断言移到 `words()` 之后。**教训：断言要落在「行为发生」的那一步，而不是它之前的准备步骤。**
+
+**验证证据（全部实跑）**：
+
+| 项 | 结果 |
+|---|---|
+| `hot-words` 套件 | **18/18 pass / 0 fail**（新增 5 条版本隔离测试） |
+| 受影响套件回归 | `lyric-source` 3/3、`search-router` 14/14、`source-updater` 26/26、`url-guard` 18/18、`url-guard-pinning` 10/10、`provenance-persistence` 9/9、`builtin-gate` 6/6、`lyrics-search` 56/56 |
+| 全量回归 | **PASSED=40 FAILED=7 TOTAL=47**，失败清单与改动前**逐条一致**，全部 `spawn EPERM` 环境限制（`jj-provider-engine`、`sandbox-probe`、`source-engine`、`u0-migrate`、`update-assets`、`update-release-tool`、`upgrade-data`） |
+| `npx tsc --noEmit -p tsconfig.node.json --composite false` | **EXIT=0** |
+| `npx vue-tsc --noEmit -p tsconfig.web.json --composite false` | **EXIT=0** |
+
+**变异验证的真实结果——这里没有"通过"，必须如实读。** 三道版本防线是**串联冗余**的：`load()` 的读盘过滤、`showNow()` 对异版本的剔除、`refresh()` 的 `usable` 判据。针对**单独一条**的变异**全部逃逸**：把 `load()` 过滤改成 `if (false)`、把 `showNow()` 剔除改成 `if (false)`、把 `usable` 改成 `const usable = previous`，三次都是 **18/18 全绿**。更下游的两处甚至无从生效——探针显示 `load()` 过滤生效时 `entries` 已是空的，`showNow()`/`refresh()` 根本没有条目可处理。
+
+因此这 5 条测试证明的是**行为契约**（换版本之后用户看到的必须是新脚本的词，且确实重新问过），**不是**"实现里的某一行被覆盖"。要让单行可变异，只能直接读私有的 `entries`——那验的是实现而不是契约，不值当。**任何后续读者不应把这段读成「三条防线各自被验证过」。** 该结论已同步写进 `src/test/hot-words.test.mts` 的分组注释。
+
+**已知的静默代价（用户已接受）**：隔离本身不通知用户，与 E7 艺人头像那处处理方式一致——写进文档与注释，不改界面。
+
 
 
 ### E7. 迁移收口与发布 Review
@@ -681,7 +723,7 @@ Error: spawn EPERM
 
 **结论：E7 可以结项，但结项标注为「代码与文档改动完成、机器可验证部分全绿、三条覆盖缺口待真实环境关闭」。** 这三条与 E2 验收（m00770 暂停）是同一批操作，一次真实桌面环境的运行可以同时关掉。在那之前，AC3 的保证强度是：**宿主自身六条直连路径已被 7 条记录型断言与 1 次变异验证覆盖，脚本自身发出的请求不在范围内（E0 D1-a 有意取舍）。**
 
-**E6 遗留（仍开放，不记为已达成）**：`更新后按音源版本隔离平台缓存` 未实现——Plan §Constraints 明写的一条，E6 结束时已记录为开放项，E7 未处理。
+**E6 遗留（已于 2026-09-28 补做，见「E6 遗留项补做：按音源版本隔离平台缓存」）**：`更新后按音源版本隔离平台缓存` 当时未实现——Plan §Constraints 明写的一条，E6 结束时记录为开放项，E7 未处理，后在 E7 之后单独补做。**注意该补做的验证强度有明确边界**：5 条测试证明的是行为契约，**不是逐行覆盖**——三道版本防线串联冗余，变异验证三次全部未被抓到，详见该节。
 
 #### 平台请求拦截检查：`tools/check-builtin-gate.mjs`（2026-09-28，用户 m02990 批准）
 
@@ -731,6 +773,128 @@ https://search.kuwo.cn/r.s?all=晴天+周杰伦&ft=music&itemset=web_2013&client
 2. **"打开"那一半必须 `await` 完再数数**：请求发生在第一个 `await` 之后，同步读 `attemptCount()` 永远是 0。第一次写就对，靠的是这条正向断言报错——这也正说明它为什么必须存在。
 3. `rm` 必须从 `node:fs/promises` 导入（`node:fs` 的是 callback 风格，返回 `undefined`，`.catch` 直接 TypeError）。
 
+#### E2-3 前置修复：共享宿主的 IPC fork 参数缺陷（2026-09-28）
+
+**缺陷**：`src/main/sources/source-runtime-host.ts:357` 原文为
+
+```ts
+state.child = fork(this.hostPath, [initPath, scratchDir], { stdio: [...], execArgv: [...] })
+```
+
+`source-host.ts:71-74,103-108` 声明的启动契约是 `argv[2] = 脚本路径`、`argv[3] = init.json`、`argv[4] = scratchDir`。这里**只有两个参数、脚本路径整个缺失**，子进程遂把 `initPath` 当脚本、把 `scratchDir`（一个目录）当 init 文件；`readInit()` 里 `readFileSync(initPath)` 对目录抛错 → catch 返回 `null` → `source-host.ts:122-125` `process.exit(2)`。
+
+**后果**：**非 Windows 平台（IPC 模式）共享宿主从未成功启动过任何脚本**。win32 走 `restricted-launch.ts:122` 的文件模式（那条传对了三个参数，`fork` 甚至不被调用，走 `spawn`），所以生产未受影响、用户不会察觉。
+
+**为什么类型系统抓不到**：`fork(modulePath, args)` 的签名接受**任意字符串数组**，两个元素与五个元素同样合法；失败发生在子进程内部，表现为"脚本坏了"而不是"宿主坏了"。
+
+**修法**：改为 `fork(this.hostPath, [scriptPath, initPath], {...})`，并在上方加注释记录原值、后果与"为什么签名抓不到"。
+
+**验证（`out/test/probe-ipc-argv.mjs`，隔离探针）**：
+
+| 步 | 观察值 |
+| --- | --- |
+| 基线 | `args = ["...\script.js", "...\init.json"]` |
+| 变异（把三份产物里的调用点改回 `[initPath, initPath]`） | `args = ["...\init.json", "...\init.json"]` → **MUTATION CAUGHT** |
+| 还原 | 回到基线，`still broken on disk: none` |
+| 文件模式 | `fork` 从未被调用（`null`）——文件模式走 `spawn`，故此处不覆盖 |
+
+**探针本身踩了三个坑，都是"看起来验过其实没验"的形态**：
+1. `import('node:child_process')` 返回**冻结的 ESM 命名空间对象**，`spawn.fork = stub` 直接抛 `TypeError: Cannot assign to read only property 'fork'`。必须用 `createRequire(...)` 拿可写的 CJS 对象，改完再 `syncBuiltinESMExports()`——**漏掉 sync 时宿主仍持原绑定，探针一条都记录不到却照样打印 PASS**。
+2. **变异与基线跑在同一个热模块里，第二次 `start()` 不会重新执行被测代码** → 变异"没被抓到"，尽管产物确实改了。第一次误判即由此而来。修法：每次观察用 `?v=N` 让导入缓存失效。
+3. **不能改用子进程求干净隔离**：`spawnSync(process.execPath, ...)` 在沙箱返回 `err.code === 'EPERM'` 且 stderr 为空（Node 不能派生 Node），故只能进程内观察。
+
+**另一条教训（通用）**：每个入口点独立打包，`jj-provider-engine.js` 会**内联自己那份 `SourceRuntimeHost`**（`var SourceRuntimeHost = class` 在同文件 18378 处）。故**只改 `source-runtime-host.js` 证明不了任何事**——被执行的是另一份副本。变异必须覆盖所有含调用点的产物（本仓库为 3 份：`jj-provider-engine.js`、`source-engine.js`、`source-runtime-host.js`）。
+
+**同时修正了两处不成立的断言**：
+- 原第二条断言"两个参数在盘上存在且是文件"**必然失败**：stub 让子进程立刻"死掉"，`start()` 的 finally 清理了 `mkdtemp` 临时目录。已删除，改断言"第二个参数不是目录"。
+- 原注释称"文件模式同样会走这道检查"是错的——文件模式不调用 `fork`。已改为一条正向断言 `file mode never routes through fork`。
+
+**回归**：全量 **40 通过 / 7 失败 / 47 套件**，失败清单与修复前逐条一致（全部 `spawn EPERM`）。`npx tsc --noEmit -p tsconfig.node.json --composite false` → EXIT=0。
+
+**未验证**：本沙箱无法真正启动 IPC 子进程（`spawn EPERM`），故**"修复后 IPC 模式下脚本能真正启动"未经端到端证实**；验证到的是"传给 `fork` 的参数正确"。`jj-provider-engine.test.mts` 末尾的同款断言在套件内**够不着**（套件在第二节 `音源初始化超时（15s）` 处即中止，那是既有的 EPERM 失败），因此同一组断言由隔离探针实际执行。
+
+#### E2-3 本体：LX 引擎委托共享宿主（2026-09-28）
+
+**开工前的两项裁决（用户 m04240，均按推荐档）**：
+
+| 项 | 选定 | 备选与被否决理由 |
+| --- | --- | --- |
+| 委托范围 | **只做启动/生命周期委托** | 连请求派发一起委托（`requestFrom` → `host.request`）会改动 LX 的 wire payload；`host.request` 内部是 JJ 形状 `{requestKey, capability, providerId, payload}`，而 `send(state,id,source,action,info)` 才是 LX 形状。请求侧保持原样，把"两台引擎共用一套生命周期"与"两套协议各自成型"分隔开 |
+| init 语义 | **`buildInit` 的 `source` 改为可选** | 让 LX 也发一个 `source` 字段等于**协议变更伪装成重构**——脚本会按字段存在与否分支。放宽返回类型为 `{ source?: string; version: string }`，LX 回调照旧不填，**对脚本可见的 init.json 逐字节不变** |
+
+**委托链最终形态**（`src/main/sources/source-engine.ts`，1366 → 821 行）：
+
+| 原自有实现 | 现在由谁做 |
+| --- | --- |
+| `mkdtempSync` + 写 `script.js`/`init.json` | 宿主 `start()` |
+| `fork` / `launchRestricted` 两条启动分支 | 宿主 `start()` |
+| `INIT_TIMEOUT_MS` 初始化超时 | 宿主 `createReadyPromise()` |
+| `attachIpcLifecycle` / `attachFileProtocolLifecycle` | 宿主内（`attachIpcLifecycle`/`attachFileLifecycle`） |
+| 心跳看门狗（20 s 静默 → 隔离） | 宿主 `checkHeartbeat()` |
+| `handleChildExit` 崩溃三分类（abort / 退出码 1 / 普通） | 宿主 `handleChildExit()` → 回调 `onExit(state, info)` |
+| `handleMessage`（ready / boot-error / log / response） | 宿主内 |
+| `failAllPending` + `pending` + `nextId` | 宿主 `request()` / `send()` |
+| `teardown`（删 scratchDir、`killChildTree`、SIGTERM→SIGKILL 等待） | 宿主 `teardown(state, reason)` |
+| 请求派发 `writeRequest` vs `child.send` | 宿主 `send()`（按 `state.fileMode` 自动选择） |
+| `captureLog` + 200 行环形缓冲 | 宿主 `onLog` 回调 + 本引擎 `pushLog()` |
+
+删除的方法/类型：`captureLog`、`attachIpcLifecycle`、`attachFileProtocolLifecycle`、`handleChildExit`、`handleMessage`、`failAllPending` 六个方法；`HostMessage`、`RawSourceInfo`、`PendingRequest` 三个 interface；`HEARTBEAT_SILENCE_LIMIT_MS`/`supportsRestrictedLaunch`/`REQUEST_TIMEOUT_MS`/`EXISTS` 等一批重复常量与 import。
+
+**策略留在引擎里**（这正是"不该被委托掉"的部分）：启动前静态校验与隔离、崩溃后 `enabled` 标志何时回退、平台归属索引（`rebuildOwners` 的排序规则）、品质阶梯（`buildQualityLadder`）、多源故障转移（`requestWithFallback`）。
+
+**给宿主补的两个缺口**（LX 引擎有、宿主原本没有，不补就是回归）：
+
+1. `start()` 开头的 `existsSync(this.hostPath)` 预检与那条打包报错文案（`source-host.js` 必须在 asar 之外）。
+2. `fork` 分支的 `cwd: dirname(this.hostPath)`。宿主在求值脚本时会 `require` `iconv-lite`/`music-metadata`；cwd 若指向 scratchDir，这些裸标识符会解析失败，子进程在跑任何脚本前就死于 `Cannot find module 'iconv-lite'`——看起来像脚本坏了。win32 走文件模式恰好掩盖了这一点。
+
+`MAX_LOG_LINES = 200` 改为 `export`：两份各自定义的环形上限会让设置页显示的历史量取决于谁捕获了某行。
+
+**委托途中发现并修掉的真回归（必须记住）**
+
+`host.start()` 在 **fork/spawn 阶段就失败**（`spawn EPERM`、解释器缺失）或**初始化超时**时，是**从 `start()` 直接 reject**、此时引擎还没来得及建立 runtime 记录。原自有实现把失败记在 `settle()`/`attachIpcLifecycle` 里，那段代码随委托一起消失后——
+
+> **脚本的存储记录不再留下任何失败痕迹，设置页表现为静默失败。**
+
+已补：`await host.start(...)` 外面包一层 catch，`setError` + `setEnabled(false)` + `rebuildOwners` + `sourcesChanged`/`scriptError` 后重抛。
+
+**这个回归是被既有测试抓到的，不是我读代码看出来的**——`source-engine` 套件的 `the failure was recorded on the script` 从 PASS 变 FAIL。若不跑全套，它会直接进生产。
+
+**基线对照（`git stash` 实测三次，非推断）**
+
+| 状态 | `source-engine` 套件结果 | 失败项 |
+| --- | --- | --- |
+| 委托关闭（基线） | **110 passed / 1 failed** | `restricted-mode sources are advertised`；`only the requested script actions were dispatched`（后者是测试桩形状所致，见下） |
+| 委托打开（补 start 失败处理**之前**） | 107 passed / 4 failed | 上两条（第二条变为 dispatch=0）+ `the failure was recorded on the script` + `no request was sent to the dead script` + `a source that starts then dies is reverted to disabled` |
+| 委托打开（补**之后**） | **110 passed / 1 failed** | 仅 `restricted-mode sources are advertised` —— 与基线**同名同数** |
+
+**测试桩的形状变更（两个文件，都是运行时才炸）**
+
+`ScriptRuntime` 从扁平结构 `{api, child, scratchDir, sources, ready, pending, nextId, dead, logs, …}` 改为 `{api, host, sources}` 后，测试里手工构造的桩仍是旧形状：
+
+| 文件 | 症状 | 修法 |
+| --- | --- | --- |
+| `src/test/source-engine.test.mts:461-471` `fakeRuntime()` | `TypeError: Cannot read properties of undefined (reading 'dead')` at `rebuildOwners` | 包成 `{api, host:{dead,sources,pending,nextId,logs,scratchDir}, sources}` |
+| `src/test/source-engine.test.mts:604` `stalledRuntime.child = {...}` | 同上（`send` 挂错层） | 改 `stalledRuntime.host.child` |
+| `src/test/source-engine.test.mts:577` `runtimes.get('c').dead = true` | 死源未被跳过 | 改 `.host.dead = true` |
+| `src/test/downloads-import.test.mts:89` 内联桩 | 同上 | 同款包法；该套件随之 **24/1 → 25/25** |
+
+**这类"桩形状"变更的危险在于它是运行时才炸、且编译期完全合法**（测试文件里 `engine.runtimes = new Map([...])` 走的是 `any` 路径）。若非跑了全套，第一处会在任何一次真实运行里以"引擎坏了"的形式爆出来。
+
+**验证证据**
+
+| 项 | 结果 |
+| --- | --- |
+| `npx tsc --noEmit -p tsconfig.node.json --composite false` | **EXIT=0** |
+| `npx vue-tsc --noEmit -p tsconfig.web.json --composite false` | **EXIT=0** |
+| `source-engine` 套件 | **110 passed / 1 failed**（与基线同名同数） |
+| `downloads-import` 套件 | **25 passed / 0 failed** |
+| 全量回归 | **40 通过 / 7 失败 / 47 套件**，失败清单与委托前逐条一致（全部 `spawn EPERM`） |
+
+**未验证（不得记为通过）**
+
+1. **IPC 传输路径本环境一次都跑不到**——`spawn EPERM` 使 `fork` 分支根本无法执行。委托后该分支的正确性只由 `out/test/probe-ipc-argv.mjs`（前置修复时写的隔离探针，验证的是"传给 `fork` 的参数正确"）间接背书，**不是端到端证明**。
+2. `npm run test:e2e`、`npm run verify`、`npm run test` 在本沙箱均跑不通（同一 `spawn EPERM` 根因）。
+3. 真实音源的手工冒烟未做。
 
 ## 5. 主要风险
 

@@ -15,6 +15,7 @@
  * `enabled` flag; LX ignores unknown keys, so the file stays importable.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { UserApiMeta } from '@shared/types'
 import { decodeScript, encodeScript, isEncodedScript } from './codec'
@@ -343,6 +344,36 @@ export class SourceStore {
   /** True when this source has been quarantined for unsafe behaviour. */
   isQuarantined(id: string): boolean {
     return Boolean(this.apis.find((item) => item.id === id)?.quarantined)
+  }
+
+  /**
+   * A cache identity for the script a provider is currently running.
+   *
+   * Two halves, because they answer two different questions:
+   *
+   * 1. `stableId` — which source is this. Already the anchor `providerId` is
+   *    stamped with (see `jj-provider-engine.ts`, `state.api.meta.stableId`), so
+   *    a cache keyed by this string lines up exactly with the tracks that carry
+   *    that stamp.
+   * 2. A digest of the script text — which *version* of it. `stableId` is
+   *    deliberately content-independent (see `newStableId`), so it survives an
+   *    author rename; but that also means an update that fixes how lyrics are
+   *    parsed keeps the same `stableId`, and a cache keyed by identity alone
+   *    would go on serving what the old script produced. This half is what makes
+   *    "isolate the cache per source version" true rather than merely plausible.
+   *
+   * Keying on the digest *instead of* a version string is deliberate: a version
+   * string is the author's claim and plenty of real scripts never change it, so
+   * an update that ships a fix under the same `1.0.0` would be invisible here.
+   *
+   * The digest is of the source text as the user imported it, so re-importing
+   * byte-identical text is correctly *not* a version change.
+   */
+  versionOf(id: string): string | undefined {
+    const api = this.apis.find((item) => item.id === id || item.stableId === id)
+    if (!api) return undefined
+    const digest = createHash('sha256').update(decodeScript(api.script), 'utf8').digest('hex').slice(0, 16)
+    return `${api.stableId ?? api.id}@${digest}`
   }
 
   /** Record the outcome of the last init attempt, for display in settings. */

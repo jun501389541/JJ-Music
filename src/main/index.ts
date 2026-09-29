@@ -390,6 +390,8 @@ interface Services {
 type LyricDeps = {
   search: SearchOnlineForMatch
   fetchLyric: typeof fetchOnlineLyric
+  /** Cache-isolation key: see `SourceStore.versionOf`. Absent means no isolation. */
+  provider?: () => string | undefined
 }
 
 /**
@@ -440,9 +442,29 @@ async function createServices(): Promise<Services> {
     resolveArtistImage: (async (...args: Parameters<ArtistImageResolver>) =>
       settings.get().allowBuiltinOnlineSearch ? resolveArtistImage(...args) : null) as ArtistImageResolver
   })
-  const hotWords = new HotWordSource(undefined, { file: join(dataDir, 'library', 'hot-words.json') })
   const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
+  const hotWords = new HotWordSource(undefined, {
+    file: join(dataDir, 'library', 'hot-words.json'),
+    /*
+     * 榜单缓存按音源版本隔离。
+     *
+     * 内置适配器抓到的热词是「某个脚本给出的意见」，脚本更新后那份意见就不再
+     * 代表任何在跑的东西。`versionOf` 把音源身份与脚本内容指纹合成一把键，
+     * 换脚本或换内容都会令旧条目失效——见 `source-store.ts` 的 `versionOf`，
+     * 那里解释了为什么用内容摘要而不是作者声明的版本号。
+     *
+     * 读实时值是必须的：用户可以在应用运行时导入新脚本，快照会让替换掉的
+     * 那一版继续盖一整天章。
+     *
+     * 没有任何已启用脚本时返回 `undefined`，`HotWordSource` 把它当作「不隔离」
+     * 处理——这是对的：没有脚本就没有版本可归属，此时内置榜单纯粹是内置的。
+     */
+    version: () => {
+      const enabled = sourceStore.list().find((api) => api.meta.enabled)
+      return enabled ? sourceStore.versionOf(enabled.meta.id) : undefined
+    }
+  })
   // Sources run in a forked child process, so they can be killed without
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
@@ -457,7 +479,18 @@ async function createServices(): Promise<Services> {
     // Read live rather than captured: the user can flip this in Settings while
     // the app is running, and a cached copy would keep the old answer until
     // restart — which reads as the switch not working.
-    allowBuiltin: () => settings.get().allowBuiltinOnlineSearch
+    allowBuiltin: () => settings.get().allowBuiltinOnlineSearch,
+    /*
+     * 内置榜单缓存的隔离键，与 `hotWords` 构造里那个是同一个答案。
+     *
+     * 这里再给一遍而不是让 router 去问 `HotWordSource`：缓存是被写入的那一方，
+     * 它只知道「现在该用哪把键」，读实时值这件事由注入方负责——和 `allowBuiltin`
+     * 同一个模式，两处都读实时值，免得用户在运行中换脚本要重启才生效。
+     */
+    providerVersion: () => {
+      const enabled = sourceStore.list().find((api) => api.meta.enabled)
+      return enabled ? sourceStore.versionOf(enabled.meta.id) : undefined
+    }
   })
   // Playback needs both engines, so it is built here rather than next to the
   // search router: it is not an alternative to either one but the thing that
@@ -520,6 +553,11 @@ async function createServices(): Promise<Services> {
    * a *specific* track the search already returned, so it is not a search: it is
    * gated to match, because with the built-in switch off there is nothing the
    * search could have found on a built-in platform in the first place.
+   *
+   * `provider` is the cache-isolation key (see `source-store.ts` `versionOf`).
+   * It is carried here rather than read inside `lyric-service` because only this
+   * layer knows which script is enabled; the service is a pure function of what
+   * it is handed, which is what keeps its offline tests honest.
    */
   const lyricDeps: LyricDeps = {
     search: async (source: SourceId, keyword: string, signal?: AbortSignal) => {
@@ -529,6 +567,10 @@ async function createServices(): Promise<Services> {
     fetchLyric: async (music: OnlineMusicInfo, signal?: AbortSignal) => {
       if (!settings.get().allowBuiltinOnlineSearch) return { lyric: '' }
       return fetchOnlineLyric(music, signal)
+    },
+    provider: () => {
+      const enabled = sourceStore.list().find((api) => api.meta.enabled)
+      return enabled ? sourceStore.versionOf(enabled.meta.id) : undefined
     }
   }
 
@@ -1103,7 +1145,13 @@ async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric)
   // the undecorated one while resolving, so a second read of the same track —
   // which is what playing it does — would come back without 「待写入」 and the
   // badge would tell the truth once and then stop.
-  primeLyricCache(track.id, decorated)
+  //
+  // The version comes off the record itself, not from a second read of the
+  // enabled source: `searchLyricOnline` already stamped it while it had the
+  // answer in hand, and asking again here is a second chance to disagree with
+  // the bucket the resolver read from — which is exactly the half-decorated
+  // cache entry this call exists to prevent.
+  primeLyricCache(track.id, decorated, resolved.provider)
   return decorated
 }
 
@@ -2359,16 +2407,22 @@ function registerIpc(): void {
   // renderer chose.
   handle(IPC.lyricResolve, async (trackId: string, allowOnline?: boolean) => {
     const track = indexedTrack(trackId)
+    const deps = requireServices().lyricDeps
     return stageFetchedLyric(
       track,
-      await resolveLocalLyric(track, { allowOnline: allowOnline !== false }, requireServices().lyricDeps)
+      await resolveLocalLyric(
+        track,
+        { allowOnline: allowOnline !== false },
+        { ...deps, provider: deps.provider?.() }
+      )
     )
   })
 
   // Force a fresh lookup, bypassing the cache.
   handle(IPC.lyricSearchOnline, async (trackId: string) => {
     const track = indexedTrack(trackId)
-    return stageFetchedLyric(track, await searchLyricOnline(track, requireServices().lyricDeps))
+    const deps = requireServices().lyricDeps
+    return stageFetchedLyric(track, await searchLyricOnline(track, { ...deps, provider: deps.provider?.() }))
   })
 
   /**
@@ -2377,7 +2431,10 @@ function registerIpc(): void {
    * Returns candidates without applying any of them: the caller chooses, and
    * `lyricApplyCandidate` writes the choice.
    */
-  handle(IPC.lyricCandidates, (trackId: string) => lyricCandidates(indexedTrack(trackId), requireServices().lyricDeps))
+  handle(IPC.lyricCandidates, (trackId: string) => {
+    const deps = requireServices().lyricDeps
+    return lyricCandidates(indexedTrack(trackId), { ...deps, provider: deps.provider?.() })
+  })
 
   /**
    * Write a lyric the user produced themselves — an edit, a file they pointed at.

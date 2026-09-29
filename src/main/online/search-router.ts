@@ -89,6 +89,12 @@ export interface SearchRouterOptions {
   hotWords: HotWordSource
   /** Reads the live setting on every request, because the user can toggle it while the app runs. */
   allowBuiltin: () => boolean
+  /**
+   * The version of the source that would answer a hot-word request, for cache
+   * isolation. Absent means no isolation — the offline suites pass nothing and
+   * keep their single-bucket behaviour.
+   */
+  providerVersion?: () => string | undefined
 }
 
 /** One provider that declares `searchTracks` and claims to serve this platform. */
@@ -102,11 +108,13 @@ export class SearchRouter {
   private readonly engine: JjProviderEngine
   private readonly hotWordSource: HotWordSource
   private readonly allowBuiltin: () => boolean
+  private readonly providerVersion: () => string | undefined
 
   constructor(options: SearchRouterOptions) {
     this.engine = options.engine
     this.hotWordSource = options.hotWords
     this.allowBuiltin = options.allowBuiltin
+    this.providerVersion = options.providerVersion ?? (() => undefined)
   }
 
   /* ---------------------------------------------------------------- *
@@ -332,6 +340,15 @@ export class SearchRouter {
     )
 
     if (candidates.length > 0) {
+      /*
+       * The provider's own answer is used as it comes and is never cached here.
+       *
+       * That is not an oversight: this path already asks the running script on
+       * every call, so there is no stored opinion that could outlive an update —
+       * the isolation the built-in cache needs is unnecessary where there is no
+       * cache. `providerVersion` is read below, on the built-in branch, which is
+       * the only one that reads from disk.
+       */
       const result = await this.engine
         .request<{ words?: Array<string | { text: string; source?: SourceId }> }>(
           candidates[0]!.providerId,
@@ -368,6 +385,14 @@ export class SearchRouter {
     }
 
     try {
+      /*
+       * The built-in cache is keyed by source version, so it is told which one
+       * is answering before it reads. Read through the injected function rather
+       * than captured, for the same reason `allowBuiltin` is: a script can be
+       * updated while the app runs, and a snapshot would keep stamping entries
+       * with the version that has already been replaced.
+       */
+      this.hotWordSource.setVersion(this.providerVersion())
       return { words: await this.hotWordSource.words(scope), servedBy: 'builtin' }
     } catch (error) {
       return {

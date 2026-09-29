@@ -127,6 +127,16 @@ interface HotWordEntry {
   /** When this platform was last asked. Only a same-day stamp counts as fresh. */
   at: number
   words: string[]
+  /**
+   * Which source version produced these words.
+   *
+   * Entries recorded before isolation lack it; `load()` drops those, which is
+   * the right outcome — nobody can say which script version wrote them, and
+   * showing them would be exactly the "stale opinion survives an update" defect
+   * this field exists to close. The cost is one wasted day of cache on the
+   * upgrade, against a board that refreshes daily anyway.
+   */
+  provider?: string
 }
 
 export interface HotWordOptions {
@@ -141,12 +151,47 @@ export class HotWordSource {
   private readonly failedAt = new Map<SourceId, number>()
   private readonly inflight = new Map<SourceId, Promise<string[]>>()
   private readonly now: () => number
+  /**
+   * The source version currently answering, read fresh on every request.
+   *
+   * A function rather than a value because the user can update a script while
+   * the app runs: a captured string would keep stamping entries with the version
+   * that has already been replaced, and the isolation would silently do nothing
+   * until the next restart.
+   */
+  private version: () => string | undefined
 
   constructor(
     private readonly fetchText: (url: string, referer: string, headers?: Record<string, string>) => Promise<string> = defaultFetch,
-    private readonly options: HotWordOptions = {}
+    private readonly options: HotWordOptions & { version?: () => string | undefined } = {}
   ) {
     this.now = options.now ?? Date.now
+    this.version = options.version ?? (() => undefined)
+  }
+
+  /**
+   * Point the cache at a source version.
+   *
+   * Set from `SearchRouter` on the built-in branch rather than in the
+   * constructor, because the version is whatever is answering *now* and the
+   * router is the thing that knows which path a request took.
+   *
+   * Entries under a different version are dropped immediately, not merely
+   * ignored on read: leaving them in memory would keep a user who switched back
+   * to the older script serving the newer script's board, and the file would go
+   * on holding both.
+   */
+  setVersion(version: string | undefined): void {
+    if (version === this.version()) return
+    this.version = version === undefined ? () => undefined : () => version
+    let changed = false
+    for (const [source, entry] of this.entries) {
+      if (entry.provider !== version) {
+        this.entries.delete(source)
+        changed = true
+      }
+    }
+    if (changed) void this.persist()
   }
 
   /**
@@ -154,17 +199,25 @@ export class HotWordSource {
    *
    * This is what makes "once a day" mean once a day rather than once a day per
    * launch: without it every start of the app would re-ask all four hosts.
+   *
+   * An entry whose `provider` is not the version answering *now* is dropped
+   * rather than shown: the words are a source's opinion, and a script that has
+   * since been updated (or replaced) is not the one that formed it. Entries
+   * written before this field existed have no `provider` and are dropped too —
+   * see `HotWordEntry.provider`.
    */
   async load(): Promise<void> {
     if (!this.options.file) return
+    const current = this.version()
     try {
       const stored = parseJsonLoose<Record<string, Partial<HotWordEntry>>>(await readFile(this.options.file, 'utf8'))
       if (!stored || typeof stored !== 'object') return
       for (const [source, entry] of Object.entries(stored)) {
         if (!ADAPTERS.some((adapter) => adapter.source === source)) continue
         if (!entry || typeof entry.at !== 'number' || !Array.isArray(entry.words)) continue
+        if (current !== undefined && entry.provider !== current) continue
         const words = entry.words.filter((word): word is string => typeof word === 'string' && word.length > 0 && word.length <= 40)
-        if (words.length) this.entries.set(source as SourceId, { at: entry.at, words })
+        if (words.length) this.entries.set(source as SourceId, { at: entry.at, words, ...(entry.provider ? { provider: entry.provider } : {}) })
       }
     } catch {
       /* first launch, or the file is not there yet */
@@ -211,8 +264,18 @@ export class HotWordSource {
    */
   private async showNow(source: SourceId, budgeted: boolean): Promise<string[]> {
     const entry = this.entries.get(source)
-    if (entry && sameLocalDay(entry.at, this.now())) return entry.words
-    if (entry) {
+    /*
+     * An entry stamped with a version other than the one answering now is not
+     * "yesterday's board" — it is a different script's opinion, and showing it
+     * while revalidating would put words in front of the user that no running
+     * source stands behind. The stale-serve path is only for the same version.
+     */
+    const current = this.version()
+    if (entry && current !== undefined && entry.provider !== current) {
+      this.entries.delete(source)
+    } else if (entry && sameLocalDay(entry.at, this.now())) {
+      return entry.words
+    } else if (entry) {
       void this.refresh(source)
       return entry.words
     }
@@ -234,10 +297,32 @@ export class HotWordSource {
       const adapter = ADAPTERS.find((candidate) => candidate.source === source)
       if (!adapter) return []
       const previous = this.entries.get(source)
+      /*
+       * A remembered answer from a *different* version must not be handed back
+       * as the fallback either.
+       *
+       * This is the one place the isolation could still leak: on a failed or
+       * empty fetch the code deliberately keeps what it had, which is right for
+       * a board that is simply a day old and wrong for one the previous script
+       * release produced. Without this the 「升级后还看得见旧词的榜」 defect
+       * survives every transient network error, which is exactly when nobody is
+       * looking at the cache.
+       */
+      const current = this.version()
+      const usable = previous && (current === undefined || previous.provider === current) ? previous : undefined
       const failed = this.failedAt.get(source)
-      // Backoff applies whether or not something was remembered: a host that is
-      // down should not be re-asked on every tab switch either.
-      if (failed && this.now() - failed < FAILURE_BACKOFF_MS) return previous?.words ?? []
+      /*
+       * Backoff is decided by the failure stamp alone, not by whether anything is
+       * remembered.
+       *
+       * Gating it on `usable` looks equivalent and is not: on a *first* failure
+       * there is no remembered entry, so the stamp would never be honoured and
+       * every tab switch would hit the dead host again — a regression the
+       * 「失败也要有退避」 test catches. The two concerns are independent: the
+       * stamp says "do not ask again yet", `usable` says "and here is what to
+       * show if you do not".
+       */
+      if (failed && this.now() - failed < FAILURE_BACKOFF_MS) return usable?.words ?? []
       let words: string[] = []
       try {
         words = clean(parseLoose(await this.fetchText(adapter.url, adapter.referer, adapter.headers)), adapter)
@@ -246,9 +331,9 @@ export class HotWordSource {
       }
       if (!words.length) {
         this.failedAt.set(source, this.now())
-        return previous?.words ?? []
+        return usable?.words ?? []
       }
-      this.entries.set(source, { at: this.now(), words })
+      this.entries.set(source, { at: this.now(), words, ...(current ? { provider: current } : {}) })
       this.failedAt.delete(source)
       await this.persist()
       return words

@@ -85,9 +85,14 @@ test('bad responses fail cleanly and strict quality cannot silently downgrade',a
   // Route the engine at a fake running script so `getMusicUrl` reaches the
   // quality ladder. `providersFor` is derived from the started runtimes, so a
   // minimal runtime stub is what makes the platform resolve.
+  //
+  // The stub is shaped as `{ api, host, sources }` — the process state lives on
+  // `host` (`RuntimeState`, owned by `source-runtime-host`), and the engine only
+  // keeps its own routing view. `dead` therefore belongs on `host`, not on the
+  // runtime: putting it on the runtime compiles against nothing and this test
+  // would fail at the first `rebuildOwners()`.
   engine.getSources=()=>[{id:'wy',qualitys:['128k','flac']}]
-  engine.runtimes=new Map([['api1',{api:{meta:{id:'api1',name:'测试源'}},dead:false,sources:[{id:'wy',type:'music',actions:['musicUrl'],qualitys:['128k','flac']}],pending:new Map(),nextId:1,logs:[],scratchDir:''}]]);
-  engine.rebuildOwners()
+  engine.runtimes=new Map([['api1',{api:{meta:{id:'api1',name:'测试源'}},host:{dead:false,sources:[{id:'wy',type:'music',actions:['musicUrl'],qualitys:['128k','flac']}],pending:new Map(),nextId:1,logs:[],scratchDir:''},sources:[{id:'wy',type:'music',actions:['musicUrl'],qualitys:['128k','flac']}]}]]);  engine.rebuildOwners()
   const qualities=[];engine.requestFrom=async(_api,_s,_a,args)=>{qualities.push(args.type);throw Error('unavailable')}
   await assert.rejects(()=>engine.getMusicUrl('wy',track,'flac',true));assert.deepEqual(qualities,['flac'])
 })

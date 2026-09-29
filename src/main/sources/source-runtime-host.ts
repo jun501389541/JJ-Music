@@ -32,9 +32,9 @@
  */
 
 import { fork } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import type { Quality, SourceAction, SourceId, SourceInfo, OnlineMusicInfo } from '@shared/types'
 import { LX_QUALITIES } from '@shared/types'
@@ -85,7 +85,15 @@ export const HEARTBEAT_SILENCE_LIMIT_MS = 20_000
 /** Poll granularity for the file transport. Imperceptible against a 20 s ceiling. */
 const POLL_MS = 200
 /** Console lines retained per script for the settings page. */
-const MAX_LOG_LINES = 200
+/**
+ * Console ring-buffer ceiling, in lines.
+ *
+ * Exported so the engines bound their own log views with the same number the
+ * host uses when it pushes lines itself; two different ceilings would make the
+ * settings page show a different amount of history depending on which party
+ * happened to capture a given line.
+ */
+export const MAX_LOG_LINES = 200
 
 /**
  * Ceiling on one response payload, in bytes, measured after serialisation.
@@ -203,13 +211,20 @@ export interface HostCallbacks {
   /**
    * Contents of `init.json`.
    *
-   * This is the one place the two protocols materially differ: the LX engine
-   * emits `{ source, version: '2.0.0', script }` while the JJ engine adds its
-   * own `jj: { version, apiId }` block. The host writes whatever it is given
-   * and does not interpret it — which is what keeps protocol knowledge out of
-   * the shared machinery.
+   * This is the one place the two protocols materially differ: the JJ engine
+   * emits `{ source, version: '2.0.0', apiId, env, scriptInfo, jj: { … } }`,
+   * while the LX engine emits `{ env, version: '2.0.0', apiId, scriptInfo }`
+   * with **no `source` key at all** — scripts branch on the presence of what
+   * they expect, and adding a field one of them never sent is a protocol change
+   * dressed up as a refactor. The host writes whatever it is given and does not
+   * interpret it, which is what keeps protocol knowledge out of the shared
+   * machinery.
+   *
+   * `source` is therefore optional, and deliberately so: it was required while
+   * only the JJ engine used this host, and requiring it would force the LX
+   * caller to invent a value rather than reproduce its own payload verbatim.
    */
-  buildInit(api: LoadedApi): { source: string; version: string } & Record<string, unknown>
+  buildInit(api: LoadedApi): { source?: string; version: string } & Record<string, unknown>
   /**
    * A script reported its sources.
    *
@@ -306,6 +321,21 @@ export class SourceRuntimeHost {
    * hold a process and 512 MB until the app exits.
    */
   async start(api: LoadedApi, scriptSource: string): Promise<RuntimeState> {
+    /*
+     * Check the host entry point before forking anything.
+     *
+     * A packaged build keeps `source-host.js` outside the asar (electron-builder
+     * `asarUnpack`); when that step is missed, `fork` fails with a bare ENOENT
+     * that says nothing about packaging, and the script gets blamed. Naming the
+     * missing path is the difference between a five-minute fix and an afternoon.
+     */
+    if (!existsSync(this.hostPath)) {
+      throw new Error(
+        `音源运行时缺失: ${this.hostPath}\n` +
+          `打包版本需要把 source-host.js 放在 asar 之外（electron-builder.yml 的 asarUnpack）。`
+      )
+    }
+
     const scratchDir = mkdtempSync(join(tmpdir(), 'jj-source-'))
     const scriptPath = join(scratchDir, 'script.js')
     writeFileSync(scriptPath, scriptSource, 'utf8')
@@ -336,8 +366,37 @@ export class SourceRuntimeHost {
       })
       state.wrapper = launch.wrapper
     } else {
-      state.child = fork(this.hostPath, [initPath, scratchDir], {
+      /*
+       * `[scriptPath, initPath]` — in that order, matching the contract
+       * `source-host.ts` documents at its `readInit()` (argv[2] is the decoded
+       * script, argv[3] the JSON payload).
+       *
+       * This was `[initPath, scratchDir]` until 2026-09-28, which passed no
+       * script path at all and put a *directory* where the host expected a JSON
+       * file. `readInit()` cannot read it, returns null, and the host exits 2
+       * ("nothing to do without an init payload") — so this branch had never
+       * successfully started a single script on any platform that uses it.
+       *
+       * It survived because the file transport is what win32 takes, and
+       * `launchRestricted` builds its arguments correctly from the same three
+       * values; nothing exercised the IPC branch, and the missing argument is
+       * the kind of thing a signature cannot catch: `fork(modulePath, args)` is
+       * happy with any string array, so it fails at runtime inside the child,
+       * where it looks like a broken script rather than a broken host.
+       */
+      state.child = fork(this.hostPath, [scriptPath, initPath], {
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        /*
+         * Keep the working directory at the host file, never the scratch dir.
+         *
+         * The host `require`s `iconv-lite` and `music-metadata` while evaluating
+         * the script. Node resolves bare specifiers relative to the requiring
+         * file's real path, but a launcher whose cwd is the scratch dir makes
+         * those lookups fail before the script ever runs — the child dies with
+         * `Cannot find module 'iconv-lite'`, which reads like a broken source
+         * rather than a broken launch.
+         */
+        cwd: dirname(this.hostPath),
         // A script that tries to allocate without bound should die on its own
         // rather than take the app down with it.
         execArgv: [`--max-old-space-size=${SOURCE_MEMORY_LIMIT_MB}`]

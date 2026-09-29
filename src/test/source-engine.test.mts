@@ -457,16 +457,27 @@ check('local musicInfo.id mirrors the path', legacyLocal.id === 'D:\\Music\\a.fl
 
 section('8. Multi-source ordering and failover')
 
-/** A fake runtime good enough for routing, mirroring the ScriptRuntime shape. */
+/**
+ * A fake runtime good enough for routing, mirroring the ScriptRuntime shape.
+ *
+ * Process state (`dead`, `sources`, `pending`, `nextId`, `logs`, `scratchDir`)
+ * lives on `host` — the shared `RuntimeState` owned by `source-runtime-host`.
+ * The engine keeps `sources` as a mirror it reads while indexing, and every
+ * liveness question goes through `runtime.host.dead`. Flattening the two would
+ * compile fine here and then throw on the first `rebuildOwners()`.
+ */
 function fakeRuntime(id, name, sources, attempts) {
   return {
     api: { meta: { id, name }, source: '' },
-    dead: false,
-    sources,
-    pending: new Map(),
-    nextId: 1,
-    logs: [],
-    scratchDir: ''
+    host: {
+      dead: false,
+      sources,
+      pending: new Map(),
+      nextId: 1,
+      logs: [],
+      scratchDir: ''
+    },
+    sources
   }
 }
 
@@ -563,7 +574,7 @@ const withDead = multiSourceEngine(
   [{ meta: { id: 'c', enabled: true } }, { meta: { id: 'b', enabled: true } }],
   [fakeRuntime('c', '音源C', [srcWy]), fakeRuntime('b', '音源B', [srcWy])]
 )
-withDead.runtimes.get('c').dead = true
+withDead.runtimes.get('c').host.dead = true
 withDead.rebuildOwners()
 withDead.requestFrom = deadSkip.fn
 const afterDead = await withDead.getMusicUrl('wy', track, 'flac')
@@ -590,7 +601,10 @@ check('the lyric-only source was never asked', actionGuard.calls.join(',') === '
 const stalledSource = { id: 'wy', type: 'music', actions: ['lyric', 'pic'], qualitys: [] }
 const stalledRuntime = fakeRuntime('stalled', '卡住的音源', [stalledSource])
 let dispatched = 0
-stalledRuntime.child = { send: () => { dispatched++ } }
+// Discovery goes through the host now, so the fake child has to sit where the
+// transport puts it: `host.child`. `send` is the only member the engine's
+// delegation calls on it.
+stalledRuntime.host.child = { send: () => { dispatched++ } }
 const cancellable = multiSourceEngine(
   [{ meta: { id: 'stalled', enabled: true } }],
   [stalledRuntime]
@@ -603,7 +617,7 @@ const lyricOutcome = await Promise.race([
   new Promise((resolve) => setTimeout(() => resolve('timed out'), 250))
 ])
 check('script lyric cancellation rejects promptly', lyricOutcome === 'cancelled', String(lyricOutcome))
-check('cancelled lyric request is removed from pending', stalledRuntime.pending.size === 0, String(stalledRuntime.pending.size))
+check('cancelled lyric request is removed from pending', stalledRuntime.host.pending.size === 0, String(stalledRuntime.host.pending.size))
 
 const picAbort = new AbortController()
 const stalledPic = cancellable.getPic('wy', track, picAbort.signal)
@@ -613,7 +627,7 @@ const picOutcome = await Promise.race([
   new Promise((resolve) => setTimeout(() => resolve('timed out'), 250))
 ])
 check('script cover cancellation rejects promptly', picOutcome === 'cancelled', String(picOutcome))
-check('cancelled cover request is removed from pending', stalledRuntime.pending.size === 0, String(stalledRuntime.pending.size))
+check('cancelled cover request is removed from pending', stalledRuntime.host.pending.size === 0, String(stalledRuntime.host.pending.size))
 check('only the requested script actions were dispatched', dispatched === 2, String(dispatched))
 
 /* ------------------------------------------------------------------ *

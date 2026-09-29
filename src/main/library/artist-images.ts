@@ -62,6 +62,16 @@ export class ArtistImageStore {
       /** Overridable for the same reason as `fetch`: the offline suite needs to
        * see the address that was asked for without a server answering it. */
       getBytes?: typeof safeFetchBytes
+      /**
+       * The platform search that turns a name into a portrait address.
+       *
+       * Injected because the callers in `index.ts` are what decide whether this
+       * app's built-in adapters are reachable at all — the same reason
+       * `lyric-service` takes its search and its lyric fetcher rather than
+       * importing them. A caller that omits it gets the built-in search, which
+       * is what the offline suite relies on.
+       */
+      resolveArtistImage?: typeof resolveArtistImage
     }
   ) {
     this.file = join(dataDir, 'artist-images.json')
@@ -167,7 +177,7 @@ export class ArtistImageStore {
     // text, so that one is validated hop by hop.
     let found: ArtistImage | null
     try {
-      found = await resolveArtistImage(name, this.deps.fetch)
+      found = await (this.deps.resolveArtistImage ?? resolveArtistImage)(name, this.deps.fetch)
     } catch (error) {
       console.warn('艺术家头像获取失败', name, error instanceof Error ? error.message : error)
       throw error

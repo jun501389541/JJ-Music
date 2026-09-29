@@ -6,6 +6,11 @@ out/
 dist/
 /release/
 
+# TypeScript incremental build state. Local only: it embeds absolute paths from
+# whichever machine ran the typecheck, so it churns on every checkout and tells
+# a reviewer nothing that `tsc` cannot regenerate.
+*.tsbuildinfo
+
 # Local caches, kept inside the workspace so sandboxed installs work
 .cache/
 .graphflow-cache/

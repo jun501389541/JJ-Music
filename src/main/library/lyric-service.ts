@@ -17,7 +17,7 @@
  */
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
-import type { AssetRef, LyricResult, LocalMusicInfo, OnlineLyricSource, OnlineMusicInfo } from '@shared/types'
+import type { AssetRef, LyricResult, LocalMusicInfo, OnlineLyricSource, OnlineMusicInfo, SourceId } from '@shared/types'
 import { ONLINE_LYRIC_SOURCES, ONLINE_SOURCE_IDS } from '@shared/types'
 import type { ResolvedLyric, LyricCandidate } from '@shared/library-types'
 import { readEmbeddedLyric } from '../library/embedded-lyrics'
@@ -224,7 +224,11 @@ export { sidecarPathFor }
  */
 export async function resolveLocalLyric(
   track: LocalMusicInfo,
-  options: { allowOnline?: boolean; force?: boolean } = {}
+  options: { allowOnline?: boolean; force?: boolean } = {},
+  deps: {
+    search?: SearchOnlineForMatch
+    fetchLyric?: typeof fetchOnlineLyric
+  } = {}
 ): Promise<ResolvedLyric> {
   const allowOnline = options.allowOnline !== false
   if (!options.force) {
@@ -276,7 +280,7 @@ export async function resolveLocalLyric(
 
   // 3. online, matched by the track's own tags
   if (allowOnline) {
-    const online = await searchLyricOnline(track)
+    const online = await searchLyricOnline(track, deps)
     if (online.lyric.trim()) {
       cacheSet(track.id, online)
       return online
@@ -304,9 +308,13 @@ export async function resolveLocalLyric(
  * that recovers a usable query even with no tags at all.
  */
 export async function searchLyricOnline(
-  track: Pick<LocalMusicInfo, 'id' | 'path' | 'name' | 'singer' | 'albumName' | 'duration'>
+  track: Pick<LocalMusicInfo, 'id' | 'path' | 'name' | 'singer' | 'albumName' | 'duration'>,
+  deps: {
+    search?: SearchOnlineForMatch
+    fetchLyric?: typeof fetchOnlineLyric
+  } = {}
 ): Promise<ResolvedLyric> {
-  const candidates = await lyricCandidates(track)
+  const candidates = await lyricCandidates(track, deps)
   const best = candidates.find((entry) => entry.lyric.trim())
   if (!best) return { lyric: '', source: 'none', synchronized: false, note: '在线未匹配到歌词' }
 
@@ -345,9 +353,37 @@ export type { LyricCandidate }
  */
 const MIN_CANDIDATE_SCORE = 0.5
 
+/**
+ * How `lyricCandidates` reaches the platforms it matches against.
+ *
+ * Named so the injection point reads as "the search this function is allowed to
+ * do" rather than an anonymous function type — the callers in `index.ts` are
+ * what decide whether that search reaches the built-in adapters at all, and a
+ * bare signature hides that.
+ */
+export type SearchOnlineForMatch = (source: SourceId, keyword: string, signal?: AbortSignal) => Promise<OnlineMusicInfo[]>
+
+/**
+ * Default search: the built-in adapters.
+ *
+ * Only reached when a caller passes nothing, which is what the offline test
+ * suite does. Production callers in `index.ts` always inject a routed search,
+ * so the gate the app actually ships with is decided there, not here.
+ */
+const defaultSearch: SearchOnlineForMatch = async (source, keyword, signal) => {
+  const { searchOnline } = await import('../online/search')
+  return (await searchOnline(source, keyword, 1, signal)).list
+}
+
 export async function lyricCandidates(
-  track: Pick<LocalMusicInfo, 'id' | 'path' | 'name' | 'singer' | 'albumName' | 'duration'>
+  track: Pick<LocalMusicInfo, 'id' | 'path' | 'name' | 'singer' | 'albumName' | 'duration'>,
+  deps: {
+    search?: SearchOnlineForMatch
+    fetchLyric?: typeof fetchOnlineLyric
+  } = {}
 ): Promise<LyricCandidate[]> {
+  const search = deps.search ?? defaultSearch
+  const fetchLyric = deps.fetchLyric ?? fetchOnlineLyric
   const tagged = { ...track, id: track.id } as LocalMusicInfo
 
   // Try the tags first, then the filename stem as a second query.
@@ -370,7 +406,7 @@ export async function lyricCandidates(
   for (const query of queries) {
     let matches
     try {
-      matches = await matchMetadata(query, { limit: 5 })
+      matches = await matchMetadata(query, { limit: 5, search })
     } catch {
       continue
     }
@@ -384,7 +420,7 @@ export async function lyricCandidates(
       if (seen.has(key)) return null
       seen.add(key)
       try {
-        const result = await fetchOnlineLyric(candidate.music)
+        const result = await fetchLyric(candidate.music)
         if (!result.lyric || !result.lyric.trim()) return null
         return {
           id: key,
@@ -433,9 +469,4 @@ export async function readLyricFile(path: string): Promise<string> {
   const text = await readSidecar(path)
   if (text === null) throw new Error('歌词文件不存在或无法读取')
   return text
-}
-
-/** Lyrics for an online track, used by the player when a source provides them. */
-export async function resolveOnlineLyric(music: OnlineMusicInfo): Promise<LyricResult> {
-  return fetchOnlineLyric(music)
 }

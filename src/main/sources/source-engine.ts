@@ -36,7 +36,7 @@ import type {
   SourceId,
   SourceInfo
 } from '@shared/types'
-import { LX_QUALITIES, QUALITY_ORDER } from '@shared/types'
+import { QUALITY_ORDER } from '@shared/types'
 import { toLegacyOnline } from './legacy-music-info'
 import { assertPublicHttpUrl } from '../online/url-guard'
 import type { LoadedApi, SourceStore } from './source-store'
@@ -1163,69 +1163,23 @@ interface HostMessage {
   message?: string
 }
 
-/**
- * Normalise the `sources` object a script reported into a stable array.
+/*
+ * `normaliseSources` and its `PLATFORM_NAMES` table used to be defined here.
  *
- * Qualities are intersected with the four tiers the custom-source API can
- * actually carry, so `hires`/`atmos`/`master` never reach the quality ladder —
- * that part matches LX exactly, because LX performs the same intersection
- * before a script's `qualitys` list is ever consulted.
+ * Both moved to `source-runtime-host.ts` when the subprocess machinery was
+ * extracted for the two engines to share, and that module is now the only
+ * definition — it is imported and re-exported below so existing importers are
+ * unaffected.
  *
- * ## Platform ids: we no longer drop unknown ones
- *
- * The previous version kept only LX's six known keys, reasoning that LX
- * silently drops the rest so matching it avoids surprising users. Measured
- * against the 21 sources on this machine, that reasoning costs real
- * functionality: `非常刀` advertises `qs` and `全豆要` advertises `qsvip`, and
- * dropping them means the platform disappears from the UI even though the
- * script can serve it. Nothing routes to an id unless a source claims it, so
- * keeping them is additive.
- *
- * `local` is the one exception: it is built in, and a script must not be able
- * to shadow the user's own files with a network-backed platform.
- *
- * A non-`music` type (a script advertising `type: 'video'`) is still dropped —
- * this app plays music, and listing a video source would offer the user a
- * platform whose every request fails.
+ * The copy left behind here is worth a note because of how it failed: it was
+ * still exported, still correct-looking, and **entirely dead** — the host
+ * normalises the `ready` payload itself (`source-runtime-host.ts:472`, `:588`)
+ * and never calls back into this module. A fix applied to it (the `actions`
+ * name check that E0's D1-a requires) changed nothing at runtime, which is how
+ * the duplication was finally spotted. One definition, one place to fix.
  */
-export function normaliseSources(raw: Record<string, RawSourceInfo>): SourceInfo[] {
-  const out: SourceInfo[] = []
-  for (const [id, info] of Object.entries(raw)) {
-    if (!info || typeof info !== 'object') continue
-    if (!id || id === 'local') continue
-    // Absent type is treated as music, which is what an LX script means by
-    // omitting it.
-    if (info.type && info.type !== 'music') continue
-
-    const declared = Array.isArray(info.qualitys)
-      ? info.qualitys
-          .map((q) => (typeof q === 'string' ? q : String((q as { type?: string })?.type ?? '')))
-          .filter((q): q is Quality => Boolean(q))
-      : []
-    const qualitys = declared.filter((q) => LX_QUALITIES.includes(q))
-
-    out.push({
-      id,
-      // Known platforms get their Chinese name; a private id keeps the raw key
-      // so the user can tell which script advertised it.
-      name: PLATFORM_NAMES[id] ?? id,
-      type: info.type || 'music',
-      actions: (Array.isArray(info.actions) ? info.actions : ['musicUrl']) as SourceAction[],
-      qualitys: qualitys.length > 0 ? qualitys : (['128k'] as Quality[])
-    })
-  }
-  return out
-}
-
-/** Display names for the platforms LX's custom-source API recognises. */
-const PLATFORM_NAMES: Record<string, string> = {
-  kw: '酷我音乐',
-  kg: '酷狗音乐',
-  tx: 'QQ音乐',
-  wy: '网易云音乐',
-  mg: '咪咕音乐',
-  local: '本地音乐'
-}
+import { normaliseSources } from './source-runtime-host'
+export { normaliseSources }
 
 /**
  * Build the ordered list of qualities to try.

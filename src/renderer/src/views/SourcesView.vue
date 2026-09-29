@@ -9,7 +9,7 @@
  */
 import { useUiStore } from '../stores/ui'
 import { computed, ref } from 'vue'
-import type { UserApiMeta } from '@shared/types'
+import type { UserApiMeta, UpdateCheckResult } from '@shared/types'
 import type { ValidationReport } from '@shared/validation'
 import { QUALITY_LABELS } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
@@ -182,6 +182,102 @@ async function showLogs(api: UserApiMeta): Promise<void> {
   } catch {
     logs.value = []
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * 更新检查与回退
+ * ------------------------------------------------------------------ */
+
+/** Which script's update panel is open, if any. */
+const updateFor = ref<string | null>(null)
+/** Which script is currently being checked, so only its button spins. */
+const checkingUpdate = ref<string | null>(null)
+/** Result of the last check, rendered by the panel above the script. */
+const updateResult = ref<UpdateCheckResult | null>(null)
+/** True while an approved update is being written. */
+const updating = ref(false)
+
+/**
+ * Ask whether a newer script exists at the source's `@homepage`.
+ *
+ * Nothing is installed here. The result is held in `updateResult` and shown
+ * with the version numbers, the address, the checksum and the risk rating, so
+ * the decision to replace running code is made with the evidence on screen.
+ */
+async function checkUpdate(api: UserApiMeta): Promise<void> {
+  updateFor.value = api.id
+  checkingUpdate.value = api.id
+  updateResult.value = null
+  try {
+    updateResult.value = await window.jj.sources.updates.check(api.id)
+  } catch (error) {
+    updateResult.value = {
+      ok: false,
+      message: error instanceof Error ? error.message : '检查更新失败'
+    }
+  } finally {
+    checkingUpdate.value = null
+  }
+}
+
+/**
+ * Install the script the user was shown.
+ *
+ * The script text comes back from the result we are already displaying, rather
+ * than being re-fetched, so the bytes written are exactly the bytes that were
+ * reviewed.
+ */
+async function applyUpdate(api: UserApiMeta): Promise<void> {
+  const plan = updateResult.value?.plan
+  if (!plan) return
+  const confirmed = await ui.confirm(
+    '更新音源',
+    `将「${api.name}」从 v${plan.currentVersion || '未标注'} 更新到 v${plan.nextVersion || '未标注'}？\n\n` +
+      `来源：${plan.url}\n\n` +
+      `更新前的脚本会保留，你可以随时回退。`
+  )
+  if (!confirmed) return
+  updating.value = true
+  try {
+    await window.jj.sources.updates.apply(api.id, plan.script)
+    toast.success(`已更新「${api.name}」到 v${plan.nextVersion || '新版本'}`)
+    dismissUpdate()
+    await library.refreshSources().catch(() => undefined)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '更新失败')
+  } finally {
+    updating.value = false
+  }
+}
+
+/** Restore the script the last update replaced. */
+async function rollback(api: UserApiMeta): Promise<void> {
+  const label = api.rollbackVersion ? `v${api.rollbackVersion}` : '上一版本'
+  const confirmed = await ui.confirm(
+    '回退音源',
+    `将「${api.name}」回退到 ${label}？\n\n回退后当前版本会被保留，你还可以再切回来。`
+  )
+  if (!confirmed) return
+  try {
+    await window.jj.sources.updates.rollback(api.id)
+    toast.success(`已回退「${api.name}」到 ${label}`)
+    await library.refreshSources().catch(() => undefined)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '回退失败')
+  }
+}
+
+function dismissUpdate(): void {
+  updateFor.value = null
+  updateResult.value = null
+}
+
+/** Human-readable size for the update panel. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '未知'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /** Lift a safety quarantine after the user has reviewed the reason. */
@@ -433,10 +529,103 @@ async function disableAll(): Promise<void> {
               <input type="checkbox" :checked="api.enabled" @change="toggle(api)" />
               <span class="switch__track"><span class="switch__thumb" /></span>
             </label>
+            <!--
+              Update check. Only shown when the script declares a @homepage,
+              because that is the only address an update can come from — a
+              button that can only ever answer "no homepage" is a dead control.
+            -->
+            <button
+              v-if="api.homepage"
+              class="icon-btn"
+              type="button"
+              title="检查更新"
+              :disabled="checkingUpdate === api.id"
+              @click="checkUpdate(api)"
+            >
+              <span v-if="checkingUpdate === api.id" class="spinner" />
+              <span v-else>⇩</span>
+            </button>
+            <!--
+              Rollback, offered only when an update actually replaced a script.
+              Labelled with the version it would restore, so the user knows what
+              they are going back to before they click.
+            -->
+            <button
+              v-if="api.canRollback"
+              class="icon-btn"
+              type="button"
+              :title="`回退到 v${api.rollbackVersion || '上一版本'}`"
+              @click="rollback(api)"
+            >
+              ↺
+            </button>
             <button class="icon-btn" type="button" title="重新加载" @click="reload(api)">⟳</button>
             <button class="icon-btn" type="button" title="查看日志" @click="showLogs(api)">≡</button>
             <button class="icon-btn" type="button" title="删除" @click="remove(api)">✕</button>
           </div>
+        </div>
+
+        <!--
+          Update panel.
+
+          Kept on screen rather than a toast for the same reason the validation
+          panel is: the user is being asked to replace running code, so the
+          version numbers, the source address, the checksum and the risk rating
+          have to stay readable while they decide. Nothing is installed until
+          the confirm button here is pressed.
+
+          The checksum is shown together with what it does *not* mean — it
+          proves the download arrived intact and that the applied bytes are the
+          reviewed ones, not who published them.
+        -->
+        <div v-if="updateFor === api.id" class="update">
+          <div v-if="checkingUpdate === api.id" class="update__row">
+            <span class="spinner" />
+            <span>正在检查更新…</span>
+          </div>
+          <template v-else-if="updateResult">
+            <div v-if="updateResult.ok && updateResult.plan" class="update__offer">
+              <div class="update__head">
+                <span class="update__badge">发现新版本</span>
+                <span>
+                  v{{ updateResult.plan.currentVersion || '未标注' }}
+                  →
+                  v{{ updateResult.plan.nextVersion || '未标注' }}
+                </span>
+              </div>
+              <dl class="update__meta">
+                <dt>来源</dt>
+                <dd class="update__url">{{ updateResult.plan.url }}</dd>
+                <dt>大小</dt>
+                <dd>{{ formatBytes(updateResult.plan.bytes) }}</dd>
+                <dt>校验值</dt>
+                <dd class="update__sha" :title="updateResult.plan.sha256">
+                  {{ updateResult.plan.sha256 }}
+                </dd>
+                <dt>风险评级</dt>
+                <dd>{{ RISK_LABEL[updateResult.plan.risk.risk] || updateResult.plan.risk.risk }}</dd>
+              </dl>
+              <p v-if="updateResult.plan.risk.notes.length" class="update__notes">
+                {{ updateResult.plan.risk.notes.join('；') }}
+              </p>
+              <p class="update__caveat">
+                校验值只说明下载内容与上面显示的一致，不证明发布者身份。确认前请自行判断来源是否可信。
+              </p>
+              <div class="update__actions">
+                <button class="btn btn--primary" type="button" :disabled="updating" @click="applyUpdate(api)">
+                  <span v-if="updating" class="spinner" />
+                  <span v-else>确认更新</span>
+                </button>
+                <button class="btn btn--ghost" type="button" :disabled="updating" @click="dismissUpdate">
+                  取消
+                </button>
+              </div>
+            </div>
+            <div v-else class="update__none">
+              <span>{{ updateResult.message || '没有可用的更新' }}</span>
+              <button class="btn btn--ghost" type="button" @click="dismissUpdate">关闭</button>
+            </div>
+          </template>
         </div>
 
         <!--
@@ -1112,5 +1301,100 @@ code {
 
 .notes__list strong {
   color: var(--text-primary);
+}
+
+/* ---------------- update panel ---------------- */
+
+.update {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.update__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.update__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.update__badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+/* The address and the checksum are long and not meant to be read in full —
+   they are here so the user can verify the origin if they want to. */
+.update__meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.update__meta dt {
+  color: var(--text-tertiary);
+}
+
+.update__meta dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.update__url,
+.update__sha {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.update__notes {
+  margin: 10px 0 0;
+  font-size: var(--text-xs);
+  color: var(--warning);
+  line-height: 1.6;
+}
+
+.update__caveat {
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: 1.6;
+}
+
+.update__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.update__none {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 </style>

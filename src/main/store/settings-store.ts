@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
+  allowBuiltinOnlineSearch: false,
   downloadFolder: '',
   downloadLyric: true,
   downloadEmbedLyric: true,

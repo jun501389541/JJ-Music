@@ -48,6 +48,20 @@ interface HostInit {
     author: string
     homepage: string
   }
+  /**
+   * Present only for scripts speaking the JJ capability protocol.
+   *
+   * Its presence — not `version` — is what selects the protocol. An LX source
+   * has no way to set this key, so every existing source keeps the exact
+   * behaviour it has today, and a script cannot opt itself into the JJ path by
+   * claiming a version number.
+   */
+  jj?: {
+    /** The JJ capability protocol version, negotiated independently of `version`. */
+    version: string
+    /** The stable identity of this provider instance; echoed back on every request. */
+    apiId: string
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -67,6 +81,22 @@ interface HostInit {
  * A source is third-party code the user chose to run. The process boundary is
  * what contains it; the `lx` surface below is deliberately the only capability
  * it gets.
+ *
+ * ## Two protocols, one host
+ *
+ * This file hosts both the LX custom-source API and the JJ capability protocol.
+ * They are not two hosts: the containment above (process boundary, capability
+ * lockdown, browser shims) is the part that is expensive to get right, and a
+ * second copy of it would be a second thing to keep correct — the shim layer
+ * specifically was the thing that, when it denied the network, killed every
+ * real source in testing.
+ *
+ * An init payload carrying `jj` selects the JJ protocol and additionally
+ * exposes the `jj` entry point; anything else is an LX source and sees exactly
+ * the surface it sees today. Selection is by the payload's shape rather than by
+ * a version number, so no script can opt itself onto the new path merely by
+ * claiming a version — and every source that exists today keeps behaving
+ * identically because it cannot produce the key.
  */
 
 function readInit(): (HostInit & { scratchDir?: string }) | null {
@@ -118,7 +148,21 @@ const fileSend = (message: Record<string, unknown>): void => {
   try {
     switch (message.type) {
       case 'ready':
-        writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify({ ok: true, sources: message.sources }), 'utf8')
+        writeFileSync(
+          join(scratchDir, 'ready.json'),
+          JSON.stringify({
+            ok: true,
+            sources: message.sources,
+            // Forward the block the script actually reported, exactly as the
+            // IPC path does. Echoing `init.jj` instead would be the *init*
+            // block (`{ version, apiId }`), which carries no `capabilities`,
+            // and the parent would have nothing to validate — so a JJ source
+            // would fail to register on the file transport while working over
+            // IPC, which is the transport win32 actually uses.
+            ...(message.jj !== undefined ? { jj: message.jj } : {})
+          }),
+          'utf8'
+        )
         break
       case 'boot-error':
         writeFileSync(join(scratchDir, 'ready.json'), JSON.stringify({ ok: false, error: message.error }), 'utf8')
@@ -189,6 +233,17 @@ let requestHandler: ((payload: unknown) => unknown) | undefined
 let hasInited = false
 let hasSentUpdateAlert = false
 let initFailed = false
+
+/**
+ * A JJ source's capability handler.
+ *
+ * Separate from `requestHandler` because the two protocols answer different
+ * questions: an LX handler receives `{ source, action, info }` and is expected
+ * to branch on `action`, whereas a JJ handler is handed one capability request
+ * and answers with one `JjResult`. A script that implements both keeps both
+ * registrations, and neither can overwrite the other.
+ */
+let capabilityHandler: ((request: unknown) => unknown) | undefined
 
 function describeError(error: unknown): string {
   if (error === undefined) return '脚本未提供失败原因 (rejected with undefined)'
@@ -493,11 +548,60 @@ const lx = {
 }
 
 /* ------------------------------------------------------------------ *
+ * The jj entry point
+ * ------------------------------------------------------------------ */
+
+/**
+ * The capability protocol's surface, exposed only to sources that declared it.
+ *
+ * Kept deliberately small. A JJ source needs somewhere to register its handler,
+ * a way to say it is ready, and the `lx` utilities (crypto, zlib, buffer) that
+ * are the reason real sources pull in a runtime at all — but it does **not** get
+ * `lx.on`, because that registration slot belongs to the LX request/action
+ * contract, and letting a JJ source occupy it would make the two protocols
+ * ambiguous at the one place they are dispatched.
+ */
+const jj = {
+  version: init.jj!.version,
+  apiId: init.jj!.apiId,
+  EVENTS: { ready: 'ready', request: 'request' } as const,
+  on(name: string, handler: (request: unknown) => unknown): Promise<void> {
+    if (name !== 'request') {
+      return Promise.reject(new Error(`The event is not supported: ${name}`))
+    }
+    if (typeof handler !== 'function') {
+      return Promise.reject(new Error('The handler must be a function'))
+    }
+    capabilityHandler = handler
+    return Promise.resolve()
+  },
+  /**
+   * Announce that the provider is initialised.
+   *
+   * `info` is the provider's self-description in the shape `JjProviderInfo`
+   * describes: `{ version, capabilities, sources }`. It is passed through
+   * unvalidated — validation is the parent's job, and it is the parent that
+   * must decide what an unknown capability means.
+   */
+  ready(info: unknown): Promise<void> {
+    if (initFailed) return Promise.reject(new Error('Script initialization already failed'))
+    if (hasInited) return Promise.reject(new Error('Script is inited'))
+    hasInited = true
+    send({ type: 'ready', sources: {}, jj: info })
+    return Promise.resolve()
+  },
+  utils
+}
+
+/* ------------------------------------------------------------------ *
  * Install the environment and run the script
  * ------------------------------------------------------------------ */
 
 const target = globalThis as unknown as Record<string, unknown>
 target.lx = lx
+// Only a source that declared `jj` in its init payload can see this, so an LX
+// source's global surface is byte-for-byte what it was before.
+if (init.jj) target.jj = jj
 installBrowserShims(target)
 
 target.console = {
@@ -686,13 +790,31 @@ function handleRequest(message: { type: string; id?: number; payload?: unknown }
   if (message.type !== 'request' || message.id === undefined) return
   const id = message.id
 
-  if (!requestHandler) {
-    send({ type: 'response-error', id, error: 'Request event is not defined' })
+  // A JJ request is identified by its body, not by a separate event name: the
+  // parent sends `{ requestKey, capability, providerId, payload }` through the
+  // same `request` channel an LX source uses. Dispatch on `capability` first so
+  // that a source implementing both protocols routes correctly, and fall through
+  // to the LX handler otherwise — which is also what an LX-only source sees, so
+  // its behaviour is unchanged.
+  const payload = message.payload as { capability?: unknown } | undefined
+  const isCapabilityRequest =
+    capabilityHandler !== undefined && typeof payload?.capability === 'string'
+
+  const handler = isCapabilityRequest ? capabilityHandler : requestHandler
+
+  if (!handler) {
+    send({
+      type: 'response-error',
+      id,
+      error: isCapabilityRequest
+        ? 'Capability event is not defined'
+        : 'Request event is not defined'
+    })
     return
   }
 
   Promise.resolve()
-    .then(() => requestHandler!(message.payload))
+    .then(() => handler(message.payload))
     .then(
       (data) => send({ type: 'response', id, data }),
       (error: unknown) => send({ type: 'response-error', id, error: describeError(error) })
@@ -790,7 +912,11 @@ try {
     // initialisers a moment before declaring failure.
     setTimeout(() => {
       if (!hasInited) {
-        failInit('脚本执行完毕但没有调用 lx.send(inited, ...)')
+        failInit(
+          init!.jj
+            ? '脚本执行完毕但没有调用 jj.ready(...)'
+            : '脚本执行完毕但没有调用 lx.send(inited, ...)'
+        )
       }
     }, 3000)
   }

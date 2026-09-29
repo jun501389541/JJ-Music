@@ -29,6 +29,12 @@ export const router = createRouter({
       meta: { title: '最近播放' }
     },
     {
+      path: '/charts',
+      name: 'charts',
+      component: () => import('../views/LeaderboardView.vue'),
+      meta: { title: '榜单' }
+    },
+    {
       path: '/library',
       name: 'library',
       component: () => import('../views/LibraryView.vue'),

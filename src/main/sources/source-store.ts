@@ -36,11 +36,41 @@ interface StoredApi {
   importedAt?: string
   lastError?: string
   /**
+   * Stable identity of this source, minted once and never changed afterwards.
+   *
+   * `id` is *nearly* stable but not quite: `upsert` matches an existing record
+   * by `name`, so a user who re-imports a script after the author renamed it
+   * gets a brand-new `id`. Anything keyed by `id` — most importantly the
+   * `providerId` stamped onto every track the script produces — would then
+   * point at a record that no longer exists, and the user's whole library would
+   * come back as "source missing".
+   *
+   * This key survives a rename, so `id` can be re-derived from it instead of
+   * being replaced. Separately named rather than reusing `id` so that the two
+   * concerns stay distinguishable: `id` may still be corrected, `stableId` is
+   * the anchor that makes such a correction safe.
+   */
+  stableId?: string
+  /**
    * Set when the source was disabled for unsafe behaviour (see
    * `SourceStore.quarantine`). Persisted so a restart cannot re-arm it and
    * `setEnabled(true)` refuses until the user clears it.
    */
   quarantined?: boolean
+  /**
+   * The script this record replaced, kept so an update can be undone.
+   *
+   * Stored in the same `gz_` encoding as `script`. Only one generation is kept:
+   * the point is to recover from an update that broke a working source, and a
+   * deeper history would multiply the file size (a real 音源 is ~740 KB) to
+   * solve a problem nobody has — a user who wants an older version can still
+   * import one manually.
+   *
+   * LX ignores these keys, exactly like the other extensions above.
+   */
+  previousScript?: string
+  /** Version string of `previousScript`, so the rollback entry can be labelled. */
+  previousVersion?: string
 }
 
 interface StoredFile {
@@ -121,14 +151,122 @@ export class SourceStore {
     return metas[0]!
   }
 
+  /**
+   * Replace an existing source's script, keeping its identity.
+   *
+   * ## Why this is not just `import()`
+   *
+   * `import()` takes raw text with no identity attached, so `upsert` falls back
+   * to matching by *name*. That is correct for a file the user dragged in, but
+   * wrong for an update: the incoming script is a new version of a known
+   * record, and if the author also renamed it in the same release, matching by
+   * name would mint a fresh `id` and orphan every track stamped with the old
+   * one.
+   *
+   * Passing `stableId` routes through the identity-first branch, so the record
+   * is updated in place. The previous script is retained on the record (see
+   * `previousScript`) so the update can be undone.
+   *
+   * Returns `undefined` when no record carries that id, rather than silently
+   * creating one — an update to a source the user has since removed is not a
+   * reason to reinstall it.
+   */
+  replaceScript(
+    id: string,
+    script: string,
+    fallbackName: string
+  ): UserApiMeta | undefined {
+    const existing = this.apis.find((api) => api.id === id || api.stableId === id)
+    if (!existing) return undefined
+
+    const header = describeScript(script, fallbackName)
+    /*
+     * A fetch that returned the *current* text is not an update, and writing it
+     * would overwrite `previousScript` with the very version being kept as the
+     * fallback — losing the ability to roll back for no gain. Comparing here
+     * catches that regardless of what the version strings said.
+     */
+    const currentScript = decodeScript(existing.script)
+    if (currentScript === script) return toMeta(existing)
+
+    const record: StoredApi = {
+      ...existing,
+      name: header.name,
+      description: header.description,
+      version: header.version,
+      author: header.author,
+      homepage: header.homepage,
+      script: encodeScript(script),
+      previousScript: existing.script,
+      previousVersion: existing.version ?? '',
+      importedAt: new Date().toISOString()
+    }
+    const index = this.apis.findIndex((api) => api.id === existing.id)
+    this.apis[index] = record
+    this.persist()
+    return toMeta(record)
+  }
+
+  /**
+   * Undo the most recent update, restoring the retained script.
+   *
+   * Returns `false` when there is nothing to restore. The restored script
+   * becomes the current one and the *replaced* script is kept as the new
+   * `previousScript`, so a rollback is itself reversible — a user who rolls
+   * back by mistake can get the update again without re-downloading it.
+   */
+  rollback(id: string): boolean {
+    const existing = this.apis.find((api) => api.id === id || api.stableId === id)
+    if (!existing?.previousScript) return false
+
+    const restored = decodeScript(existing.previousScript)
+    const header = describeScript(restored, existing.name)
+    const index = this.apis.findIndex((api) => api.id === existing.id)
+    this.apis[index] = {
+      ...existing,
+      name: header.name,
+      description: header.description,
+      version: header.version,
+      author: header.author,
+      homepage: header.homepage,
+      script: existing.previousScript,
+      // Swap, rather than clear: see above.
+      previousScript: existing.script,
+      previousVersion: existing.version ?? '',
+      importedAt: new Date().toISOString()
+    }
+    this.persist()
+    return true
+  }
+
+  /** The stored record for an id, including fields `UserApiMeta` does not expose. */
+  raw(id: string): { previousScript?: string; previousVersion?: string } | undefined {
+    return this.apis.find((api) => api.id === id || api.stableId === id)
+  }
+
   /** Insert or replace by id, keeping the existing id when overwriting. */
-  private upsert(entry: { source: string; name: string }): UserApiMeta {
+  private upsert(entry: { source: string; name: string; stableId?: string }): UserApiMeta {
     const header = describeScript(entry.source, entry.name)
-    const existing = this.apis.find((api) => api.name === header.name)
+
+    // Match the incoming script to an existing record by *identity* first and
+    // by name second. Matching on name alone means a rename (the author's, or
+    // the user's) silently mints a new id, which orphans every track already
+    // stamped with the old one.
+    //
+    // `entry.stableId` is present when the caller is re-importing a record it
+    // read from this store (an LX file we exported, or our own update flow).
+    // Falling back to the name keeps the old behaviour for plain `.js` files
+    // that carry no identity at all.
+    const existing =
+      (entry.stableId ? this.apis.find((api) => api.stableId === entry.stableId) : undefined) ??
+      this.apis.find((api) => api.name === header.name)
+
+    const stableId = existing?.stableId ?? entry.stableId ?? newStableId()
     const id = existing?.id ?? `user_api_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
     const record: StoredApi = {
       id,
+      stableId,
       name: header.name,
       description: header.description,
       version: header.version,
@@ -236,6 +374,7 @@ export class SourceStore {
 function toMeta(api: StoredApi): UserApiMeta {
   return {
     id: api.id,
+    stableId: api.stableId ?? api.id,
     name: api.name,
     description: api.description ?? '',
     version: api.version ?? '',
@@ -247,6 +386,10 @@ function toMeta(api: StoredApi): UserApiMeta {
     importedAt: api.importedAt ?? '',
     ...(api.lastError ? { lastError: api.lastError } : {}),
     ...(api.quarantined ? { quarantined: true } : {}),
+    // Present only after an update, so the UI can offer to undo it.
+    ...(api.previousScript
+      ? { canRollback: true, rollbackVersion: api.previousVersion ?? '' }
+      : {}),
     // Assessed on the fly for entries stored before risk rating existed, so an
     // already-imported library still gets a rating without a re-import.
     ...riskFor(api.script)
@@ -311,9 +454,9 @@ function isStoredApi(value: unknown): value is StoredApi {
 export function parseImportPayload(
   payload: string,
   fallbackName: string
-): Array<{ source: string; name: string }> {
+): Array<{ source: string; name: string; stableId?: string }> {
   const trimmed = payload.trim()
-  const out: Array<{ source: string; name: string }> = []
+  const out: Array<{ source: string; name: string; stableId?: string }> = []
 
   // Blank input is not a script; returning nothing lets the caller report a
   // clear error instead of storing an unusable empty source.
@@ -335,7 +478,16 @@ export function parseImportPayload(
             if (source) out.push({ source, name: fallbackName })
           } else if (isStoredApi(item)) {
             const source = decodeScript(item.script).trim()
-            if (source) out.push({ source, name: item.name || fallbackName })
+            if (source) {
+              // Carry the identity through when the file has one, so that
+              // re-importing our own export (or an LX file we previously
+              // wrote) restores the same source rather than replacing it.
+              out.push({
+                source,
+                name: item.name || fallbackName,
+                ...(item.stableId ? { stableId: item.stableId } : {})
+              })
+            }
           }
         }
         return out
@@ -349,4 +501,17 @@ export function parseImportPayload(
   const source = isEncodedScript(trimmed) ? decodeScript(trimmed).trim() : trimmed
   if (source) out.push({ source, name: fallbackName })
   return out
+}
+
+/**
+ * Mint a stable identity for a newly imported source.
+ *
+ * Deliberately not derived from the script text, the name, or the import
+ * time: a content hash would change the identity whenever the author fixes a
+ * typo (defeating the point), and a timestamp would collide for sources
+ * imported in the same millisecond. This is an opaque anchor, and the only
+ * requirement on it is that it never changes once written.
+ */
+function newStableId(): string {
+  return `src_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
 }

@@ -52,6 +52,123 @@ export const ONLINE_SOURCE_IDS: readonly string[] = LX_SOURCE_IDS.filter((id) =>
  */
 export const LX_ACTIONS = ['musicUrl', 'lyric', 'pic'] as const
 
+/* ------------------------------------------------------------------ *
+ * jj-source: the versioned capability protocol
+ * ------------------------------------------------------------------ */
+
+/**
+ * Version of the `jj-source` capability protocol.
+ *
+ * This is deliberately a *separate* constant from
+ * `CUSTOM_SOURCE_API_VERSION` (`src/main/sources/source-engine.ts`), which is
+ * what scripts see as `lx.version` and must keep reporting `2.0.0`. The two
+ * numbers answer different questions and must never be conflated:
+ *
+ *   - `lx.version` = "which LX custom-source API do you speak?" A script reads
+ *     it to decide whether the host will understand it. Reporting anything but
+ *     `2.0.0` there makes every existing LX 音源 refuse to initialise, so the
+ *     `jj-source` capability set below does NOT get to bump it. A script that
+ *     only implements `musicUrl`/`lyric`/`pic` stays fully functional and
+ *     unaware that any of this exists.
+ *   - `jj.version` = "which capability protocol does this script implement?"
+ *     Opt-in, negotiated independently, and free to evolve without touching the
+ *     LX surface. A script that implements none of it simply never advertises
+ *     the field, which is why this is `1.0.0` and not a continuation of LX's
+ *     numbering.
+ *
+ * Bumping this number is what makes a breaking wire change legible; without it
+ * the only version a script could negotiate on would be the LX one, and every
+ * new capability would be an implicit LX API change.
+ */
+export const JJ_SOURCE_API_VERSION = '1.0.0'
+
+/**
+ * The capabilities a `jj-source` script may declare.
+ *
+ * ## Why this is not `LX_ACTIONS`
+ *
+ * `LX_ACTIONS` is the set of methods LX's host will ever *call back into* a
+ * script for, and it is fixed by upstream LX: `musicUrl`, `lyric`, `pic`. LX
+ * never asks a script to search, never asks it for hot words, and never asks it
+ * for a playlist or a leaderboard — the host does all of that with its own
+ * built-in platform requests. That is precisely the split this protocol
+ * removes.
+ *
+ * Names are therefore chosen to be *disjoint* from the LX action names rather
+ * than overlapping and subtly re-scoped. The legacy `lyric`/`pic` names are
+ * singular and LX-defined (`tx.lyric`, `wy.pic`); the capability names below
+ * are plural/verb-led (`getLyric`, `getPic`) so that a stray reference to the
+ * wrong constant is a compile error rather than a silent behavioural change.
+ * Concretely, the failure mode being designed out is: some adapter keeps
+ * calling `supports(source, 'pic')` — which is still a valid `SourceAction` —
+ * and silently keeps talking to the built-in platform request, because the new
+ * capability name happened to be spelled the same way.
+ *
+ * ## What each one covers
+ *
+ * - `searchTracks`       — 关键词 → 曲目分页。The host still owns aggregation across
+ *   sources, caching and cancellation; a script only answers for its own
+ *   platform, exactly as `src/main/online/search.ts` does today per platform.
+ * - `getMusicUrl`        — 曲目 → 播放地址。Kept on the LX `musicUrl` action for
+ *   existing scripts; a `jj-source` script may declare it here to opt into the
+ *   new request envelope for the same job.
+ * - `getLyric`           — 曲目 → LRC/纯文本歌词。Supersedes the LX `lyric` action for
+ *   scripts that opt in; a script may implement both during migration.
+ * - `getPic`             — 曲目 → 封面 URL。Supersedes the LX `pic` action likewise.
+ * - `getPlaylist`        — 歌单链接/ID → 歌单头（名称、封面、曲目总数）。The header and
+ *   its tracks are separate capabilities because the import preview renders the
+ *   header before the user commits to loading pages.
+ * - `getPlaylistTracks`  — 歌单 ID + 分页 → 曲目分页。Split from `getPlaylist` so a
+ *   script that can only list a playlist still renders something instead of
+ *   failing the whole import.
+ * - `getLeaderboard`     — 榜单列表。Source-scoped boards for the 榜单 page.
+ * - `getLeaderboardTracks` — 榜单 ID + 分页 → 曲目分页。首版只做浏览，不做订阅与
+ *   定时同步 (Plan §2.3), so this capability is read-only by contract.
+ * - `getHotWords`        — 平台 → 热搜词。Only the request moves to the script; the
+ *   per-day cache policy stays in the host, because a script cannot be trusted
+ *   to be a cache and would re-fetch on every UI mount.
+ * - `getArtistImage`     — 艺术家名/ID → 头像 URL。Optional per Requirement §4;
+ *   capability-driven so the UI can hide the feature when nobody implements it.
+ * - `matchMetadata`      — 本地文件信息 → 归一化在线曲目。This is the host's existing
+ *   library 匹配 flow (`src/main/library/metadata-match.ts`) turned into a
+ *   capability, so matching quality is versioned with the source rather than
+ *   with the app release.
+ */
+export const JJ_CAPABILITIES = [
+  'searchTracks',
+  'getMusicUrl',
+  'getLyric',
+  'getPic',
+  'getPlaylist',
+  'getPlaylistTracks',
+  'getLeaderboard',
+  'getLeaderboardTracks',
+  'getHotWords',
+  'getArtistImage',
+  'matchMetadata'
+] as const
+
+/** One capability of the `jj-source` protocol. */
+export type JjCapability = (typeof JJ_CAPABILITIES)[number]
+
+/**
+ * Capabilities whose legacy LX action must also stay working.
+ *
+ * A script that declares `getMusicUrl`/`getLyric`/`getPic` here still gets those
+ * three called through the existing LX path for any track that has no
+ * `providerId` — see the migration note on `OnlineMusicInfo.providerId`. This
+ * map exists so the runtime can assert the pairing in one place instead of
+ * hard-coding the correspondence at each call site.
+ */
+export const JJ_LEGACY_COMPATIBLE_CAPABILITIES: Partial<Record<JjCapability, SourceAction>> = {
+  getMusicUrl: 'musicUrl',
+  getLyric: 'lyric',
+  getPic: 'pic'
+}
+
+/** Capabilities the plan fixed as read-only for the first release (§2.3). */
+export const JJ_READ_ONLY_CAPABILITIES: readonly JjCapability[] = ['getLeaderboard', 'getPlaylist']
+
 export const QUALITY_ORDER: Quality[] = [
   '128k',
   '320k',
@@ -105,6 +222,17 @@ export interface SourceInfo {
 export interface UserApiMeta {
   /** Stable id assigned by us, e.g. `user_api_1`. */
   id: string
+  /**
+   * Identity that survives a rename. Defaults to `id` for records written
+   * before this key existed.
+   *
+   * This is what `OnlineMusicInfo.providerId` is stamped from, because `id` is
+   * only stable while the script's name is: `SourceStore.upsert` matches an
+   * existing record by name, so a source that gets renamed on re-import would
+   * otherwise mint a new id and orphan every track already carrying the old
+   * one. See `source-store.ts`.
+   */
+  stableId: string
   /** `@name` from the script header, or the file name. */
   name: string
   description: string
@@ -141,6 +269,72 @@ export interface UserApiMeta {
   risk?: 'low' | 'medium' | 'high'
   /** Why the script was rated as it was. */
   riskNotes?: string[]
+  /**
+   * Set when an update replaced this script and the previous text is still on
+   * disk, so the settings page can offer to undo it.
+   *
+   * Only present after an update — a freshly imported source has nothing to
+   * roll back to. See `SourceStore.replaceScript`.
+   */
+  canRollback?: boolean
+  /** Version of the retained script, for labelling the rollback action. */
+  rollbackVersion?: string
+}
+
+/**
+ * Why an update check ended without offering an update.
+ *
+ * Every one of these is an ordinary outcome the UI must be able to explain, so
+ * they are returned rather than thrown — see `src/main/sources/source-updater.ts`.
+ */
+export type UpdateCheckFailure =
+  | 'noHomepage'
+  | 'notAUrl'
+  | 'blocked'
+  | 'empty'
+  | 'notAScript'
+  | 'notNewer'
+  | 'sameVersion'
+
+/**
+ * A script that is newer than the installed one, ready for the user to accept.
+ *
+ * Nothing is written until `sourcesUpdateApply` is called with `script`, so the
+ * user approves the exact text reported here.
+ */
+export interface UpdatePlan {
+  /** Version installed now, from the stored script's header. */
+  currentVersion: string
+  /** Version the fetched script advertises. */
+  nextVersion: string
+  /** The fetched script text, to be passed back when applying. */
+  script: string
+  /**
+   * `sha256:<hex>` of the downloaded bytes.
+   *
+   * This confirms the transfer is intact and that the bytes applied are the
+   * bytes shown. It does **not** establish who published them: `@homepage` is
+   * not authenticated and there is no publisher identity to check against.
+   */
+  sha256: string
+  /** Size of the downloaded script. */
+  bytes: number
+  /** URL the script was fetched from. */
+  url: string
+  /** Risk rating of the incoming script, to compare against the installed one. */
+  risk: { risk: 'low' | 'medium' | 'high'; notes: string[] }
+}
+
+/** Result of asking whether a newer script exists for one source. */
+export interface UpdateCheckResult {
+  /** True only when `plan` is present. */
+  ok: boolean
+  /** Machine-readable reason when `ok` is false. */
+  reason?: UpdateCheckFailure
+  /** User-facing explanation, including what to do next. */
+  message?: string
+  /** The update on offer; present only when `ok` is true. */
+  plan?: UpdatePlan
 }
 
 /* ------------------------------------------------------------------ *
@@ -161,13 +355,65 @@ export interface UserApiMeta {
  *   kw -> songmid | kg -> hash | tx -> songmid | wy -> songmid | mg -> copyrightId
  */
 export interface OnlineMusicInfo {
-  /** `${source}_${songmid}` — our app-wide unique key. */
+  /**
+   * `${source}_${songmid}` — our app-wide unique key.
+   *
+   * The format must not change. Saved playlists, download records and the
+   * local library's online-match cache all key off this string, so a reformat
+   * orphans every stored row at once. `providerId` below is the field that
+   * carries the new information instead.
+   */
   id: string
   /** Track title. */
   name: string
   /** Artist(s), `、` separated. */
   singer: string
   source: SourceId
+  /**
+   * The `jj-source` source instance that produced this row.
+   *
+   * ## Why a platform id is not enough
+   *
+   * `source` (`kw`/`tx`/`wy`/…) names the *platform*, not the script. A user may
+   * have two scripts installed that both advertise `kw` — say one local mirror
+   * and one upstream — and their track ids and signing parameters are not
+   * interchangeable. Without this field the app can only route by platform, so
+   * search results from script A get played through script B, and playback
+   * fails with a "no URL" error that looks like a broken script. Carrying the
+   * producing instance's id end to end is what makes "播放、歌词、封面优先回到产生该曲目的
+   * 同一音源" implementable at all.
+   *
+   * ## Migration semantics — this field is OPTIONAL and must stay so
+   *
+   * Every track stored before this protocol existed has no `providerId` and
+   * never will. Those rows must remain fully playable, so consumers MUST treat
+   * the field as "unknown provenance", never as "corrupt":
+   *
+   *   - `undefined` → fall back to the LX compatibility path: route by `source`
+   *     to the single enabled script advertising that platform (the pre-E4
+   *     behaviour). If several advertise it, that is ambiguous and the host must
+   *     say so rather than pick one — silently picking is exactly the bug this
+   *     field exists to prevent.
+   *   - a value → route to that instance. If it is no longer installed or
+   *     enabled, fail with a recoverable "音源缺失" prompt naming it, and offer
+   *     the host's cross-platform re-match. Do NOT silently substitute another
+   *     script for the same platform, and do not drop the row.
+   *
+   * Written as `string` rather than a branded type on purpose: this round-trips
+   * through JSON with unknown-key tolerance (see `providerData`), so a brand
+   * would either lie about validation or force a cast at every read.
+   */
+  providerId?: string
+  /**
+   * Bounded, opaque extras the producing script attached to this row.
+   *
+   * Kept separate from `meta` because `meta` is the LX script-facing shape
+   * (`songmid`, `hash`, `copyrightId`, …) that third-party scripts read
+   * directly; mixing new fields into it risks colliding with a platform key. The
+   * size cap is enforced by `jj-source-protocol.ts` when the payload crosses
+   * the process boundary.
+   */
+  providerData?: Record<string, unknown>
   /** `mm:ss`. */
   interval?: string
   /** Album name, when known. */
@@ -199,6 +445,135 @@ export interface OnlineMusicInfo {
     strMediaMid?: string
     qualitys?: Array<{ type: string; size?: string }>
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * jj-source request / response DTOs
+ *
+ * Every payload below crosses the source-script boundary, so it must be
+ * runtime-validated before use (`src/main/sources/jj-source-protocol.ts`) —
+ * these types describe the *accepted* shape, not a guarantee about what a
+ * third-party script actually sent.
+ * ------------------------------------------------------------------ */
+
+/**
+ * A page of tracks, in the shape every paged capability returns.
+ *
+ * `total` is what the platform claims, which is routinely wrong or absent;
+ * `hasMore` is the script's own answer and is what pagination must follow,
+ * because some platforms return a full page for the last page too and a
+ * `total`-derived loop then never terminates.
+ */
+export interface JjTrackPage {
+  list: OnlineMusicInfo[]
+  /** 1-based page number that was served. */
+  page: number
+  /** Platform-reported total, when known. */
+  total?: number
+  /** Whether another page exists. Absent is treated as `false` by the host. */
+  hasMore?: boolean
+  /**
+   * Rows the host discarded during validation, with the reason for each.
+   *
+   * A page is not failed by one malformed row: showing 19 of 20 results beats
+   * an error screen. But silently dropping the twentieth is how a script bug
+   * becomes invisible, so the discards ride along with the successful result
+   * and the caller logs them. Never persisted — this is diagnostic metadata
+   * about one response, not part of the track data.
+   */
+  droppedIssues?: Array<{ path: string; reason: string }>
+}
+
+/**
+ * One leaderboard (榜单) as the source describes it.
+ *
+ * Ids are source-scoped: `${providerId}:${boardId}` is how the UI keys the
+ * list, because two scripts may both name a board `top500`.
+ */
+export interface JjLeaderboard {
+  id: string
+  name: string
+  /** Cover art for the board itself, when the platform has one. */
+  coverUrl?: string
+  /** How often the platform refreshes it, for display only. */
+  updateFrequency?: string
+}
+
+/**
+ * One playlist (歌单), before its tracks are paged in.
+ *
+ * Kept separate from `JjTrackPage` so the import preview can render name/cover/
+ * count without paying for the first page of tracks — the existing
+ * `playlist-import.ts` flow already splits those two steps.
+ */
+export interface JjPlaylist {
+  /** Source-scoped playlist id. */
+  id: string
+  name: string
+  coverUrl?: string
+  /** Track count the platform reports, when known. */
+  total?: number
+  /** Who published it, for the preview header. */
+  creator?: string
+}
+
+/** Request envelope shared by every capability call. */
+export interface JjRequest<C extends JjCapability = JjCapability> {
+  /** Bumped per-script, used to correlate and to cancel. */
+  requestKey: string
+  capability: C
+  /** Capability-specific arguments; validated per capability. */
+  payload: Record<string, unknown>
+  /** Correlates the reply; the host rejects a mismatched echo. */
+  providerId: string
+}
+
+/**
+ * Error codes a `jj-source` script may return.
+ *
+ * Distinct from a thrown exception: `notSupported` is the script saying "I do
+ * not implement this", which the UI must render as a missing capability rather
+ * than as a failure — conflating the two is how a user ends up told "平台无内容"
+ * when the real cause is an unimplemented method (Requirement §4).
+ */
+export type JjErrorCode =
+  | 'notSupported'
+  | 'invalidRequest'
+  | 'notFound'
+  | 'network'
+  | 'timeout'
+  | 'rateLimited'
+  | 'authRequired'
+  | 'internal'
+
+/** Normalised failure returned by a capability call. */
+export interface JjError {
+  code: JjErrorCode
+  /** User-facing message from the script, already truncated by the validator. */
+  message: string
+  /** Whether retrying the same request could plausibly succeed. */
+  retryable?: boolean
+}
+
+/**
+ * Result envelope. A discriminated union rather than `{ data?, error? }` so
+ * that "success with no data" and "failure" cannot be confused at a call site.
+ */
+export type JjResult<T> = { ok: true; data: T } | { ok: false; error: JjError }
+
+/**
+ * Capability declaration a script reports at init.
+ *
+ * Mirrors the LX `inited` event's `sources` array, but carries the protocol
+ * version and the capability list. A script that omits `jj` is a plain LX
+ * script and is handled entirely by the legacy path.
+ */
+export interface JjProviderInfo {
+  /** Protocol version the script implements, e.g. `1.0.0`. */
+  version: string
+  capabilities: JjCapability[]
+  /** Platform ids this instance serves, for the ambiguous-`source` case. */
+  sources: SourceId[]
 }
 
 /** A track on disk. */
@@ -582,6 +957,32 @@ export interface AppSettings extends UiPreferences {
   onlineLyricSource: OnlineLyricSource
   /** When the preferred source comes back empty, try the remaining ones in order. */
   onlineLyricFallback: boolean
+  /**
+   * Whether search and hot words may go to this app's own platform adapters.
+   *
+   * ## Why this exists
+   *
+   * `src/main/online/search.ts` has described its adapters as "optional and
+   * user-enabled" since it was written, but no such setting was ever added: the
+   * adapters in `search.ts` (`PROVIDERS`) and `hot-words.ts` (`ADAPTERS`) ran
+   * unconditionally, so a fresh install with no 音源 imported still queried five
+   * music platforms. That is the behaviour the capability protocol exists to
+   * remove — search is supposed to be answered by a source the user installed.
+   *
+   * Defaults to `false`, and that default is the whole point: the built-in path
+   * must never be reachable without the user asking for it. A fallback that turns
+   * itself on is indistinguishable from no gate at all.
+   *
+   * ## Why it was kept rather than deleted
+   *
+   * Removing the adapters would be irreversible and would leave the search page
+   * permanently empty on a machine with no source installed, including for a user
+   * who has no intention of importing one. Keeping them behind an explicit switch
+   * satisfies "off by default, no silent fallback" without taking the capability
+   * away. The two paths are never merged: a request goes to a 音源 **or** to an
+   * adapter, never to an adapter because a 音源 failed.
+   */
+  allowBuiltinOnlineSearch: boolean
   /** Download folder for online tracks. */
   downloadFolder: string
   downloadLyric: boolean
@@ -735,4 +1136,54 @@ export interface ImportedPlaylist {
   tracks: OnlineMusicInfo[]
   total: number
   warnings: string[]
+}
+
+/**
+ * Which of the two implementations answered a playlist/leaderboard request.
+ *
+ * Lives in shared types rather than beside the router because the renderer and
+ * the preload bridge both need it, and `@main/*` is only an alias in the main
+ * process's tsconfig — a preload import through it does not resolve.
+ */
+export type LibraryRouteServedBy = 'provider' | 'builtin' | 'none'
+
+/** Why a playlist/leaderboard request came back with nothing. */
+export type LibraryUnavailableReason =
+  /** No running source declares the capability, and the built-in adapters are off. */
+  | 'noProvider'
+  /** A source declares it, but the request itself failed. */
+  | 'providerFailed'
+  /** The user switched the built-in adapters on and nothing answered. */
+  | 'builtinFailed'
+
+/** One leaderboard, as the router hands it to the UI. */
+export interface RoutedLeaderboard {
+  id: string
+  name: string
+  coverUrl?: string
+  updateFrequency?: string
+  /** Which source instance published it; two scripts may both name a board `top500`. */
+  providerId: string
+  /** The platform this board belongs to, for display and track routing. */
+  source: SourceId
+}
+
+export interface RoutedLeaderboards {
+  list: RoutedLeaderboard[]
+  servedBy: LibraryRouteServedBy
+  reason?: LibraryUnavailableReason
+  message?: string
+  /** Providers that errored but did not sink the whole list. */
+  failed?: Array<{ providerId: string; name: string; error: string }>
+}
+
+export interface RoutedTrackPage {
+  list: OnlineMusicInfo[]
+  page: number
+  total?: number
+  hasMore?: boolean
+  servedBy: LibraryRouteServedBy
+  providerId?: string
+  reason?: LibraryUnavailableReason
+  message?: string
 }

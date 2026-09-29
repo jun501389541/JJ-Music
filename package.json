@@ -17,8 +17,9 @@
     "test": "node tools/run-tests.mjs",
     "test:online": "node tools/run-tests.mjs --online",
     "test:e2e": "node tools/run-e2e.mjs",
+    "check:gate": "node tools/check-builtin-gate.mjs",
     "diagnose": "node tools/diagnose-online.mjs",
-    "verify": "npm run typecheck && npm run build && npm run test",
+    "verify": "npm run typecheck && npm run build && npm run test && npm run check:gate",
     "verify:all": "npm run verify && npm run test:e2e",
     "icon": "node tools/make-icon.mjs",
     "pack": "node tools/package.mjs --dir",
@@ -30,6 +31,7 @@
     "iconv-lite": "^0.7.3",
     "music-metadata": "^11.9.0",
     "node-id3": "^0.2.9",
+    "undici": "^6.28.1",
     "yaml": "2.8.1"
   },
   "devDependencies": {

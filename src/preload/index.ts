@@ -27,6 +27,9 @@ import type {
   SourceId,
   SourceInfo,
   PlatformProbeResult,
+  RoutedLeaderboards,
+  RoutedTrackPage,
+  UpdateCheckResult,
   UserApiMeta
 } from '@shared/types'
 import type { ChosenLyric, LyricCandidate, AssetExportResult, MatchApplyOptions, MatchCandidate, ResolvedLyric, TagPatch } from '@shared/library-types'
@@ -208,6 +211,20 @@ const api = {
     available: () => invoke<SourceInfo[]>(IPC.sourcesAvailable),
     verifyPlatform: (id: SourceId) => invoke<PlatformProbeResult>(IPC.sourcesVerifyPlatform, id),
     logs: (id: string) => invoke<string[]>(IPC.sourcesLogs, id),
+    /**
+     * Update checking (E6).
+     *
+     * `check` only reports — it fetches the script at the source's `@homepage`
+     * and compares versions. `apply` is what actually replaces anything, and it
+     * takes the script text the user was shown so the approved bytes are the
+     * bytes written. `rollback` restores the script the last update replaced.
+     */
+    updates: {
+      check: (id: string) => invoke<UpdateCheckResult>(IPC.sourcesUpdateCheck, id),
+      apply: (id: string, script: string) =>
+        invoke<UserApiMeta>(IPC.sourcesUpdateApply, id, script),
+      rollback: (id: string) => invoke<UserApiMeta | null>(IPC.sourcesUpdateRollback, id)
+    },
     /** Subscribe to source-list changes; returns an unsubscribe function. */
     onChanged: (handler: () => void) => {
       const listener = (): void => handler()
@@ -326,6 +343,13 @@ const api = {
         IPC.playlistBackfillQualitys,
         id
       )
+  },
+
+  leaderboards: {
+    /** Boards the running sources publish; an empty list carries the reason nobody could serve it. */
+    list: (source?: SourceId) => invoke<RoutedLeaderboards>(IPC.leaderboardList, source),
+    tracks: (providerId: string, boardId: string, page?: number) =>
+      invoke<RoutedTrackPage>(IPC.leaderboardTracks, providerId, boardId, page)
   },
 
   lyric: {

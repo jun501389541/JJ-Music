@@ -21,6 +21,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
+  // Mirrors the main process: the built-in platform adapters are off until the
+  // user turns them on. Getting this wrong here would render the switch as on
+  // for the first frame, before `settings.get()` resolves.
+  allowBuiltinOnlineSearch: false,
   downloadFolder: '',
   downloadLyric: true,
   downloadEmbedLyric: true,

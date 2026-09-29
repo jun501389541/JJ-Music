@@ -190,7 +190,7 @@ function buildPatch(
  */
 export async function matchMetadata(
   local: LocalMusicInfo,
-  options: MatchOptions & { signal?: AbortSignal } = {}
+  options: MatchOptions & { signal?: AbortSignal; search?: (source: SourceId, keyword: string, signal?: AbortSignal) => Promise<OnlineMusicInfo[]> } = {}
 ): Promise<MatchCandidate[]> {
   const limit = options.limit ?? 8
   const overwrite = options.overwrite ?? false
@@ -201,11 +201,23 @@ export async function matchMetadata(
   const query = [local.name, local.singer].filter(Boolean).join(' ').trim()
   if (!query) return []
 
+  /*
+   * The search is injected rather than imported directly.
+   *
+   * This used to call `searchOnline` from `online/search.ts` unconditionally, which
+   * made local metadata matching a fourth ungated caller of this app's built-in
+   * platform adapters — the others being the search page, hot words and the
+   * platform probe. Passing a `search` in lets `index.ts` route it through
+   * `SearchRouter`, so the "no built-in request while the gate is off" rule holds
+   * for every path instead of the two that happened to be looked at first.
+   *
+   * The default keeps the old behaviour for callers that pass nothing, which is
+   * what the offline test suite does.
+   */
+  const search = options.search ?? (async (source, keyword, signal) => (await searchOnline(source, keyword, 1, signal)).list)
+
   const settled = await Promise.allSettled(
-    sources.map(async (source) => {
-      const page = await searchOnline(source, query, 1, options.signal)
-      return page.list
-    })
+    sources.map(async (source) => search(source, query, options.signal))
   )
 
   const candidates: MatchCandidate[] = []
@@ -238,8 +250,21 @@ export async function matchMetadata(
 /**
  * Fetch lyrics for a match, to be written alongside the tags.
  * Kept separate so the UI can request it only for the candidate the user picks.
+ *
+ * `fetchLyric` is injected for the same reason `matchMetadata` injects `search`:
+ * left to its own default this is another path that issues a built-in platform
+ * request on an install where the user has switched them off. The lyric being
+ * asked for belongs to a candidate that a *gated* search returned, so with the
+ * gate off that candidate cannot have come from a built-in platform in the first
+ * place — there is nothing honest to fetch.
+ *
+ * The default keeps the old behaviour for callers that pass nothing, which is
+ * what the offline test suite does.
  */
-export async function lyricsForMatch(music: OnlineMusicInfo): Promise<string> {
-  const result = await fetchOnlineLyric(music)
+export async function lyricsForMatch(
+  music: OnlineMusicInfo,
+  fetchLyric: typeof fetchOnlineLyric = fetchOnlineLyric
+): Promise<string> {
+  const result = await fetchLyric(music)
   return result.lyric ?? ''
 }

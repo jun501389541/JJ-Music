@@ -98,6 +98,18 @@ export const IPC = {
   sourcesVerifyPlatform: 'sources:verify-platform',
   sourcesLogs: 'sources:logs',
   sourcesChanged: 'sources:changed',
+  /*
+   * Update checking (E6).
+   *
+   * `check` never installs anything: it fetches the script at the source's
+   * `@homepage`, compares versions, and reports what it found so the renderer
+   * can show the user before anything is replaced. Applying is a separate,
+   * explicitly confirmed call.
+   */
+  sourcesUpdateCheck: 'sources:update-check',
+  sourcesUpdateApply: 'sources:update-apply',
+  /** Restore the script retained by the most recent update. */
+  sourcesUpdateRollback: 'sources:update-rollback',
 
   // Online music
   musicSearch: 'music:search',
@@ -152,6 +164,12 @@ export const IPC = {
    * without re-fetching the whole list.
    */
   playlistBackfillQualitys: 'playlist:backfill-qualitys',
+
+  // Leaderboards (榜单) — browse only; §2.3 rules out subscriptions and polling.
+  /** Boards the running sources publish. Empty list with a reason when nobody does. */
+  leaderboardList: 'leaderboard:list',
+  /** One board's tracks, paged. */
+  leaderboardTracks: 'leaderboard:tracks',
 
   // Lyrics
   lyricReadFile: 'lyric:read-file',

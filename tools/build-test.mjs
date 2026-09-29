@@ -26,7 +26,21 @@ const shared = {
   logLevel: 'info',
   // Node built-ins and installed packages stay external; they resolve normally
   // at runtime from node_modules.
-  external: ['electron', 'iconv-lite', 'music-metadata', 'node-id3', 'yaml', 'electron-updater'],
+  // `undici` is external for a different reason than the rest: it is not a native
+  // or Electron-only module, it is plain JavaScript that *could* be bundled — and
+  // bundling it breaks it. undici is CommonJS internally; esbuild rewrites its
+  // `require('node:assert')` into a shim that throws
+  // `Dynamic require of "node:assert" is not supported` in ESM output. Keeping it
+  // external means Node resolves the package normally at runtime, CJS and all.
+  external: [
+    'electron',
+    'iconv-lite',
+    'music-metadata',
+    'node-id3',
+    'yaml',
+    'electron-updater',
+    'undici'
+  ],
   alias: {
     '@shared': join(repoRoot, 'src', 'shared'),
     '@main': join(repoRoot, 'src', 'main')
@@ -51,6 +65,9 @@ await build({
     join(repoRoot, 'src', 'main', 'sources', 'source-validator.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'restricted-launch.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'legacy-music-info.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'jj-source-protocol.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'source-runtime-host.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'jj-provider-engine.ts'),
     join(repoRoot, 'src', 'main', 'library', 'music-library.ts'),
     join(repoRoot, 'src', 'main', 'data-location.ts'),
     join(repoRoot, 'src', 'main', 'updates', 'manifest.ts'),
@@ -64,9 +81,15 @@ await build({
   join(repoRoot, 'src', 'main', 'library', 'asset-export.ts'),
   join(repoRoot, 'src', 'main', 'library', 'pending-assets.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'library-router.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'hot-words.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'playback-router.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'source-updater.ts'),
     join(repoRoot, 'src', 'main', 'ipc-validation.ts'),
     join(repoRoot, 'src', 'main', 'online', 'lyrics.ts'),
     join(repoRoot, 'src', 'main', 'online', 'url-guard.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'pinned-dispatcher.ts'),
     join(repoRoot, 'src', 'main', 'online', 'cover-fetch.ts'),
     join(repoRoot, 'src', 'main', 'store', 'json-file.ts'),
     join(repoRoot, 'src', 'main', 'media', 'media-response.ts'),

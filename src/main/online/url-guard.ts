@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 import { readBounded } from './read-bounded'
+import { pinnedDispatcher } from './pinned-dispatcher'
 
 /**
  * Guard for URLs that originate outside the process.
@@ -16,10 +17,25 @@ import { readBounded } from './read-bounded'
  * only looks at the address it was handed. Use `safeFetchText` / `safeFetchBytes`
  * rather than pairing `assertPublicHttpUrl` with a bare `fetch`.
  *
- * What is still not covered: the hostname is resolved by the fetch itself, so a
- * DNS name that points at a private address (rebinding) gets through. Closing
- * that means pinning the resolved address, which is not expressible through
- * `fetch`.
+ * ## Address checking happens in three places, because no one place can see
+ * ## everything
+ *
+ *   1. `assertPublicHttpUrl` — the literal text of the address, for every hop.
+ *   2. `blockedIPv4` / `blockedIPv6` — an address written as a literal.
+ *   3. `pinnedDispatcher` — the address a *name* resolves to, checked at the
+ *      moment of resolution (see `pinned-dispatcher.ts`).
+ *
+ * The third one used to be missing, and this comment used to say the gap could
+ * not be closed through `fetch`. That was true of the old implementation; it is
+ * not true of undici's `Agent`, whose `connect.lookup` hook runs between
+ * resolution and connection and can refuse the address. What is checked there is
+ * the address that is about to be connected to, so there is no window between
+ * the check and the use.
+ *
+ * None of this defends against a script that calls `fetch` itself — it can
+ * (see `browser-shims.ts`'s `NETWORK_GLOBALS_POLICY`), and no check in this file
+ * could stop it. This guard covers requests the *host* makes on a script's
+ * behalf, which is a different and smaller claim.
  */
 export function assertPublicHttpUrl(raw: string | URL, allowedHosts?: string[]): URL {
   let url: URL
@@ -141,7 +157,18 @@ export async function safeFetchResponse(
   let url = assertPublicHttpUrl(raw, allowedHosts)
 
   for (let hop = 0; ; hop += 1) {
-    const response = await fetch(url, { ...init, headers: { ...headers, ...init?.headers }, redirect: 'manual', signal })
+    // `dispatcher` is how undici is told which Agent handles this request. It is a
+    // non-standard option that the WHATWG `fetch` spec does not define, so passing
+    // it is only meaningful because Node's `fetch` *is* undici. It is applied to
+    // every hop, not just the first: a redirect target is a fresh connection and
+    // would otherwise be dialled without the address check.
+    const response = await fetch(url, {
+      ...init,
+      headers: { ...headers, ...init?.headers },
+      redirect: 'manual',
+      signal,
+      dispatcher: pinnedDispatcher()
+    } as RequestInit & { dispatcher: unknown })
     const location = response.headers.get('location')
 
     if (location && REDIRECT_STATUSES.has(response.status)) {

@@ -82,6 +82,17 @@ try {
   $legacyData = Join-Path $InstallDir 'data'
   $legacyPointer = Join-Path $InstallDir 'data-location.json'
   $hasData = Test-Path -LiteralPath $legacyData
+  if ($hasData) {
+    $legacyInfo = Get-Item -LiteralPath $legacyData -Force
+    if ($legacyInfo.PSIsContainer -and
+        -not ($legacyInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        @(Get-ChildItem -LiteralPath $legacyData -Force).Count -eq 0) {
+      # The legacy installer creates this directory even when no account has
+      # ever stored shared data there. An empty regular directory has no
+      # profile ownership to guess and can be removed by the old uninstaller.
+      $hasData = $false
+    }
+  }
   $hasPointer = Test-Path -LiteralPath $legacyPointer
   if (-not $hasData -and -not $hasPointer) { exit 0 }
 

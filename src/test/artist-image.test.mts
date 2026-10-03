@@ -45,6 +45,50 @@ test('咪咕一次就够；它没命中才轮到 QQ 的歌手 mid', async () => 
   assert.deepEqual(seen.map(u => new URL(u).host), ['app.u.nf.migu.cn', 'c.y.qq.com'])
 })
 
+test('歌手头像只会查询允许的平台', async () => {
+  const seen = []
+  const http = async (input) => {
+    seen.push(String(input))
+    return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+  }
+
+  assert.equal(await resolveArtistImage('周杰伦', http, ['kg']), null)
+  assert.equal(seen.length, 1)
+  assert.match(seen[0], /kugou\.com/)
+
+  seen.length = 0
+  assert.equal(await resolveArtistImage('周杰伦', http, []), null)
+  assert.deepEqual(seen, [])
+})
+
+test('艺术家图片回退在每个请求前读取实时准入状态', async () => {
+  let admitted = true
+  const seen = []
+  const http = async url => {
+    seen.push(String(url))
+    admitted = false
+    return new Response(JSON.stringify([]))
+  }
+  const found = await resolveArtistImage('周杰伦', http, () => admitted ? ['mg', 'tx'] : [])
+  assert.equal(found, null)
+  assert.equal(seen.length, 1, '撤销咪咕准入后不得再查询 QQ')
+})
+
+test('艺术家单个平台的二段请求也会重新检查准入状态', async () => {
+  let admitted = true
+  const seen = []
+  const http = async url => {
+    seen.push(String(url))
+    admitted = false
+    return new Response(JSON.stringify({ result: { songs: [{ artists: [{ id: 6452, name: '周杰伦' }] }] } }))
+  }
+  await assert.rejects(
+    () => resolveArtistImage('周杰伦', http, () => admitted ? ['wy'] : []),
+    /source admission revoked/
+  )
+  assert.equal(seen.length, 1, '撤销网易云准入后不得继续查询艺术家详情')
+})
+
 test('咪咕的裸路径要补成完整地址，斜杠不能丢', async () => {
   const { http } = fake([['migu.cn', [{ singerList: [{ name: '周杰伦', img: '/data/oss/resource/00/5l/4k/x.webp' }] }]]])
   const found = await resolveArtistImage('周杰伦', http)
@@ -165,6 +209,26 @@ test('四家平台全都答不上时抛错，而不是把故障写成"这位歌�
     ? Promise.reject(new Error('connect timeout'))
     : new Response(JSON.stringify({ data: { song: { list: [] } } })))
   assert.equal(await resolveArtistImage('周杰伦', partly), null)
+})
+
+test('艺术家搜索返回后若准入已撤销，就不再下载头像图片', async () => {
+  let admitted = true
+  let imageRequests = 0
+  const { dir, store } = await setup({
+    allowsArtistImage: source => source ? admitted : admitted,
+    resolveArtistImage: async () => {
+      admitted = false
+      return { url: 'https://y.gtimg.cn/portrait.jpg', source: 'tx' }
+    },
+    getBytes: async () => {
+      imageRequests += 1
+      return { body: Buffer.from('jpegdata'), contentType: 'image/jpeg' }
+    }
+  })
+  await assert.rejects(() => store.image('周杰伦'), /source admission revoked/)
+  assert.equal(imageRequests, 0)
+  assert.equal(store.peek('周杰伦'), undefined, 'a revoked lookup must not be cached as a miss')
+  await rm(dir, { recursive: true, force: true })
 })
 
 test('查询失败的头像不会记成永久未命中，网络恢复后还能拿到', async () => {

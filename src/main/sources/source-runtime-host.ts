@@ -32,7 +32,7 @@
  */
 
 import { fork } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -242,6 +242,8 @@ export interface HostCallbacks {
   onExit(state: RuntimeState, info: ExitInfo): void
   /** Console output from the child, already trimmed and split. */
   onLog?(apiId: string, line: string): void
+  /** LX script authors may send a user-facing update notice during startup. */
+  onUpdateAlert?(state: RuntimeState, data: unknown): void
 }
 
 /** Message shapes the host understands over IPC. */
@@ -499,6 +501,9 @@ export class SourceRuntimeHost {
     const dir = state.scratchDir
     let logOffset = 0
     let settled = false
+    // LX specifies updateAlert at most once per script run, so the file
+    // transport has one notification to consume rather than a stream/queue.
+    let updateAlertRead = false
 
     const settleOnce = (error?: Error): void => {
       if (settled) return
@@ -518,6 +523,20 @@ export class SourceRuntimeHost {
     const poll = setInterval(() => {
       // Console output first, so an init error arrives with its context.
       drainLog()
+
+      if (!updateAlertRead) {
+        const alertPath = join(dir, 'update-alert.json')
+        try {
+          if (existsSync(alertPath)) {
+            updateAlertRead = true
+            const alert = JSON.parse(readFileSync(alertPath, 'utf8')) as { data?: unknown }
+            this.callbacks.onUpdateAlert?.(state, alert.data)
+          }
+        } catch {
+          // A partial/invalid notification is ignored; it cannot block startup.
+          updateAlertRead = true
+        }
+      }
 
       const ready = readReady(dir)
       if (ready && !settled) {
@@ -545,8 +564,6 @@ export class SourceRuntimeHost {
       for (const [id, pending] of [...state.pending]) {
         const response = readResponse(dir, id)
         if (!response) continue
-        clearTimeout(pending.timer)
-        state.pending.delete(id)
         if (!response.ok) {
           pending.reject(new Error(response.error ?? '音源请求失败'))
           continue
@@ -655,6 +672,7 @@ export class SourceRuntimeHost {
         break
       case 'update-alert':
         state.logs.push(`[update] ${JSON.stringify(message.data)}`)
+        this.callbacks.onUpdateAlert?.(state, message.data)
         break
       case 'log':
         this.pushLog(state, `[${message.level ?? 'log'}] ${message.message ?? ''}`)
@@ -662,8 +680,6 @@ export class SourceRuntimeHost {
       case 'response': {
         const pending = message.id !== undefined ? state.pending.get(message.id) : undefined
         if (!pending) return
-        clearTimeout(pending.timer)
-        state.pending.delete(message.id!)
         // Size-checked here, at the shared boundary, so both protocols inherit
         // the same ceiling — see `MAX_RESPONSE_BYTES` for why the child's own
         // memory limit does not cover this direction of travel.
@@ -682,8 +698,6 @@ export class SourceRuntimeHost {
       case 'response-error': {
         const pending = message.id !== undefined ? state.pending.get(message.id) : undefined
         if (!pending) return
-        clearTimeout(pending.timer)
-        state.pending.delete(message.id!)
         pending.reject(new Error(message.error ?? '音源请求失败'))
         break
       }
@@ -883,7 +897,16 @@ export class SourceRuntimeHost {
       }
 
       try {
-        this.send(state, id, state.sources[0]?.id ?? '', String(payload.capability ?? ''), payload)
+        const lxSource = payload.source
+        const lxAction = payload.action
+        if (typeof lxSource === 'string' && typeof lxAction === 'string' && 'info' in payload) {
+          // LX v2 sends one action request as `{ source, action, info }`. Keep
+          // that wire shape intact; the JJ capability protocol below uses the
+          // whole request object as its `info` payload.
+          this.send(state, id, lxSource, lxAction, payload.info)
+        } else {
+          this.send(state, id, state.sources[0]?.id ?? '', String(payload.capability ?? ''), payload)
+        }
       } catch (error) {
         // A dispatch failure is this request's failure, not an uncaught throw:
         // the caller awaits a result either way.

@@ -1,16 +1,25 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { ImportedPlaylist, OnlineMusicInfo, PlayableTrack, SourceId } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import TrackList from '../components/TrackList.vue'
+import AppIcon from '../components/AppIcon.vue'
 
 const source=ref<SourceId>('wy'),input=ref(''),busy=ref(false),error=ref(''),preview=ref<(ImportedPlaylist & {token:string})|null>(null)
+const providers=ref<Array<{id:SourceId;name:string}>>([]),providersLoading=ref(true),providersError=ref('')
 /** 预览列表是可编辑副本：排序与移除只改它，导入时才按这份顺序提交。 */
 const rows=ref<OnlineMusicInfo[]>([]),removed=ref<OnlineMusicInfo[]>([])
 const library=useLibraryStore(),router=useRouter(),toast=useToastStore(),ui=useUiStore()
+onMounted(async()=>{
+  try{
+    providers.value=await window.jj.playlistImport.providers()
+    if(!providers.value.some(provider=>provider.id===source.value))source.value=providers.value[0]?.id??'wy'
+  }catch(e){providersError.value=e instanceof Error?e.message:'无法读取可用平台'}
+  finally{providersLoading.value=false}
+})
 watch([source,input],()=>{preview.value=null;error.value='';rows.value=[];removed.value=[]})
 // 顺序不同也算改过：拖动不改变数量，但提交出去的歌单顺序确实和预览不一样了。
 const edited=computed(()=>{const original=preview.value?.tracks??[];return rows.value.length!==original.length||rows.value.some((track,index)=>track.id!==original[index]?.id)})
@@ -37,12 +46,15 @@ async function save():Promise<void>{if(!preview.value||!rows.value.length)return
   }catch(e){error.value=e instanceof Error?e.message:'导入失败'}finally{busy.value=false}}
 </script>
 <template><div class="view import-view">
-  <header class="view__header"><div><h1 class="view__title">导入其他平台歌单</h1><p class="view__subtitle">复制公开歌单的网页版链接或歌单 ID，读取后保存到本地歌单。</p></div></header>
-  <form class="import-form" @submit.prevent="read"><label>音乐平台<select v-model="source" class="input" :disabled="busy"><option value="wy">网易云音乐</option><option value="tx">QQ 音乐</option><option value="kg">酷狗音乐</option><option value="kw">酷我音乐</option><option value="mg">咪咕音乐</option></select></label><label>歌单链接或 ID<input v-model="input" class="input" :disabled="busy" placeholder="粘贴公开歌单链接或数字 ID"/></label><button class="btn btn--primary" :disabled="busy||!input.trim()">{{ busy?'处理中…':'读取歌单' }}</button></form>
+  <header class="view__header"><div><h1 class="view__title">导入其他平台歌单</h1><p class="view__subtitle">复制公开歌单的网页版链接或歌单 ID，读取后保存到本地歌单。目录数据由 JJ Music 请求，需要同平台的已启用音源和你的同意。</p></div></header>
+  <p v-if="providersLoading" class="note" role="status">正在读取可用平台…</p>
+  <div v-else-if="providers.length===0" class="notice"><span>当前没有已授权且可用的歌单平台。请在音源管理中启用并验证对应平台的 LX 音源；首次在线目录请求前需要同意。</span><button class="btn btn--ghost" type="button" @click="router.push('/sources')">音源管理</button></div>
+  <p v-if="providersError" class="error" role="alert">无法读取可用平台：{{ providersError }}</p>
+  <form v-if="providers.length" class="import-form" @submit.prevent="read"><label>音乐平台<select v-model="source" class="input" :disabled="busy"><option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option></select></label><label>歌单链接或 ID<input v-model="input" class="input" :disabled="busy" placeholder="粘贴公开歌单链接或数字 ID"/></label><button class="btn btn--primary" :disabled="busy||!input.trim()">{{ busy?'处理中…':'读取歌单' }}</button></form>
   <p v-if="error" class="error" role="alert">{{ error }}</p>
   <section v-if="preview" class="preview">
     <div class="preview__head">
-      <span class="preview__cover"><img v-if="preview.coverUrl" :src="preview.coverUrl" alt="" referrerpolicy="no-referrer"/></span>
+      <span class="preview__cover" aria-hidden="true"><AppIcon name="music" :size="18"/></span>
       <div class="preview__title">
         <h2>{{ preview.name }}</h2>
         <p>待导入 {{ rows.length }} 首 / 已读取 {{ preview.tracks.length }} 首 / 平台共 {{ preview.total }} 首<small>拖动行可调顺序，勾选可批量移除；私密或受限歌曲可能缺失。</small></p>
@@ -55,7 +67,7 @@ async function save():Promise<void>{if(!preview.value||!rows.value.length)return
     </div>
     <TrackList :tracks="rows" :reorderable="true" :extra-actions="importActions" :show-source="true" empty-text="待导入列表已空，点「恢复全部」找回" @reorder="reorder"/>
   </section>
-  <p class="note">导入只保存歌曲信息，不会自动下载音频；播放与下载需要启用对应平台的音源。</p>
+  <p class="note">导入只保存歌曲信息，不会自动下载音频；播放与下载由已启用的 LX 音源解析地址。LX 音源提供播放能力，JJ Music 单独请求目录数据。</p>
 </div></template>
 <style scoped>
 /* 列表要占满剩余高度：TrackList 自带的 `calc(100vh - 290px)` 是给整页只有它的歌单页用的，
@@ -71,7 +83,7 @@ async function save():Promise<void>{if(!preview.value||!rows.value.length)return
    清掉之后这一行就只剩内容本身的高度，列表因此多出一整行。 */
 .preview__title{flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px}.preview__title h2{margin:0;font-size:15px;line-height:1.3}.preview__title p{margin:0;font-size:12px;color:var(--text-secondary);display:flex;gap:10px;flex-wrap:wrap}
 .preview__title small{color:var(--text-tertiary)}
-.preview__cover{width:40px;height:40px;border-radius:6px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden;flex:none}.preview__cover img{width:100%;height:100%;object-fit:cover}
+.preview__cover{width:40px;height:40px;border-radius:6px;background:var(--bg-panel);display:grid;place-items:center;overflow:hidden;flex:none;color:var(--text-tertiary)}
 .preview__buttons{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .error{color:#f18d8d;flex:none}.warning{color:#eab66f}.note{font-size:12px;color:var(--text-secondary);line-height:1.6;flex:none}
 </style>

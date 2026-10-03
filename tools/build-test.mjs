@@ -82,6 +82,8 @@ await build({
   join(repoRoot, 'src', 'main', 'library', 'pending-assets.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'platform-registry.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'entity-details.ts'),
     join(repoRoot, 'src', 'main', 'online', 'library-router.ts'),
     join(repoRoot, 'src', 'main', 'online', 'hot-words.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'playback-router.ts'),
@@ -89,6 +91,7 @@ await build({
     join(repoRoot, 'src', 'main', 'ipc-validation.ts'),
     join(repoRoot, 'src', 'main', 'online', 'lyrics.ts'),
     join(repoRoot, 'src', 'main', 'online', 'url-guard.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'source-media-proxy.ts'),
     join(repoRoot, 'src', 'main', 'online', 'pinned-dispatcher.ts'),
     join(repoRoot, 'src', 'main', 'online', 'cover-fetch.ts'),
     join(repoRoot, 'src', 'main', 'store', 'json-file.ts'),
@@ -109,6 +112,8 @@ await build({
 await build({
   ...shared,
   entryPoints: [
+        join(repoRoot, 'src', 'shared', 'types.ts'),
+        join(repoRoot, 'src', 'shared', 'persisted-track.ts'),
         join(repoRoot, 'src', 'shared', 'media-url.ts'),
         // The overlay's geometry maths is the part of the feature that can fail
         // silently, so the suites import it the same way the app does.
@@ -133,6 +138,8 @@ await build({
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'search-merge.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'cancellable-music.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'local-search.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'utils', 'track-cover.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'utils', 'source-update-state.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'library.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'player.ts')
   ],

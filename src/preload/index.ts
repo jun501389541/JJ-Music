@@ -18,6 +18,10 @@ import type {
   IpcResult,
   LocalMusicInfo,
   LyricResult,
+  OnlineAlbumRef,
+  OnlineArtistRef,
+  OnlineEntityCandidates,
+  OnlineEntityPage,
   OnlineLyricSource,
   OnlineMusicInfo,
   PendingAsset,
@@ -74,6 +78,7 @@ const api = {
     chooseFolder: () => invoke<string | null>(IPC.downloadsChooseFolder)
   },
   playlistImport: {
+    providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.playlistImportProviders),
     preview: (source: SourceId, input: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input),
     /**
      * Commit a previewed list. `ids` is the order and subset the user arranged in
@@ -230,6 +235,11 @@ const api = {
       const listener = (): void => handler()
       ipcRenderer.on(IPC.sourcesChanged, listener)
       return () => ipcRenderer.removeListener(IPC.sourcesChanged, listener)
+    },
+    onUpdateAlert: (handler: (notice: { name: string; author: string; message: string }) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, notice: { name: string; author: string; message: string }): void => handler(notice)
+      ipcRenderer.on(IPC.sourcesUpdateAlert, listener)
+      return () => ipcRenderer.removeListener(IPC.sourcesUpdateAlert, listener)
     }
   },
 
@@ -264,7 +274,14 @@ const api = {
      */
     hotWords: (scope: SourceId | 'all') => invoke<HotWord[]>(IPC.musicHotWords, scope),
     url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) =>
-      invoke<{ url: string; quality: Quality }>(IPC.musicUrl, source, musicInfo, quality),
+      invoke<{
+        url: string
+        quality: Quality
+        apiId?: string
+        providerId?: string
+        providerName?: string
+        providerVersion?: string
+      }>(IPC.musicUrl, source, musicInfo, quality),
     lyric: (source: SourceId, musicInfo: OnlineMusicInfo) =>
       invoke<LyricResult>(IPC.musicLyric, source, musicInfo),
     pic: (source: SourceId, musicInfo: OnlineMusicInfo) =>
@@ -281,7 +298,20 @@ const api = {
       invoke<LyricResult & { picUrl: string; asset: AssetRef | null; cover: AssetRef | undefined }>(
         IPC.musicEnrich,
         musicInfo, only, requestId
-      )
+    )
+  },
+
+  onlineDetails: {
+    artwork: (source: SourceId, kind: 'artist' | 'album', url: string, requestId?: string) =>
+      invoke<string>(IPC.onlineEntityArtwork, source, kind, url, requestId),
+    artistPage: (source: SourceId, id: string, page = 1, requestId?: string) =>
+      invoke<OnlineEntityPage<OnlineArtistRef>>(IPC.onlineArtistPage, source, id, page, requestId),
+    albumPage: (source: SourceId, id: string, page = 1, requestId?: string) =>
+      invoke<OnlineEntityPage<OnlineAlbumRef>>(IPC.onlineAlbumPage, source, id, page, requestId),
+    artistCandidates: (source: SourceId, name: string, requestId?: string) =>
+      invoke<OnlineEntityCandidates<OnlineArtistRef>>(IPC.onlineArtistCandidates, source, name, requestId),
+    albumCandidates: (source: SourceId, name: string, requestId?: string) =>
+      invoke<OnlineEntityCandidates<OnlineAlbumRef>>(IPC.onlineAlbumCandidates, source, name, requestId)
   },
 
   artists: {

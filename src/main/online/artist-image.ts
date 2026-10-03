@@ -75,12 +75,15 @@ function absoluteMgImage(value: string): string {
 export async function resolveArtistImage(
   name: string,
   http: typeof fetch = fetch,
-  allowed: SourceId[] = ['mg', 'tx', 'wy', 'kg']
+  allowed: SourceId[] | (() => SourceId[]) = ['mg', 'tx', 'wy', 'kg']
 ): Promise<ArtistImage | null> {
   const query = name.trim()
   if (!query || query.length > 60) return null
   const deadline = AbortSignal.timeout(20_000)
-  async function json(url: string, referer: string, origin?: string): Promise<Row> {
+  const allowedNow = (source: SourceId): boolean =>
+    (typeof allowed === 'function' ? allowed() : allowed).includes(source)
+  async function json(source: SourceId, url: string, referer: string, origin?: string): Promise<Row> {
+    if (!allowedNow(source)) throw new Error('source admission revoked')
     const res = await http(url, {
       headers: { Referer: referer, ...(origin ? { Origin: origin } : {}), 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.any([deadline, AbortSignal.timeout(8_000)])
@@ -99,6 +102,7 @@ export async function resolveArtistImage(
       source: 'mg',
       async find() {
         const rows = await json(
+          'mg',
           `https://app.u.nf.migu.cn/pc/resource/song/item/search/v1.0?${new URLSearchParams({ text: query, pageNo: '1', pageSize: '10' })}`,
           'https://music.migu.cn/',
           'https://music.migu.cn'
@@ -117,6 +121,7 @@ export async function resolveArtistImage(
       source: 'tx',
       async find() {
         const data = await json(
+          'tx',
           `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?${new URLSearchParams({ w: query, p: '1', n: '10', cr: '1', new_json: '1', format: 'json', t: '0' })}`,
           'https://y.qq.com/'
         )
@@ -136,13 +141,14 @@ export async function resolveArtistImage(
       source: 'wy',
       async find() {
         const data = await json(
+          'wy',
           `https://music.163.com/api/search/get/web?${new URLSearchParams({ s: query, type: '1', offset: '0', limit: '10' })}`,
           'https://music.163.com/'
         )
         for (const song of data?.result?.songs ?? []) {
           for (const artist of song?.artists ?? []) {
             if (!artist?.id || !artistNameMatches(query, String(artist?.name ?? ''))) continue
-            const detail = await json(`https://music.163.com/api/artist/${artist.id}`, 'https://music.163.com/')
+            const detail = await json('wy', `https://music.163.com/api/artist/${artist.id}`, 'https://music.163.com/')
             const pic = typeof detail?.artist?.picUrl === 'string' ? detail.artist.picUrl : ''
             // `?param=` 不是装饰：去掉它拿到的是 1.4MB 原图。
             if (pic) return { url: `${pic}?param=320y320`, source: 'wy' }
@@ -155,6 +161,7 @@ export async function resolveArtistImage(
       source: 'kg',
       async find() {
         const data = await json(
+          'kg',
           `https://songsearch.kugou.com/song_search_v2?${new URLSearchParams({ keyword: query, page: '1', pagesize: '10' })}`,
           'https://www.kugou.com/'
         )
@@ -163,6 +170,7 @@ export async function resolveArtistImage(
           const singerId = Array.isArray(raw) ? raw[0] : raw
           if (!singerId || !artistNameMatches(query, String(song?.SingerName ?? ''))) continue
           const info = await json(
+            'kg',
             `https://mobilecdnbj.kugou.com/api/v3/singer/info?${new URLSearchParams({ singerid: String(singerId), version: '9108', plat: '0' })}`,
             'https://www.kugou.com/'
           )
@@ -177,7 +185,7 @@ export async function resolveArtistImage(
   let answered = 0
   let lastError: unknown
   for (const lookup of lookups) {
-    if (!allowed.includes(lookup.source)) continue
+    if (!allowedNow(lookup.source)) continue
     try {
       const found = await lookup.find()
       answered++

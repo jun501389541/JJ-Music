@@ -25,6 +25,7 @@ const repoRoot = join(__dirname, '..', '..')
 
 const { SourceStore } = await import('./sources/source-store.js')
 const { SourceEngine } = await import('./sources/source-engine.js')
+const { applySourceUpdate } = await import('./sources/source-updater.js')
 const { parseScriptHeader } = await import('./sources/script-header.js')
 const { buildQualityLadder, isValidMusicUrl, normaliseSources } = await import(
   './sources/source-engine.js'
@@ -185,6 +186,86 @@ const engine = new SourceEngine(store, workerPath)
 
 section('5b. Restricted-token launch (file handoff)')
 
+const lxLifecycleScript = [
+  '/*! * @name LX 生命周期夹具 * @version 2.0.0 */',
+  'lx.on(lx.EVENT_NAMES.request, ({ source, action }) => {',
+  '  console.log("LX request", source, action)',
+  '  if (action !== "musicUrl") throw new Error("unexpected action: " + action)',
+  '  return "https://cdn.test/" + source + ".flac"',
+  '})',
+  'lx.send(lx.EVENT_NAMES.updateAlert, { version: "2.0.1", message: "update available" })',
+  'lx.send(lx.EVENT_NAMES.updateAlert, { version: "2.0.2", message: "must not be delivered" }).catch(() => {})',
+  'lx.send(lx.EVENT_NAMES.inited, { status: true, sources: {',
+  '  wy: { type: "music", actions: ["musicUrl"], qualitys: ["128k"] },',
+  '  tx: { type: "music", actions: ["musicUrl"], qualitys: ["128k"] }',
+  '} })'
+].join('\n')
+
+async function verifyLxLifecycle(label, transport, allowShowUpdateAlert = true) {
+  const dir = mkdtempSync(join(tmpdir(), `jjmusic-${transport}-lx-`))
+  const transportStore = new SourceStore(dir)
+  transportStore.load()
+  const payload = allowShowUpdateAlert
+    ? lxLifecycleScript
+    : JSON.stringify({ userApis: [{ id: 'lx-alert-off', name: `${label} LX 音源`, script: lxLifecycleScript, allowShowUpdateAlert: false }] })
+  const meta = transportStore.import(payload, `${label} LX 音源`)
+  transportStore.setEnabled(meta.id, true)
+  const transportEngine = new SourceEngine(transportStore, workerPath, transport)
+  const updateNotices = []
+  transportEngine.on({ updateAlert: (_id, message) => { updateNotices.push(message) } })
+  let startupError = ''
+  try {
+    await transportEngine.reload(meta.id)
+  } catch (error) {
+    startupError = error instanceof Error ? error.message : String(error)
+  }
+
+  const sources = transportEngine.getSources().map((item) => item.id).sort()
+  const storeMeta = transportStore.metas().find((item) => item.id === meta.id)
+  check(`${label} LX v2 initialises`, !startupError && sources.includes('wy'), startupError || `sources=${sources.join(',')}; lastError=${storeMeta?.lastError ?? ''}`)
+  check(`${label} LX v2 advertises both platforms`, sources.includes('wy') && sources.includes('tx'), sources.join(','))
+  check(`${label} receives updateAlert`, transportEngine.getLogs(meta.id).some((line) => line.includes('update available')), transportEngine.getLogs(meta.id).join(' | '))
+  check(
+    `${label} rejects a second updateAlert per LX run`,
+    !transportEngine.getLogs(meta.id).some((line) => line.includes('must not be delivered')),
+    transportEngine.getLogs(meta.id).join(' | ')
+  )
+  check(
+    `${label} updateAlert respects allowShowUpdateAlert`,
+    allowShowUpdateAlert
+      ? updateNotices.length === 1 && updateNotices[0].includes('update available') && !updateNotices[0].includes('must not be delivered')
+      : updateNotices.length === 0,
+    JSON.stringify(updateNotices)
+  )
+
+  for (const source of ['wy', 'tx']) {
+    const track = {
+      id: `${source}_lifecycle`, name: '夹具歌曲', singer: '夹具歌手', source,
+      interval: '03:00', albumName: '', picUrl: '', meta: {}
+    }
+    const outcome = await Promise.race([
+      transportEngine.getMusicUrl(source, track, '128k').then(
+        (result) => ({ result }),
+        (error) => ({ error: error instanceof Error ? error.message : String(error) })
+      ),
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 5000))
+    ])
+    const logs = transportEngine.getLogs(meta.id).join(' | ')
+    check(
+      `${label} requests ${source} through LX`,
+      outcome?.result?.url === `https://cdn.test/${source}.flac`,
+      JSON.stringify({ outcome, dead: transportEngine.runtimes.get(meta.id)?.host.dead, pending: transportEngine.runtimes.get(meta.id)?.host.pending.size, logs })
+    )
+  }
+
+  await transportEngine.stopAll()
+  rmSync(dir, { recursive: true, force: true })
+}
+
+await verifyLxLifecycle('IPC', 'ipc')
+await verifyLxLifecycle('IPC with update notices disabled', 'ipc', false)
+if (process.platform === 'win32') await verifyLxLifecycle('Windows file transport', 'file')
+
 check('Windows enables restricted source launch', process.platform !== 'win32' || supportsRestrictedLaunch())
 
 if (!supportsRestrictedLaunch()) {
@@ -209,7 +290,7 @@ if (!supportsRestrictedLaunch()) {
   const started = Date.now()
   let bootFailed = null
   try {
-    await rEngine.startAll()
+    await rEngine.reload(rMeta.id)
   } catch (error) {
     bootFailed = error instanceof Error ? error.message.slice(0, 100) : String(error)
     console.log(`  restricted boot failed: ${bootFailed}`)
@@ -221,7 +302,7 @@ if (!supportsRestrictedLaunch()) {
   check(
     'restricted-mode sources are advertised',
     rSources.length > 0,
-    rSources.map((s) => s.id).join(',')
+    `sources=${rSources.map((s) => s.id).join(',') || '(none)'}; lastError=${rStore.metas()[0]?.lastError ?? ''}`
   )
   check(
     'restricted boot stays within a sane time',
@@ -390,6 +471,141 @@ const missingEngine = new SourceEngine(brokenStore, join(brokenDir, 'nope.js'))
 await missingEngine.startAll().catch(() => undefined)
 check('missing worker path is handled without hanging', true)
 
+// Disabling a source while its process is still reporting in must invalidate
+// that launch, even though there is not a registered runtime for stop() yet.
+const pendingDir = mkdtempSync(join(tmpdir(), 'jjmusic-pending-start-'))
+const pendingStore = new SourceStore(pendingDir)
+pendingStore.load()
+const pendingMeta = pendingStore.import(
+  '/*! * @name 已安装版本 * @version 1 */\nlx.on(lx.EVENT_NAMES.request, () => 1)',
+  '待启动音源'
+)
+pendingStore.setEnabled(pendingMeta.id, true)
+const pendingEngine = new SourceEngine(pendingStore, workerPath)
+let signalStartEntered
+let finishPendingStart
+let pendingTeardowns = 0
+const startEntered = new Promise(resolve => { signalStartEntered = resolve })
+const pendingState = {
+  api: pendingStore.get(pendingMeta.id),
+  sources: [{ id: 'wy', name: '测试平台', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] }],
+  ready: Promise.resolve(),
+  pending: new Map(),
+  nextId: 1,
+  dead: false,
+  logs: [],
+  scratchDir: '',
+  fileMode: false
+}
+Reflect.set(pendingEngine, 'host', {
+  start: async api => {
+    pendingState.api = api
+    signalStartEntered()
+    return new Promise(resolve => { finishPendingStart = () => resolve(pendingState) })
+  },
+  teardown: async state => { pendingTeardowns++; state.dead = true }
+})
+const pendingLaunch = pendingEngine.reload(pendingMeta.id)
+await startEntered
+pendingStore.setEnabled(pendingMeta.id, false)
+await pendingEngine.stop(pendingMeta.id)
+finishPendingStart()
+await pendingLaunch
+check('disabling a pending source prevents late runtime publication', pendingEngine.getSources().length === 0)
+check('late pending runtime is torn down', pendingTeardowns === 1, String(pendingTeardowns))
+check('pending source remains disabled after start settles', pendingStore.metas()[0]?.enabled === false)
+rmSync(pendingDir, { recursive: true, force: true })
+
+// Cancelling a candidate launch is an update failure, not a successful trial.
+// The updater must keep the installed bytes even when the late host start is
+// cleaned up after the user disables the source.
+const cancelledUpdateDir = mkdtempSync(join(tmpdir(), 'jjmusic-cancelled-update-'))
+const cancelledUpdateStore = new SourceStore(cancelledUpdateDir)
+cancelledUpdateStore.load()
+const installedUpdateScript = '/*! * @name 已安装版本 * @version 1 */\nlx.on(lx.EVENT_NAMES.request, () => 1)'
+const candidateUpdateScript = '/*! * @name 候选版本 * @version 2 */\nlx.on(lx.EVENT_NAMES.request, () => 2)'
+const cancelledUpdateMeta = cancelledUpdateStore.import(installedUpdateScript, '更新竞态音源')
+cancelledUpdateStore.setEnabled(cancelledUpdateMeta.id, true)
+const cancelledUpdateEngine = new SourceEngine(cancelledUpdateStore, workerPath)
+let signalCandidateStart
+let finishCandidateStart
+let candidateTeardowns = 0
+const candidateStartEntered = new Promise(resolve => { signalCandidateStart = resolve })
+const candidateState = {
+  api: cancelledUpdateStore.get(cancelledUpdateMeta.id),
+  sources: [{ id: 'wy', name: '测试平台', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] }],
+  ready: Promise.resolve(),
+  pending: new Map(),
+  nextId: 1,
+  dead: false,
+  logs: [],
+  scratchDir: '',
+  fileMode: false
+}
+Reflect.set(cancelledUpdateEngine, 'host', {
+  start: async api => {
+    if (api.source === candidateUpdateScript) {
+      signalCandidateStart()
+      return new Promise(resolve => { finishCandidateStart = () => resolve(candidateState) })
+    }
+    throw new Error('unexpected installed-version start')
+  },
+  teardown: async state => { candidateTeardowns++; state.dead = true }
+})
+const cancelledUpdate = applySourceUpdate(
+  cancelledUpdateStore,
+  cancelledUpdateEngine,
+  cancelledUpdateMeta.id,
+  candidateUpdateScript
+)
+await candidateStartEntered
+cancelledUpdateStore.setEnabled(cancelledUpdateMeta.id, false)
+await cancelledUpdateEngine.stop(cancelledUpdateMeta.id)
+const disabledUpdateFile = readFileSync(cancelledUpdateStore.path, 'utf8')
+finishCandidateStart()
+let cancelledUpdateError = ''
+try {
+  await cancelledUpdate
+} catch (error) {
+  cancelledUpdateError = error instanceof Error ? error.message : String(error)
+}
+check('disabling during candidate startup rejects the update', cancelledUpdateError.length > 0, cancelledUpdateError)
+check('cancelled candidate startup preserves the installed script', cancelledUpdateStore.get(cancelledUpdateMeta.id)?.source === installedUpdateScript)
+check('cancelled candidate startup preserves the durable disabled record', readFileSync(cancelledUpdateStore.path, 'utf8') === disabledUpdateFile)
+check('cancelled candidate process is torn down', candidateTeardowns === 1, String(candidateTeardowns))
+check('cancelled candidate is not published as a platform provider', cancelledUpdateEngine.getSources().length === 0)
+rmSync(cancelledUpdateDir, { recursive: true, force: true })
+
+// A failed update candidate is a trial. It must not overwrite the installed
+// script's enabled/error/quarantine state before the updater decides to commit.
+const trialDir = mkdtempSync(join(tmpdir(), 'jjmusic-trial-'))
+const trialStore = new SourceStore(trialDir)
+trialStore.load()
+const installedTrialScript = '/*! * @name 已安装版本 * @version 1 */\nlx.on(lx.EVENT_NAMES.request, () => 1)'
+const trialMeta = trialStore.import(installedTrialScript, '已安装版本')
+trialStore.setEnabled(trialMeta.id, true)
+const trialFileBefore = readFileSync(trialStore.path, 'utf8')
+const trialEngine = new SourceEngine(trialStore, workerPath)
+Reflect.set(trialEngine, 'host', {
+  start: async () => { throw new Error('candidate startup failed') },
+  teardown: async () => undefined
+})
+try {
+  await trialEngine.reload(
+    trialMeta.id,
+    '/*! * @name 候选版本 * @version 2 */\nlx.on(lx.EVENT_NAMES.request, () => 2)'
+  )
+} catch {
+  /* expected: the fake host rejects candidate startup */
+}
+const trialCurrent = trialStore.get(trialMeta.id)
+check('failed candidate start preserves the installed script', trialCurrent?.source === installedTrialScript)
+check('failed candidate start preserves enabled state', trialCurrent?.meta.enabled === true)
+check('failed candidate start does not record a candidate error', trialCurrent?.meta.lastError === undefined)
+check('failed candidate start does not quarantine the installed script', trialStore.isQuarantined(trialMeta.id) === false)
+check('failed candidate start leaves durable data unchanged', readFileSync(trialStore.path, 'utf8') === trialFileBefore)
+rmSync(trialDir, { recursive: true, force: true })
+
 // An import must leave the script disabled: nothing runs until asked.
 const disarmDir = mkdtempSync(join(tmpdir(), 'jjmusic-disarm-'))
 const disarmStore = new SourceStore(disarmDir)
@@ -468,7 +684,7 @@ section('8. Multi-source ordering and failover')
  */
 function fakeRuntime(id, name, sources, attempts) {
   return {
-    api: { meta: { id, name }, source: '' },
+    api: { meta: { id, stableId: `stable-${id}`, name }, source: '' },
     host: {
       dead: false,
       sources,
@@ -486,7 +702,10 @@ function orderOf(engine) {
 }
 
 function multiSourceEngine(listOrder, runtimes) {
-  const engine = new SourceEngine({ list: () => listOrder }, 'unused')
+  const engine = new SourceEngine({
+    list: () => listOrder,
+    versionOf: apiId => `test-version-${apiId}`
+  }, 'unused')
   engine.runtimes = new Map(runtimes.map((r) => [r.api.meta.id, r]))
   engine.rebuildOwners()
   return engine
@@ -541,12 +760,28 @@ const track = {
 
 const served = await ordered.getMusicUrl('wy', track, 'flac')
 check('falls through failing sources to the first healthy one', served.apiId === 'b', String(served.apiId))
+check('returned playback identity is the successful stable script id', served.providerId === 'stable-b', String(served.providerId))
+check('returned playback identity includes the successful script name', served.providerName === '音源B', String(served.providerName))
+check('returned playback identity includes the successful script version', served.providerVersion === 'test-version-b', String(served.providerVersion))
 check('keeps the served quality', served.quality === 'flac', served.quality)
 check(
   'tried the failed sources in order before succeeding',
   attempts.calls[0] === 'c:flac' && attempts.calls.includes('a:flac') && attempts.calls.at(-1) === 'b:flac',
   attempts.calls.join(' ')
 )
+
+attempts.calls.length = 0
+const pinned = await ordered.getMusicUrl('wy', { ...track, providerId: 'stable-b' }, 'flac')
+check('a track stamped with a known LX stable id stays on that script', pinned.providerId === 'stable-b', String(pinned.providerId))
+check('a stamped script is not mixed with sibling URL attempts', attempts.calls.join(',') === 'b:flac', attempts.calls.join(','))
+attempts.calls.length = 0
+let missingProvider = ''
+try {
+  await ordered.getMusicUrl('wy', { ...track, providerId: 'removed-script' }, 'flac')
+} catch (error) {
+  missingProvider = error.message
+}
+check('a missing stamped provider is not silently rebound', missingProvider.includes('removed-script') && attempts.calls.length === 0, missingProvider)
 
 // Every script failing must produce one error naming each of them.
 const allFail = mkAttempts()

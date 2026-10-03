@@ -41,13 +41,18 @@ function findFreePort() {
 
 const DEBUG_PORT = Number(process.env.JJ_DEBUG_PORT ?? (await findFreePort()))
 const packaged = process.argv.includes('--packaged')
-const electronBin = packaged ? join(repoRoot, 'release', 'win-unpacked', 'JJ Music.exe') : join(
-  repoRoot,
-  'node_modules',
-  'electron',
-  'dist',
-  process.platform === 'win32' ? 'electron.exe' : 'electron'
-)
+const electronDist = process.env.ELECTRON_OVERRIDE_DIST_PATH
+const electronBin = packaged
+  ? join(repoRoot, 'release', 'win-unpacked', 'JJ Music.exe')
+  : electronDist
+    ? join(electronDist, process.platform === 'win32' ? 'electron.exe' : 'electron')
+    : join(
+        repoRoot,
+        'node_modules',
+        'electron',
+        'dist',
+        process.platform === 'win32' ? 'electron.exe' : 'electron'
+      )
 
 if (!existsSync(electronBin)) {
   console.error('electron binary not found')

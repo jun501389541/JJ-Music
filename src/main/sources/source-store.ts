@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import type { UserApiMeta } from '@shared/types'
+import type { SourceUpdateCheck, UserApiMeta } from '@shared/types'
 import { decodeScript, encodeScript, isEncodedScript } from './codec'
 import { assessScriptRisk, describeScript } from './script-header'
 import { parseJsonLoose } from '../store/json-file'
@@ -30,6 +30,10 @@ interface StoredApi {
   version: string
   author: string
   homepage: string
+  /** Direct JavaScript URL used for import. */
+  updateUrl?: string
+  /** Small check summary only; downloaded script bodies are never persisted here. */
+  updateCheck?: SourceUpdateCheck
   allowShowUpdateAlert: boolean
   script: string
   /** JJ Music extension; ignored by LX Music. */
@@ -142,11 +146,18 @@ export class SourceStore {
    * LX-encoded `gz_...` string, and may be wrapped in the `{ userApis: [...] }`
    * envelope of an exported file.
    */
-  import(payload: string, fallbackName: string): UserApiMeta {
+  import(payload: string, fallbackName: string, updateUrl?: string): UserApiMeta {
     const entries = parseImportPayload(payload, fallbackName)
     if (entries.length === 0) throw new Error('未在文件中找到可用的音源脚本')
 
-    const metas = entries.map((entry) => this.upsert(entry))
+    // A URL belongs only to a single raw script. An exported JSON bundle or
+    // encoded script can contain several sources or hide a different payload;
+    // associating its outer URL with one extracted entry would be misleading.
+    const isRawSingleScript = entries.length === 1 && entries[0]?.source === payload.trim()
+    const metas = entries.map((entry, index) => this.upsert({
+      ...entry,
+      ...(isRawSingleScript && index === 0 && updateUrl ? { updateUrl } : {})
+    }))
     this.persist()
     // `entries` is non-empty, so the first element always exists.
     return metas[0]!
@@ -202,9 +213,19 @@ export class SourceStore {
       previousVersion: existing.version ?? '',
       importedAt: new Date().toISOString()
     }
+    // A result describes the bytes that were installed before this update.
+    delete record.updateCheck
     const index = this.apis.findIndex((api) => api.id === existing.id)
     this.apis[index] = record
-    this.persist()
+    try {
+      this.persist()
+    } catch (error) {
+      // Keep the live record consistent with disk. The caller may be in the
+      // middle of an update transaction; leaving candidate bytes in memory
+      // would let a later unrelated write commit a version the user rejected.
+      this.apis[index] = existing
+      throw error
+    }
     return toMeta(record)
   }
 
@@ -223,7 +244,7 @@ export class SourceStore {
     const restored = decodeScript(existing.previousScript)
     const header = describeScript(restored, existing.name)
     const index = this.apis.findIndex((api) => api.id === existing.id)
-    this.apis[index] = {
+    const record: StoredApi = {
       ...existing,
       name: header.name,
       description: header.description,
@@ -236,7 +257,32 @@ export class SourceStore {
       previousVersion: existing.version ?? '',
       importedAt: new Date().toISOString()
     }
-    this.persist()
+    delete record.updateCheck
+    this.apis[index] = record
+    try {
+      this.persist()
+    } catch (error) {
+      // A failed rollback must not leave the in-memory view ahead of disk.
+      // The caller can then retry or keep running the still-current version.
+      this.apis[index] = existing
+      throw error
+    }
+    return true
+  }
+
+  /** Persist a small update-check summary without retaining candidate code. */
+  recordUpdateCheck(id: string, updateCheck: SourceUpdateCheck): boolean {
+    const api = this.apis.find((item) => item.id === id || item.stableId === id)
+    if (!api) return false
+    const previous = api.updateCheck
+    api.updateCheck = { ...updateCheck }
+    try {
+      this.persist()
+    } catch (error) {
+      if (previous) api.updateCheck = previous
+      else delete api.updateCheck
+      throw error
+    }
     return true
   }
 
@@ -245,8 +291,21 @@ export class SourceStore {
     return this.apis.find((api) => api.id === id || api.stableId === id)
   }
 
+  /** Previous script decoded for a trial start before an explicit rollback. */
+  previousSource(id: string): string | undefined {
+    const api = this.apis.find((item) => item.id === id || item.stableId === id)
+    if (!api?.previousScript) return undefined
+    return decodeScript(api.previousScript)
+  }
+
   /** Insert or replace by id, keeping the existing id when overwriting. */
-  private upsert(entry: { source: string; name: string; stableId?: string }): UserApiMeta {
+  private upsert(entry: {
+    source: string
+    name: string
+    stableId?: string
+    updateUrl?: string
+    allowShowUpdateAlert?: boolean
+  }): UserApiMeta {
     const header = describeScript(entry.source, entry.name)
 
     // Match the incoming script to an existing record by *identity* first and
@@ -264,6 +323,7 @@ export class SourceStore {
 
     const stableId = existing?.stableId ?? entry.stableId ?? newStableId()
     const id = existing?.id ?? `user_api_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const unchangedSource = Boolean(existing && decodeScript(existing.script) === entry.source)
 
     const record: StoredApi = {
       id,
@@ -273,8 +333,14 @@ export class SourceStore {
       version: header.version,
       author: header.author,
       homepage: header.homepage,
-      allowShowUpdateAlert: true,
+      allowShowUpdateAlert: entry.allowShowUpdateAlert ?? existing?.allowShowUpdateAlert ?? true,
       script: encodeScript(entry.source),
+      ...(entry.updateUrl
+        ? { updateUrl: entry.updateUrl }
+        : unchangedSource && existing?.updateUrl
+          ? { updateUrl: existing.updateUrl }
+          : {}),
+      ...(unchangedSource && existing?.updateCheck ? { updateCheck: existing.updateCheck } : {}),
       // A re-import keeps the user's existing choice; a *new* script starts
       // disabled.
       //
@@ -411,6 +477,8 @@ function toMeta(api: StoredApi): UserApiMeta {
     version: api.version ?? '',
     author: api.author ?? '',
     homepage: api.homepage ?? '',
+    ...(api.updateUrl ? { updateUrl: api.updateUrl } : {}),
+    ...(isSourceUpdateCheck(api.updateCheck) ? { updateCheck: { ...api.updateCheck } } : {}),
     allowShowUpdateAlert: api.allowShowUpdateAlert !== false,
     sourceCount: 0,
     enabled: api.enabled !== false,
@@ -425,6 +493,17 @@ function toMeta(api: StoredApi): UserApiMeta {
     // already-imported library still gets a rating without a re-import.
     ...riskFor(api.script)
   }
+}
+
+function isSourceUpdateCheck(value: unknown): value is SourceUpdateCheck {
+  if (!value || typeof value !== 'object') return false
+  const check = value as Partial<SourceUpdateCheck>
+  return Number.isFinite(check.checkedAt) &&
+    (check.state === 'checking' || check.state === 'available' || check.state === 'current' || check.state === 'failed') &&
+    (check.currentVersion === undefined || typeof check.currentVersion === 'string') &&
+    (check.nextVersion === undefined || typeof check.nextVersion === 'string') &&
+    (check.sha256 === undefined || typeof check.sha256 === 'string') &&
+    (check.message === undefined || typeof check.message === 'string')
 }
 
 /**
@@ -485,7 +564,7 @@ function isStoredApi(value: unknown): value is StoredApi {
 export function parseImportPayload(
   payload: string,
   fallbackName: string
-): Array<{ source: string; name: string; stableId?: string }> {
+): Array<{ source: string; name: string; stableId?: string; allowShowUpdateAlert?: boolean }> {
   const trimmed = payload.trim()
   const out: Array<{ source: string; name: string; stableId?: string }> = []
 
@@ -516,7 +595,10 @@ export function parseImportPayload(
               out.push({
                 source,
                 name: item.name || fallbackName,
-                ...(item.stableId ? { stableId: item.stableId } : {})
+                ...(item.stableId ? { stableId: item.stableId } : {}),
+                ...(typeof item.allowShowUpdateAlert === 'boolean'
+                  ? { allowShowUpdateAlert: item.allowShowUpdateAlert }
+                  : {})
               })
             }
           }

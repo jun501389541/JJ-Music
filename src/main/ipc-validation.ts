@@ -1,5 +1,14 @@
 import { IPC } from '@shared/ipc'
-import { LX_QUALITIES } from '@shared/types'
+import {
+  LX_QUALITIES,
+  ONLINE_ALBUM_MAX_PAGES,
+  ONLINE_ARTIST_MAX_PAGES
+} from '@shared/types'
+
+/** Renderer cancellation IDs are opaque handles shared by searchable and detail IPCs. */
+export function isCancellableRequestId(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 64 && /^[a-z][a-z0-9-]{0,31}-\d{13}-\d{1,12}$/.test(value)
+}
 
 /** Reject malformed renderer values before any handler reads paths, URLs or arrays. */
 export function assertIpcArgs(channel: string, args: unknown[]): void {
@@ -10,9 +19,10 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const ids = (value: unknown, max = 50000): boolean =>
     Array.isArray(value) && value.length <= max && value.every((item) => str(item, 256))
   const source = (value: unknown): boolean => str(value, 64)
-  const page = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 100
-  const request = (value: unknown): boolean => value === undefined ||
-    (typeof value === 'string' && /^search-\d{13}-\d{1,12}$/.test(value))
+  const page = (value: unknown, max = 100): boolean =>
+    Number.isInteger(value) && (value as number) >= 1 && (value as number) <= max
+  const request = (value: unknown): boolean => value === undefined || isCancellableRequestId(value)
+  const entityId = (value: unknown): boolean => typeof value === 'string' && /^\d{1,20}$/.test(value)
   const url = (value: unknown): boolean => {
     if (!str(value, 2048)) return false
     try { return ['http:', 'https:'].includes(new URL(value).protocol) }
@@ -34,6 +44,16 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
       break
     case IPC.musicSearchAll:
       if (args.length > 3 || !str(args[0], 200) || !page(args[1]) || !request(args[2])) bad()
+      break
+    case IPC.onlineArtistPage:
+      if (args.length > 4 || !source(args[0]) || !entityId(args[1]) || !page(args[2], ONLINE_ARTIST_MAX_PAGES) || !request(args[3])) bad()
+      break
+    case IPC.onlineAlbumPage:
+      if (args.length > 4 || !source(args[0]) || !entityId(args[1]) || !page(args[2], ONLINE_ALBUM_MAX_PAGES) || !request(args[3])) bad()
+      break
+    case IPC.onlineArtistCandidates:
+    case IPC.onlineAlbumCandidates:
+      if (args.length > 3 || !source(args[0]) || !str(args[1], 120) || !request(args[2])) bad()
       break
     case IPC.sourcesImportUrl:
       if (args.length !== 1 || !url(args[0])) bad()

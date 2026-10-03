@@ -152,7 +152,7 @@ interface TencentSong {
   name?: string
   title?: string
   interval?: number
-  singer?: Array<{ name?: string }>
+  singer?: Array<{ id?: number | string; name?: string }>
   album?: { mid?: string; id?: number; name?: string; title?: string }
   file?: {
     media_mid?: string
@@ -192,6 +192,9 @@ const tencentProvider: SearchProvider = {
       list: list.map((item): OnlineMusicInfo => {
         const file = item.file ?? {}
         const mid = item.mid ?? ''
+        const artistRefs = (item.singer ?? [])
+          .filter((artist) => artist.name?.trim())
+          .map((artist) => ({ name: artist.name!.trim(), ...(artist.id != null ? { id: String(artist.id) } : {}) }))
         const meta: OnlineMusicInfo['meta'] = {
           songmid: mid,
           songId: item.id,
@@ -208,10 +211,17 @@ const tencentProvider: SearchProvider = {
         return {
           id: `tx_${mid}`,
           name: item.name ?? item.title ?? '',
-          singer: (item.singer ?? []).map((s) => s.name ?? '').filter(Boolean).join('、'),
+          singer: artistRefs.map((artist) => artist.name).join('、'),
           source: 'tx',
           interval: toInterval(item.interval),
           albumName: item.album?.name ?? item.album?.title ?? '',
+          ...(artistRefs.length ? { artistRefs } : {}),
+          ...(item.album?.name || item.album?.title ? {
+            albumRef: {
+              ...(item.album.id != null ? { id: String(item.album.id) } : {}),
+              name: item.album.name ?? item.album.title ?? ''
+            }
+          } : {}),
           picUrl: item.album?.mid
             ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${item.album.mid}.jpg`
             : '',
@@ -232,8 +242,8 @@ interface NeteaseSong {
   id?: number
   name?: string
   duration?: number
-  artists?: Array<{ name?: string }>
-  album?: { id?: number; name?: string; picId?: number; picUrl?: string }
+  artists?: Array<{ id?: number | string; name?: string; picUrl?: string; img1v1Url?: string }>
+  album?: { id?: number | string; name?: string; picId?: number; picUrl?: string }
   fee?: number
 }
 
@@ -385,13 +395,28 @@ const neteaseProvider: SearchProvider = {
       list: songs.map((item): OnlineMusicInfo => {
         const id = String(item.id ?? '')
         const picUrl = item.album?.picUrl ?? details.get(Number(id))?.picUrl ?? ''
+        const artistRefs = (item.artists ?? [])
+          .filter((artist) => artist.name?.trim())
+          .map((artist) => ({
+            name: artist.name!.trim(),
+            ...(artist.id != null ? { id: String(artist.id) } : {}),
+            ...((artist.picUrl ?? artist.img1v1Url) ? { pictureUrl: artist.picUrl ?? artist.img1v1Url } : {})
+          }))
+        const albumRef = item.album?.name ? {
+          ...(item.album.id != null ? { id: String(item.album.id) } : {}),
+          name: item.album.name,
+          ...(picUrl ? { coverUrl: picUrl } : {}),
+          ...(artistRefs.length ? { artistRefs } : {})
+        } : undefined
         return {
           id: `wy_${id}`,
           name: item.name ?? '',
-          singer: (item.artists ?? []).map((a) => a.name ?? '').filter(Boolean).join('、'),
+          singer: artistRefs.map((artist) => artist.name).join('、'),
           source: 'wy',
           interval: toInterval(item.duration ? item.duration / 1000 : undefined),
           albumName: item.album?.name ?? '',
+          ...(artistRefs.length ? { artistRefs } : {}),
+          ...(albumRef ? { albumRef } : {}),
           picUrl,
           meta: {
             songmid: id,

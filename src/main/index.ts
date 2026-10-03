@@ -28,19 +28,21 @@ import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { guardedFetch, safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
-import { assertIpcArgs } from './ipc-validation'
+import { assertIpcArgs, isCancellableRequestId } from './ipc-validation'
 import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
-import { checkForUpdate } from './sources/source-updater'
+import { applySourceUpdate, checkDailySourceUpdates, checkForUpdate, looksLikeScript, rollbackSourceUpdate, summarizeUpdateCheck } from './sources/source-updater'
+import { SourceMediaProxy } from './online/source-media-proxy'
 import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
-import { JjProviderEngine } from './sources/jj-provider-engine'
 import { MusicLibrary } from './library/music-library'
 import { PlaylistStore, SettingsStore } from './store/settings-store'
-import { searchOnline, searchProviders, fetchNeteaseDetails } from './online/search'
+import { searchProviders, fetchNeteaseDetails } from './online/search'
 import { HotWordSource } from './online/hot-words'
 import { SearchRouter } from './online/search-router'
+import { OnlinePlatformRegistry } from './online/platform-registry'
+import { OnlineEntityDetails } from './online/entity-details'
 import { LibraryRouter } from './online/library-router'
 import { PlaybackRouter } from './sources/playback-router'
 import { fetchOnlineLyric } from './online/lyrics'
@@ -283,11 +285,34 @@ if (debugPort && /^\d+$/.test(debugPort)) {
 
 /** `jjmedia://local/<url-encoded absolute path>` */
 const MEDIA_SCHEME = 'jjmedia'
+const SOURCE_STREAM_SCHEME = 'jjstream'
+const sourceMediaProxy = new SourceMediaProxy({
+  isProviderCurrent: identity => {
+    try {
+      const { sourceEngine, sourceStore } = requireServices()
+      return sourceEngine.supportsProvider(identity.sourceId as SourceId, identity.providerId, 'musicUrl') &&
+        sourceStore.versionOf(identity.providerId) === identity.providerVersion
+    } catch {
+      return false
+    }
+  }
+})
 
 // Must run before `app.ready`.
 protocol.registerSchemesAsPrivileged([
   {
     scheme: MEDIA_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+      bypassCSP: false
+    }
+  },
+  {
+    scheme: SOURCE_STREAM_SCHEME,
     privileges: {
       standard: true,
       secure: true,
@@ -326,32 +351,15 @@ interface Services {
   pendingAssets: PendingAssetStore
   sourceStore: SourceStore
   sourceEngine: SourceEngine
-  /**
-   * The capability-protocol engine, which scripts that speak `jj-source` run in.
-   *
-   * Separate from `sourceEngine` because the two have different policies, not
-   * because they are alternatives: a script that speaks both protocols is started
-   * by **both** engines, in its own process each, and answers whichever engine
-   * asks. `SearchRouter` is what decides which of them serves a given request.
-   */
-  jjProviderEngine: JjProviderEngine
-  /** Routes search and hot words to a capable 音源, or to the built-in adapters when allowed. */
+  /** Live, per-platform admission for all JJ-owned catalog adapters. */
+  onlinePlatforms: OnlinePlatformRegistry
+  /** Routes catalog search and hot words through onlinePlatforms. */
   searchRouter: SearchRouter
-  /**
-   * Decides which engine answers playback for a given track.
-   *
-   * Search results carry provenance (`providerId`); without a router on the
-   * playback side that stamp had nowhere to go and every call fell through to
-   * the LX engine keyed by platform alone. See `playback-router.ts`.
-   */
+  /** Exact-ID artist/album details and explicit name-based candidate lists. */
+  entityDetails: OnlineEntityDetails
+  /** Resolves playback through the shared LX source lifecycle. */
   playbackRouter: PlaybackRouter
-  /**
-   * Decides who reads playlists and leaderboards.
-   *
-   * The same split as search and playback: a 音源 script that declares
-   * `getPlaylist`/`getLeaderboard` answers, and this app's own adapters are only
-   * reachable while the user has switched them on. See `library-router.ts`.
-   */
+  /** Routes playlist imports; leaderboard support is deferred to F1. */
   libraryRouter: LibraryRouter
   downloads: DownloadManager
   /**
@@ -417,90 +425,83 @@ function requireServices(): Services {
   return services
 }
 
+let catalogConsentPrompt: Promise<void> | undefined
+
+/** Disclose the migrated platform path once, before an active LX source can open it. */
+function maybePromptOnlineCatalogConsent(svc: Services = requireServices()): Promise<void> {
+  if (catalogConsentPrompt) return catalogConsentPrompt
+  const current = svc.settings.get()
+  if (current.onlineCatalogConsent || current.onlineCatalogConsentPrompted || svc.onlinePlatforms.eligiblePlatforms().length === 0) {
+    return Promise.resolve()
+  }
+
+  catalogConsentPrompt = (async () => {
+    const options = {
+      type: 'question' as const,
+      title: '允许在线目录请求？',
+      message: 'JJ Music 的目录适配器会向对应音乐平台请求搜索、热词、歌词、封面、歌单和艺人图片资料。LX 音源脚本负责解析播放地址；只有启用且健康的音源声明了对应平台，JJ Music 才会请求该平台。',
+      buttons: ['暂不', '同意并开启'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    }
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+    const result = parent
+      ? await dialog.showMessageBox(parent, options)
+      : await dialog.showMessageBox(options)
+    await svc.settings.update({
+      onlineCatalogConsentPrompted: true,
+      onlineCatalogConsent: result.response === 1
+    })
+  })().catch((error) => {
+    console.error('在线目录说明未能显示:', error)
+  }).finally(() => {
+    catalogConsentPrompt = undefined
+  })
+  return catalogConsentPrompt
+}
+
 async function createServices(): Promise<Services> {
   await migrateLegacyData()
   const dataDir = app.getPath('userData')
   const settings = new SettingsStore(dataDir)
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
-  const artistImages = new ArtistImageStore(dataDir, {
-    saveCover: (data, format) => library.saveCover(data, format),
-    /*
-     * Gated like every other built-in platform path.
-     *
-     * `resolveArtistImage` searches 咪咕/QQ/网易云/酷狗 for a portrait, and left to
-     * its own default it does that unconditionally — one more path that issues
-     * built-in platform requests on an install where the user has switched them
-     * off. With the switch off there is no portrait to be had: the artist page
-     * shows its 「没有头像」 state, which is the same answer it already gives for
-     * a singer no platform has a photo of.
-     *
-     * Returning `null` rather than throwing is deliberate. `resolve` treats a
-     * throw as "the lookup could not be completed" and reports that to the user
-     * as a failure; a switched-off lookup did not fail, it was never asked.
-     */
-    resolveArtistImage: (async (...args: Parameters<ArtistImageResolver>) =>
-      settings.get().allowBuiltinOnlineSearch ? resolveArtistImage(...args) : null) as ArtistImageResolver
-  })
   const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
   const hotWords = new HotWordSource(undefined, {
-    file: join(dataDir, 'library', 'hot-words.json'),
-    /*
-     * 榜单缓存按音源版本隔离。
-     *
-     * 内置适配器抓到的热词是「某个脚本给出的意见」，脚本更新后那份意见就不再
-     * 代表任何在跑的东西。`versionOf` 把音源身份与脚本内容指纹合成一把键，
-     * 换脚本或换内容都会令旧条目失效——见 `source-store.ts` 的 `versionOf`，
-     * 那里解释了为什么用内容摘要而不是作者声明的版本号。
-     *
-     * 读实时值是必须的：用户可以在应用运行时导入新脚本，快照会让替换掉的
-     * 那一版继续盖一整天章。
-     *
-     * 没有任何已启用脚本时返回 `undefined`，`HotWordSource` 把它当作「不隔离」
-     * 处理——这是对的：没有脚本就没有版本可归属，此时内置榜单纯粹是内置的。
-     */
-    version: () => {
-      const enabled = sourceStore.list().find((api) => api.meta.enabled)
-      return enabled ? sourceStore.versionOf(enabled.meta.id) : undefined
-    }
+    file: join(dataDir, 'library', 'hot-words.json')
   })
   // Sources run in a forked child process, so they can be killed without
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
   const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'))
-  // The capability-protocol engine shares that same host file: it is one host
-  // that speaks both protocols (see `source-host.ts`), selected per script by
-  // whether the init payload carries a `jj` block.
-  const jjProviderEngine = new JjProviderEngine(sourceStore, unpackedPath('source-host.js'))
-  const searchRouter = new SearchRouter({
-    engine: jjProviderEngine,
-    hotWords,
-    // Read live rather than captured: the user can flip this in Settings while
-    // the app is running, and a cached copy would keep the old answer until
-    // restart — which reads as the switch not working.
-    allowBuiltin: () => settings.get().allowBuiltinOnlineSearch,
-    /*
-     * 内置榜单缓存的隔离键，与 `hotWords` 构造里那个是同一个答案。
-     *
-     * 这里再给一遍而不是让 router 去问 `HotWordSource`：缓存是被写入的那一方，
-     * 它只知道「现在该用哪把键」，读实时值这件事由注入方负责——和 `allowBuiltin`
-     * 同一个模式，两处都读实时值，免得用户在运行中换脚本要重启才生效。
-     */
-    providerVersion: () => {
-      const enabled = sourceStore.list().find((api) => api.meta.enabled)
-      return enabled ? sourceStore.versionOf(enabled.meta.id) : undefined
-    }
+  const onlinePlatforms = new OnlinePlatformRegistry({
+    sourcesByScript: () => sourceEngine.getSourcesByScript(),
+    isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled),
+    catalogConsent: () => settings.get().onlineCatalogConsent
   })
-  // Playback needs both engines, so it is built here rather than next to the
-  // search router: it is not an alternative to either one but the thing that
-  // decides between them, per track.
-  const playbackRouter = new PlaybackRouter({ sourceEngine, jjEngine: jjProviderEngine })
-  // Playlist import and 榜单 share the same gate as search, deliberately: one policy
-  // with two switches is how the two drift and one ends up defaulting open.
+  const artistImages = new ArtistImageStore(dataDir, {
+    saveCover: (data, format) => library.saveCover(data, format),
+    allowsArtistImage: source => source
+      ? onlinePlatforms.allows(source, 'artistImage')
+      : onlinePlatforms.platforms('artistImage').length > 0,
+    resolveArtistImage: (async (name, http) => {
+      return resolveArtistImage(name, http, () => onlinePlatforms.platforms('artistImage'))
+    }) as ArtistImageResolver
+  })
+  const searchRouter = new SearchRouter({
+    hotWords,
+    registry: onlinePlatforms
+  })
+  const entityDetails = new OnlineEntityDetails({
+    allows: (source, capability) => onlinePlatforms.allows(source, capability),
+    searchTracks: (source, keyword, page, signal) => searchRouter.search(source, keyword, page, signal),
+    saveArtwork: (data, mimeType) => library.saveCover(data, mimeType)
+  })
+  const playbackRouter = new PlaybackRouter({ sourceEngine })
   const libraryRouter = new LibraryRouter({
-    engine: jjProviderEngine,
-    allowBuiltin: () => settings.get().allowBuiltinOnlineSearch
+    registry: onlinePlatforms
   })
 
   await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load(), hotWords.load()])
@@ -516,24 +517,32 @@ async function createServices(): Promise<Services> {
   const onlineLyric = (music: OnlineMusicInfo, only?: OnlineLyricSource, signal?: AbortSignal) => {
     const preference = settings.get()
     /*
-     * 内置平台这一步是可选的，且由用户在设置里开关。
-     *
-     * 曾经它无条件直连内置适配器，所以即使用户把内置平台请求全关掉，
-     * 「平台」这一步仍会发出请求——正是 AC3 要断掉的那条路。现在它和搜索、
-     * 热词、歌单共用一个 `allowBuiltinOnlineSearch`，读的是实时值而不是快照，
-     * 免得用户改了开关要重启才生效。
-     *
-     * 关掉时这一步返回空歌词，而不是从顺序里删掉：`lyricSourceOrder` 的
-     * 先后是用户排的（脚本 / 平台 / 搜索），删掉会让「回退」这一列悄悄改意义。
-     * 返回空等同于「这一步没找到」，于是自然落到下一步。
+     * JJ's lyric adapter is optional and uses the same live source-plus-consent
+     * registry as search. Returning an empty lyric when the platform is not
+     * admitted keeps the user's configured script / platform / search fallback
+     * order intact.
      */
-    const allowBuiltin = preference.allowBuiltinOnlineSearch
     return resolveOnlineLyricByOrder(
       lyricSourceOrder(preference.onlineLyricSource, preference.onlineLyricFallback, only),
       {
         script: () => playbackRouter.lyric(music, signal),
-        platform: () => allowBuiltin ? fetchOnlineLyric(music, signal) : Promise.resolve({ lyric: '' }),
-        search: () => lyricFromOtherPlatforms(music, {}, signal)
+        platform: () => onlinePlatforms.allows(music.source, 'lyrics')
+          ? fetchOnlineLyric(music, signal)
+          : Promise.resolve({ lyric: '' }),
+        search: () => lyricFromOtherPlatforms(music, {
+          sources: onlinePlatforms.platforms('lyrics'),
+          match: (local, options) => matchMetadata(local, {
+            ...options,
+            search: async (source, keyword, requestSignal) => {
+              if (!onlinePlatforms.allows(source, 'lyrics')) return []
+              return (await searchRouter.search(source, keyword, 1, requestSignal)).list
+            }
+          }),
+          fetchLyric: async (candidate, requestSignal) =>
+            onlinePlatforms.allows(candidate.source, 'lyrics')
+              ? fetchOnlineLyric(candidate, requestSignal)
+              : { lyric: '' }
+        }, signal)
       },
       signal
     )
@@ -544,28 +553,27 @@ async function createServices(): Promise<Services> {
    * as the search page.
    *
    * `lyricCandidates` and `searchLyricOnline` match a local track against the
-   * built-in adapters. Left to their own defaults they reach them directly, which
-   * is a fifth and sixth path that issues built-in platform requests on an install
-   * where the user switched them off — the same defect `IPC.matchMetadata` was
-   * fixed for.
+   * platform adapters. Every search and lyric fetch is checked against the live
+   * platform registry, which requires consent and an enabled, healthy LX source
+   * declaring the requested platform.
    *
    * `search` is routed, not called directly, for that reason. `fetchLyric` fetches
-   * a *specific* track the search already returned, so it is not a search: it is
-   * gated to match, because with the built-in switch off there is nothing the
-   * search could have found on a built-in platform in the first place.
+   * a *specific* track the search already returned. It is still gated independently
+   * because source state may change between search and lyric retrieval.
    *
    * `provider` is the cache-isolation key (see `source-store.ts` `versionOf`).
-   * It is carried here rather than read inside `lyric-service` because only this
-   * layer knows which script is enabled; the service is a pure function of what
-   * it is handed, which is what keeps its offline tests honest.
+   * It is carried here rather than read inside `lyric-service` because this layer
+   * owns the live registry and source versions; the service stays a pure function
+   * of what it is handed, which keeps its offline tests honest.
    */
   const lyricDeps: LyricDeps = {
     search: async (source: SourceId, keyword: string, signal?: AbortSignal) => {
+      if (!onlinePlatforms.allows(source, 'lyrics')) return []
       const routed = await searchRouter.search(source, keyword, 1, signal)
       return routed.list
     },
     fetchLyric: async (music: OnlineMusicInfo, signal?: AbortSignal) => {
-      if (!settings.get().allowBuiltinOnlineSearch) return { lyric: '' }
+      if (!onlinePlatforms.allows(music.source, 'lyrics')) return { lyric: '' }
       return fetchOnlineLyric(music, signal)
     },
     provider: () => {
@@ -578,7 +586,9 @@ async function createServices(): Promise<Services> {
     settings: () => settings.get(), defaultFolder: join(app.getPath('downloads'), 'JJ Music'),
     resolve: (track, quality) => playbackRouter.musicUrl(track, quality, true),
     lyrics: async (track) => (await onlineLyric(track)).lyric,
-    cover: async track => track.picUrl || playbackRouter.pic(track),
+    cover: async track => track.picUrl && onlinePlatforms.allows(track.source, 'cover')
+      ? track.picUrl
+      : playbackRouter.pic(track),
     /*
      * The audio and cover URLs being fetched here were produced by an untrusted
      * source script, so this must validate every hop like the other
@@ -599,7 +609,7 @@ async function createServices(): Promise<Services> {
     trash: (path) => shell.trashItem(path)
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, jjProviderEngine, searchRouter, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, entityDetails, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -638,8 +648,21 @@ async function createServices(): Promise<Services> {
   }
 
   sourceEngine.on({
-    sourcesChanged: () => {
+    updateAlert: (apiId, message) => {
+      const meta = sourceStore.get(apiId)?.meta
+      if (!meta || !meta.allowShowUpdateAlert) return
+      mainWindow?.webContents.send(IPC.sourcesUpdateAlert, {
+        name: meta.name,
+        author: meta.author,
+        message
+      })
+    },
+    sourcesChanged: (apiId) => {
       platformProbes.clear()
+      if (apiId) {
+        const providerId = sourceStore.get(apiId)?.meta.stableId ?? apiId
+        sourceMediaProxy.revokeProvider(providerId)
+      }
       mainWindow?.webContents.send(IPC.sourcesChanged)
     }
   })
@@ -1312,6 +1335,15 @@ function registerMediaProtocol(): void {
   })
 }
 
+/** Stream script audio from main after validating every URL/redirect hop. */
+function registerSourceAudioProtocol(): void {
+  protocol.handle(SOURCE_STREAM_SCHEME, (request) => sourceMediaProxy.handleRequest({
+    url: request.url,
+    method: request.method,
+    headers: request.headers
+  }))
+}
+
 /* ------------------------------------------------------------------ *
  * IPC
  * ------------------------------------------------------------------ */
@@ -1344,8 +1376,8 @@ function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): v
 const activeRequests = new Map<string, AbortController>()
 async function cancellableRequest<T>(id: unknown, work: (signal?: AbortSignal) => Promise<T>): Promise<T> {
   if (id === undefined) return work()
-  if (typeof id !== 'string' || !/^search-\d{13}-\d{1,12}$/.test(id) || activeRequests.has(id)) {
-    throw new Error('搜索请求编号无效')
+  if (!isCancellableRequestId(id) || activeRequests.has(id)) {
+    throw new Error('请求编号无效')
   }
   const controller = new AbortController()
   activeRequests.set(id, controller)
@@ -1630,6 +1662,8 @@ function registerIpc(): void {
      * so the renderer's copy is corrected by the same call.
      */
     const { libraryFolders: _libraryFolders, downloadFolder: _downloadFolder, ...writable } = patch
+    // Editing the explicit consent setting is itself the one-time disclosure decision.
+    if (patch.onlineCatalogConsent !== undefined) writable.onlineCatalogConsentPrompted = true
     // 关掉「记录搜索历史」就把已存的也清掉，而且此后任何补丁想写历史都写不进去。
     // 只看这一次补丁不够：渲染层手里那份设置可能比主进程旧，而这个开关的意思就是
     // "别留"。同一份补丁里把它打开（快照恢复、重置）仍然允许带着列表进来。
@@ -1731,9 +1765,9 @@ function registerIpc(): void {
    * through this, because four copies of the same gate are four chances for one of
    * them to be narrower than the rest.
    */
-  function importScript(content: string, name: string): { meta: UserApiMeta; blocking: { title: string; detail: string }[] } {
+  function importScript(content: string, name: string, updateUrl?: string): { meta: UserApiMeta; blocking: { title: string; detail: string }[] } {
     const { sourceStore, sourceEngine } = requireServices()
-    const meta = sourceStore.import(content, name)
+    const meta = sourceStore.import(content, name, updateUrl)
     const loaded = sourceStore.get(meta.id)
     if (!loaded) return { meta, blocking: [] }
     const report = sourceEngine.validate(loaded.source, meta.name)
@@ -1743,7 +1777,7 @@ function registerIpc(): void {
   }
 
   handle(IPC.sourcesImport, async (payload: string, name?: string) => {
-    const { sourceStore, sourceEngine, jjProviderEngine } = requireServices()
+    const { sourceStore, sourceEngine } = requireServices()
     if (sourceStore.metas().length >= 20) {
       throw new Error('最多只能导入 20 个音源')
     }
@@ -1757,12 +1791,12 @@ function registerIpc(): void {
 
     // Only enabled scripts start; a freshly imported one is disabled, so this
     // is a no-op for the new entry and simply re-affirms the existing set.
-    await Promise.all([sourceEngine.startAll(), jjProviderEngine.startAll()])
+    await sourceEngine.startAll()
     return meta
   })
 
   handle(IPC.sourcesImportFile, async () => {
-    const { sourceEngine, jjProviderEngine } = requireServices()
+    const { sourceEngine } = requireServices()
     const result = await dialog.showOpenDialog({
       title: '选择音源脚本',
       filters: [{ name: '音源脚本', extensions: ['js', 'json', 'txt'] }],
@@ -1779,7 +1813,7 @@ function registerIpc(): void {
       if (blocking.length) refused.push(meta.name)
     }
 
-    await Promise.all([sourceEngine.startAll(), jjProviderEngine.startAll()])
+    await sourceEngine.startAll()
     if (refused.length > 0) {
       throw new Error(
         `以下音源未通过启动前校验，已导入但保持停用：${refused.join('、')}`
@@ -1800,7 +1834,7 @@ function registerIpc(): void {
    * passes and the user switches the script on.
    */
   handle(IPC.sourcesImportUrl, async (url: string) => {
-    const { sourceStore, sourceEngine, jjProviderEngine } = requireServices()
+    const { sourceStore, sourceEngine } = requireServices()
     if (typeof url !== 'string') throw new Error('链接无效')
     const link = url.trim()
     if (!/^https?:\/\/\S+$/i.test(link)) throw new Error('请输入 http(s) 链接')
@@ -1814,8 +1848,9 @@ function registerIpc(): void {
     // undecoded name is the better label, so it is what is kept.
     let name = file
     try { name = decodeURIComponent(file) } catch { /* not percent-encoded */ }
-    const { meta, blocking } = importScript(content, name || '在线音源')
-    await Promise.all([sourceEngine.startAll(), jjProviderEngine.startAll()])
+    const updateUrl = looksLikeScript(content) ? new URL(link).toString() : undefined
+    const { meta, blocking } = importScript(content, name || '在线音源', updateUrl)
+    await sourceEngine.startAll()
     if (blocking.length) {
       throw new Error(`「${meta.name}」未通过启动前校验，已导入但保持停用：\n${blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')}`)
     }
@@ -1823,8 +1858,8 @@ function registerIpc(): void {
   })
 
   handle(IPC.sourcesRemove, async (id: string) => {
-    const { sourceStore, sourceEngine, jjProviderEngine } = requireServices()
-    await Promise.all([sourceEngine.stop(id), jjProviderEngine.stop(id)])
+    const { sourceStore, sourceEngine } = requireServices()
+    await sourceEngine.stop(id)
     sourceStore.remove(id)
   })
 
@@ -1841,11 +1876,11 @@ function registerIpc(): void {
    * page can render each finding with its own severity and remedy.
    */
   handle(IPC.sourcesToggle, async (id: string, enabled: boolean) => {
-    const { sourceStore, sourceEngine, jjProviderEngine } = requireServices()
+    const { sourceStore, sourceEngine } = requireServices()
 
     if (!enabled) {
       sourceStore.setEnabled(id, false)
-      await Promise.all([sourceEngine.stop(id), jjProviderEngine.stop(id)])
+      await sourceEngine.stop(id)
       return { started: false, report: null }
     }
 
@@ -1869,7 +1904,8 @@ function registerIpc(): void {
     }
 
     sourceStore.setEnabled(id, true)
-    await Promise.all([sourceEngine.reload(id), jjProviderEngine.reload(id)])
+    await sourceEngine.reload(id)
+    await maybePromptOnlineCatalogConsent()
     return { started: true, report }
   })
 
@@ -1882,8 +1918,8 @@ function registerIpc(): void {
   })
 
   handle(IPC.sourcesReload, async (id: string) => {
-    const { sourceEngine, jjProviderEngine } = requireServices()
-    await Promise.all([sourceEngine.reload(id), jjProviderEngine.reload(id)])
+    const { sourceEngine } = requireServices()
+    await sourceEngine.reload(id)
   })
 
   /**
@@ -1899,29 +1935,17 @@ function registerIpc(): void {
   )
 
   handle(IPC.sourcesVerifyPlatform, async (id: SourceId) => {
-    const { sourceEngine, settings } = requireServices()
+    const { sourceEngine } = requireServices()
     const source = sourceEngine.getSources().find(item => item.id === id)
     if (!source) throw new Error('该平台尚未启动或已停用')
     const existing = platformProbes.get(id)
     if (existing) return existing
     const request = probePlatform(source, {
-      /*
-       * The probe needs one playable track to test a URL against, and the only
-       * place to get one is a search. It prefers the 音源 path — the same one the
-       * search page uses — and falls back to the built-in adapter only when the
-       * user has switched those on, so the probe cannot become the one remaining
-       * code path that still calls a platform on a gate-closed install.
-       *
-       * The fallback is not "silent": this whole handler is a button the user
-       * pressed about a specific source, and an unsearchable platform yields the
-       * probe's own 'unknown' with a reason rather than a fabricated pass.
-       */
+      // Verification uses the same live catalog admission as the search page.
       search: async platform => {
         const { searchRouter } = requireServices()
         const routed = await searchRouter.search(platform, '晴天 周杰伦', 1)
-        if (routed.list.length > 0) return routed.list
-        if (!settings.get().allowBuiltinOnlineSearch) return []
-        return (await searchOnline(platform, '晴天 周杰伦', 1)).list
+        return routed.list
       },
       resolve: async track => (await requireServices().playbackRouter.musicUrl(track, '128k')).url,
       // The URL comes from a user-imported script, which this codebase already
@@ -1948,8 +1972,8 @@ function registerIpc(): void {
    * Check whether a newer version of an imported 音源 is available.
    *
    * This never installs anything. It fetches the script at the source's
-   * `@homepage` through the same guarded pipeline as every other outbound
-   * request (see `source-updater.ts`), compares versions, and returns what it
+   * the direct import URL (or, when absent, `@homepage`) through the same guarded
+   * pipeline as every other outbound request (see `source-updater.ts`), compares versions, and returns what it
    * found — including the download's SHA-256, which confirms the transfer but
    * says nothing about who published the bytes. The user sees the result and
    * decides; `sourcesUpdateApply` is the separate call that replaces anything.
@@ -1958,10 +1982,29 @@ function registerIpc(): void {
     const { sourceStore } = requireServices()
     const loaded = sourceStore.get(id)
     if (!loaded) throw new Error('音源不存在')
-    return checkForUpdate({
-      currentVersion: loaded.meta.version,
-      homepage: loaded.meta.homepage
-    })
+    const checkedAt = Date.now()
+    sourceStore.recordUpdateCheck(id, { checkedAt, state: 'checking' })
+    mainWindow?.webContents.send(IPC.sourcesChanged)
+    try {
+      const result = await checkForUpdate({
+        currentVersion: loaded.meta.version,
+        updateUrl: loaded.meta.updateUrl,
+        homepage: loaded.meta.homepage,
+        currentScript: loaded.source
+      })
+      sourceStore.recordUpdateCheck(id, summarizeUpdateCheck(result, checkedAt))
+      mainWindow?.webContents.send(IPC.sourcesChanged)
+      return result
+    } catch (error) {
+      sourceStore.recordUpdateCheck(id, {
+        checkedAt,
+        state: 'failed',
+        currentVersion: loaded.meta.version,
+        message: `检查更新失败：${error instanceof Error ? error.message : String(error)}`
+      })
+      mainWindow?.webContents.send(IPC.sourcesChanged)
+      throw error
+    }
   })
 
   /**
@@ -1971,45 +2014,37 @@ function registerIpc(): void {
    * approved is exactly what gets written — re-downloading here would create a
    * window in which the bytes could differ from the ones that were shown.
    *
-   * After the store swaps the script the source is reloaded in both engines.
+   * After the store swaps the script the source is reloaded.
    * Reloading is the only path that re-runs the pre-flight validation: an
    * update that turns out to be unsafe is blocked and quarantined here exactly
    * as an import would be.
    */
   handle(IPC.sourcesUpdateApply, async (id: string, script: string) => {
-    const { sourceStore, sourceEngine, jjProviderEngine } = requireServices()
+    const { sourceStore, sourceEngine } = requireServices()
     if (typeof id !== 'string' || !id) throw new Error('音源不存在')
-    if (typeof script !== 'string' || !script.trim()) throw new Error('更新内容为空')
-    const meta = sourceStore.replaceScript(id, script, '在线音源')
-    if (!meta) throw new Error('音源不存在，可能已被删除')
-    await Promise.all([sourceEngine.reload(id), jjProviderEngine.reload(id)])
-    return meta
+    return applySourceUpdate(sourceStore, sourceEngine, id, script)
   })
 
   /**
    * Roll back to the script the most recent update replaced.
    *
-   * Like applying, this reloads both engines so the restored script goes
+   * Like applying, this reloads the source so the restored script goes
    * through pre-flight validation again — a rollback is not a way to get an
    * unsafe script running past the checks.
    */
   handle(IPC.sourcesUpdateRollback, async (id: string) => {
-    const { sourceStore, sourceEngine, jjProviderEngine } = requireServices()
-    if (!sourceStore.rollback(id)) throw new Error('没有可回退的版本')
-    await Promise.all([sourceEngine.reload(id), jjProviderEngine.reload(id)])
-    return sourceStore.metas().find(item => item.id === id) ?? null
+    const { sourceStore, sourceEngine } = requireServices()
+    return rollbackSourceUpdate(sourceStore, sourceEngine, id)
   })
 
   /* ---------------- online music ---------------- */
   /**
    * Search one platform, or all of them.
    *
-   * Goes through `SearchRouter`, which decides between a 音源 that declares the
-   * search capability and this app's built-in adapters — the latter only when the
-   * user has switched them on. There is no fallback between the two: a source
-   * that fails does not silently become a built-in platform request, because that
-   * would hide the failure and keep sending the requests the user moved to the
-   * script (AC3).
+   * Goes through `SearchRouter`, which admits catalog requests only when the user
+   * has consented and an enabled, healthy LX source declares the requested platform.
+   * LX v2 scripts provide playback resolution; JJ Music's small adapters handle
+   * catalog search without duplicating the LX runtime.
    */
   handle(IPC.musicSearch, async (source: SourceId, keyword: string, page = 1, requestId?: string) => cancellableRequest(requestId, async signal => {
     const { searchRouter } = requireServices()
@@ -2022,22 +2057,25 @@ function registerIpc(): void {
   /**
    * Platforms the search UI should offer as tabs.
    *
-   * Union of what the built-in adapters know and what running 音源 declare, so a
-   * source serving a platform this app has no adapter for still gets a tab —
-   * otherwise its results would be unreachable from the UI.
+   * Only show tabs the current search router can serve under live source state
+   * and catalog consent.
    */
   handle(IPC.musicSearchProviders, () => {
     const { searchRouter } = requireServices()
-    const builtin = searchProviders()
-    const known = new Set(builtin.map((item) => item.id))
-    const extra: Array<{ id: SourceId; name: string }> = []
-    for (const id of searchRouter.searchablePlatforms()) {
-      if (known.has(id)) continue
-      known.add(id)
-      extra.push({ id, name: id.toUpperCase() })
-    }
-    return [...builtin, ...extra]
+    const searchable = new Set(searchRouter.searchablePlatforms())
+    return searchProviders().filter((item) => searchable.has(item.id))
   })
+
+  handle(IPC.onlineArtistPage, (source: SourceId, id: string, page = 1, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.artistPage(source, id, page, signal)))
+  handle(IPC.onlineAlbumPage, (source: SourceId, id: string, page = 1, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.albumPage(source, id, page, signal)))
+  handle(IPC.onlineEntityArtwork, (source: SourceId, kind: 'artist' | 'album', url: string, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.artwork(source, kind, url, signal)))
+  handle(IPC.onlineArtistCandidates, (source: SourceId, name: string, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.artistCandidates(source, name, signal)))
+  handle(IPC.onlineAlbumCandidates, (source: SourceId, name: string, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.albumCandidates(source, name, signal)))
 
   /**
    * What each platform's users are searching right now, for the empty search page.
@@ -2060,9 +2098,8 @@ function registerIpc(): void {
    * platform's page 1 followed by unrelated results.
    */
   handle(IPC.musicSearchAll, async (keyword: string, page = 1, requestId?: string) => cancellableRequest(requestId, async signal => {
-    // The router already interleaves (音源 path and built-in path alike), so this
-    // handler no longer re-merges: doing it twice would be a second ordering
-    // rule to keep in step with the first.
+    // The router already interleaves built-in platform results, so this handler
+    // does not add a second ordering rule.
     const { searchRouter } = requireServices()
     const routed = await searchRouter.search('all', keyword, page, signal)
     return {
@@ -2070,7 +2107,7 @@ function registerIpc(): void {
       total: routed.total ?? routed.list.length,
       allPage: routed.allPage ?? Math.max(1, page),
       failed: routed.failed ?? [],
-      sources: (routed.providers ?? []).map((p) => ({ source: p.providerId as unknown as SourceId, count: p.count })),
+      sources: [],
       servedBy: routed.servedBy,
       ...(routed.message ? { message: routed.message } : {}),
       ...(routed.reason ? { reason: routed.reason } : {})
@@ -2086,7 +2123,7 @@ function registerIpc(): void {
    * whatever it could find — a missing cover is not a failure.
    */
   handle(IPC.musicEnrich, async (music: OnlineMusicInfo, only?: unknown, requestId?: string) => cancellableRequest(requestId, async signal => {
-    const { sourceEngine, onlineLyric } = requireServices()
+    const { sourceEngine, onlineLyric, onlinePlatforms } = requireServices()
     // The renderer may name one source (the now-playing menu's switch); anything
     // it sends that is not one of the three is ignored rather than obeyed.
     const picked: OnlineLyricSource | undefined =
@@ -2096,9 +2133,16 @@ function registerIpc(): void {
 
     let cover: AssetRef | undefined = music.assets?.cover?.[0]
     let picUrl = music.picUrl ?? ''
-    if (!picUrl) {
-      picUrl = await sourceEngine.getPic(music.source, music, signal)
-      if (picUrl) cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
+    if (!picUrl && onlinePlatforms.allows(music.source, 'cover')) {
+      const scriptPic = await sourceEngine.getPic(music.source, music, signal)
+      if (scriptPic) {
+        try {
+          picUrl = await sourceMediaProxy.imageDataUrl(scriptPic)
+          cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
+        } catch {
+          picUrl = ''
+        }
+      }
     } else if (!cover) {
       cover = { origin: 'remote', provider: '平台搜索结果', at: Date.now() }
     }
@@ -2119,7 +2163,16 @@ function registerIpc(): void {
     IPC.musicUrl,
     async (_source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) => {
       const { playbackRouter } = requireServices()
-      return playbackRouter.musicUrl(musicInfo, quality)
+      const result = await playbackRouter.musicUrl(musicInfo, quality)
+      if (!result.providerId || !result.providerVersion) throw new Error('音源没有可验证的身份，无法安全播放')
+      return {
+        ...result,
+        url: sourceMediaProxy.audioUrl(result.url, {
+          sourceId: _source,
+          providerId: result.providerId,
+          providerVersion: result.providerVersion
+        })
+      }
     }
   )
 
@@ -2130,7 +2183,10 @@ function registerIpc(): void {
 
   handle(IPC.musicPic, async (_source: SourceId, musicInfo: OnlineMusicInfo) => {
     const { playbackRouter } = requireServices()
-    return playbackRouter.pic(musicInfo)
+    const raw = await playbackRouter.pic(musicInfo)
+    if (!raw) return ''
+    try { return await sourceMediaProxy.imageDataUrl(raw) }
+    catch { return '' }
   })
 
   /**
@@ -2251,6 +2307,10 @@ function registerIpc(): void {
     return settings.get().downloadFolder
   })
   const importPreviews = new Map<string, ImportedPlaylist>()
+  handle(IPC.playlistImportProviders, () => {
+    const admitted = new Set(requireServices().libraryRouter.playablePlatforms())
+    return searchProviders().filter((item) => admitted.has(item.id))
+  })
   handle(IPC.playlistImportPreview, async (source: SourceId, input: string) => {
     if (typeof input !== 'string' || input.length > 4096) throw Error('歌单链接无效')
     // The host recognises the link, not the script: `parsePlaylistId` is what rejects
@@ -2268,7 +2328,7 @@ function registerIpc(): void {
       ...(routed.coverUrl ? { coverUrl: routed.coverUrl } : {}),
       tracks: routed.list,
       total: routed.total ?? routed.list.length,
-      warnings: []
+      warnings: routed.warnings ?? []
     }
     if(importPreviews.size>=10)importPreviews.delete(importPreviews.keys().next().value!)
     importPreviews.set(token,preview)
@@ -2286,7 +2346,7 @@ function registerIpc(): void {
     try { await playlists.addTracks(playlist.id,tracks) } catch(error) {await playlists.remove(playlist.id);throw error}
     // 封面丢了不该让整次导入失败：用户要的是那一百多首歌。
     let coverFailed=false
-    if (preview.coverUrl) {
+    if (preview.coverUrl && requireServices().onlinePlatforms.allows(preview.source, 'cover')) {
       try {
         const saved=await fetchImportCover(preview,(data,format)=>library.saveCover(data,format))
         if(saved)await playlists.setCover(playlist.id,saved);else coverFailed=true
@@ -2295,8 +2355,7 @@ function registerIpc(): void {
     return {...playlist,trackCount:tracks.length,coverFailed}
   })
   handle(IPC.playlistList, () => requireServices().playlists.list())
-  // 榜单：只做浏览，不做订阅与定时同步（Plan §2.3）。没有任何音源声明
-  // `getLeaderboard` 时，返回空列表外加原因，由渲染层显示说明文案而不是空白页。
+  // Keep the legacy IPC shape for callers while F1's platform-backed leaderboard route is unavailable.
   handle(IPC.leaderboardList, (source?: SourceId) =>
     requireServices().libraryRouter.leaderboards(source)
   )
@@ -2346,7 +2405,7 @@ function registerIpc(): void {
      * 请求不再发出」，没有例外条款；留一处豁免，那句话就不成立了，下一个审计者
      * 还得读代码才知道到底有几处。所以宁可让徽标空着，也要让这条保证可被验证。
      */
-    if (!requireServices().settings.get().allowBuiltinOnlineSearch) return []
+    if (!requireServices().onlinePlatforms.allows('wy', 'search')) return []
     const tracks = await requireServices().playlists.getItems(listId)
     const wanted = tracks
       .filter((track) => !isLocalTrack(track) && track.source === 'wy' && !(track.meta?.qualitys?.length))
@@ -2686,7 +2745,9 @@ function registerIpc(): void {
        * `assetsExport` and are unaffected.)
        */
       delete effective.cover
-      if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))) {
+      if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))
+        && options?.coverFrom
+        && requireServices().onlinePlatforms.allows(options.coverFrom.source, 'cover')) {
         const cover = await fetchCoverBytes(options?.coverFrom)
         if (cover) effective.cover = cover
       }
@@ -2697,6 +2758,7 @@ function registerIpc(): void {
 
   /** Fetch a cover image for a matched track, returned as a data URL. */
   handle(IPC.matchCover, async (music: OnlineMusicInfo) => {
+    if (!requireServices().onlinePlatforms.allows(music.source, 'cover')) return null
     const cover = await fetchCoverBytes(music)
     if (!cover) return null
     return {
@@ -2760,6 +2822,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     registerMediaProtocol()
+    registerSourceAudioProtocol()
     relaxCorsForMedia()
     services = await createServices()
     registerIpc()
@@ -2778,7 +2841,13 @@ if (!app.requestSingleInstanceLock()) {
 
     // Sources are started after the window exists so init errors can be shown.
     void services.sourceEngine.startAll()
-    void services.jjProviderEngine.startAll()
+      .then(() => {
+        void checkDailySourceUpdates(services!.sourceStore, {
+          onChange: () => mainWindow?.webContents.send(IPC.sourcesChanged)
+        }).catch(error => console.error('音源每日更新检查失败:', error))
+        return maybePromptOnlineCatalogConsent(services!)
+      })
+      .catch((error) => console.error('启用音源时未能显示在线目录说明:', error))
 
     app.on('activate', () => {
       // Not `getAllWindows().length === 0`: the lyric overlay is a window too,
@@ -2811,13 +2880,10 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault()
     shutdownStarted = true
     const current = services
-    // Both engines own child processes, so both must be torn down before quit:
-    // leaving the JJ engine's children running would keep orphaned source
-    // processes alive after the window is gone.
+    // The source lifecycle owns child processes, so stop it before quitting.
     void Promise.allSettled([
       current.downloads.shutdown(),
-      current.sourceEngine.stopAll(),
-      current.jjProviderEngine.stopAll()
+      current.sourceEngine.stopAll()
     ])
       .then(() => flushJsonWrites())
       .finally(() => {

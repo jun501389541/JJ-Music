@@ -61,7 +61,13 @@ export function mergeLyrics(lyrics: LyricResult, translation: boolean, romanizat
 interface Dependencies {
   settings: () => AppSettings
   defaultFolder: string
-  resolve: (track: OnlineMusicInfo, quality: Quality) => Promise<{ url: string; quality: Quality }>
+  resolve: (track: OnlineMusicInfo, quality: Quality) => Promise<{
+    url: string
+    quality: Quality
+    providerId?: string
+    providerName?: string
+    providerVersion?: string
+  }>
   lyrics: (track: OnlineMusicInfo) => Promise<LyricResult>
   cover: (track: OnlineMusicInfo) => Promise<string>
   /**
@@ -128,7 +134,13 @@ export class DownloadManager {
     if (this.tasks.filter(t => !['completed','failed','cancelled'].includes(t.status)).length + tracks.length > 500) throw Error('下载队列最多 500 首')
     const ids: string[] = []
     for (const track of tracks) {
-      const existing = this.tasks.find(t => t.track.id === track.id && t.quality === quality && !['completed','failed','cancelled'].includes(t.status))
+      const existing = this.tasks.find(t =>
+        t.track.source === track.source &&
+        t.track.id === track.id &&
+        t.track.providerId === track.providerId &&
+        t.quality === quality &&
+        !['completed','failed','cancelled'].includes(t.status)
+      )
       if (existing) { ids.push(existing.id); continue }
       const task: DownloadTask = {id:randomUUID(),track:structuredClone(track),quality,status:'queued',received:0,warnings:[],createdAt:Date.now()}
       this.tasks.push(task); ids.push(task.id)
@@ -144,6 +156,8 @@ export class DownloadManager {
     if (this.closing) throw Error('播放器正在退出')
     const task = this.tasks.find(t => t.id === id)
     if (!task || !['failed','cancelled'].includes(task.status) || this.controllers.has(id)) throw Error('任务尚未停止或无需重试')
+    // Keep the previous resolution identity until the retry resolves. It tells
+    // run() whether an existing partial file belongs to the same script version.
     task.status='queued'; task.received=0; task.total=undefined; task.path=undefined; task.lyricPath=undefined; task.error=undefined; task.warnings=[]
     this.save(); this.pump()
   }
@@ -242,6 +256,23 @@ export class DownloadManager {
       await mkdir(folder, {recursive:true})
       const resolved = await abortable(this.deps.resolve(task.track, task.quality),signal)
       signal.throwIfAborted()
+      const providerChanged = task.resolvedProviderId !== resolved.providerId ||
+        task.resolvedProviderVersion !== resolved.providerVersion
+      if (providerChanged) {
+        // A provider may return a different recording, encoding, or range
+        // validator for the same track ID. Never append bytes across either a
+        // provider or script-version boundary.
+        await rm(join(folder, `.jj-${task.id}.part`), { force: true })
+        task.etag = undefined
+        task.lastModified = undefined
+        task.remoteSize = undefined
+        task.received = 0
+        task.total = undefined
+      }
+      task.resolvedProviderId = resolved.providerId
+      task.resolvedProviderName = resolved.providerName
+      task.resolvedProviderVersion = resolved.providerVersion
+      this.save()
       if (resolved.quality !== task.quality) throw Error('音源未返回所选音质')
       if (!/^https?:\/\//i.test(resolved.url)) throw Error('音频地址无效')
       temp=join(folder, `.jj-${task.id}.part`)

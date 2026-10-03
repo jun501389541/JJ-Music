@@ -54,6 +54,7 @@ import { toLegacyOnline } from './legacy-music-info'
 import { assertPublicHttpUrl } from '../online/url-guard'
 import type { LoadedApi, SourceStore } from './source-store'
 import { validateSourceBeforeStart, type ValidationReport } from './source-validator'
+import { describeScript } from './script-header'
 import { SourceRuntimeHost, type ExitInfo, type RuntimeState } from './source-runtime-host'
 import { MAX_LOG_LINES } from './source-runtime-host'
 
@@ -93,20 +94,30 @@ interface ScriptRuntime {
    * `onReady`, and `dead`/`crashReason` are read straight off the host.
    */
   sources: SourceInfo[]
+  /** Candidate updates run before disk commit and must not mutate the stored record. */
+  transient?: boolean
 }
 
 export interface SourceEngineEvents {
   /** A script finished init and reported its sources. */
-  sourcesChanged: () => void
+  sourcesChanged: (apiId?: string) => void
   /** A script failed to init or crashed. */
   scriptError: (apiId: string, error: string) => void
+  /** A permitted source-author update notice, normalized to plain text. */
+  updateAlert: (apiId: string, message: string) => void
 }
 
 export class SourceEngine {
   private readonly runtimes = new Map<string, ScriptRuntime>()
+  /** Monotonic lifecycle token; stop/reload invalidates starts still awaiting the host. */
+  private readonly lifecycle = new Map<string, number>()
+  private readonly pendingStarts = new Map<string, Set<number>>()
+  private readonly transientLaunches = new Map<string, Set<number>>()
   private readonly store: SourceStore
   /** Path to the forked host-process entry point. */
   private readonly hostPath: string
+  /** Transport override used by protocol regression tests; production stays platform-selected. */
+  private readonly transport: 'auto' | 'file' | 'ipc'
   private readonly listeners = new Set<Partial<SourceEngineEvents>>()
   /**
    * Source id -> script ids that can serve it, in priority order.
@@ -119,9 +130,10 @@ export class SourceEngine {
    */
   private sourceProviders = new Map<SourceId, string[]>()
 
-  constructor(store: SourceStore, hostPath: string) {
+  constructor(store: SourceStore, hostPath: string, transport: 'auto' | 'file' | 'ipc' = 'auto') {
     this.store = store
     this.hostPath = hostPath
+    this.transport = transport
   }
 
   /**
@@ -160,12 +172,12 @@ export class SourceEngine {
         }),
         // The host has already normalised `state.sources`; indexing them is
         // this engine's job, because ownership is a policy of the LX side.
-        onReady: (state) => {
-          this.rebuildOwners()
-          this.emit('sourcesChanged')
-          void state
-        },
+        // The host reports ready before `start()` can register the runtime.
+        // Publishing here made observers see an empty engine snapshot and left
+        // the provider index permanently empty after a successful boot.
+        onReady: () => undefined,
         onExit: (state, info) => this.handleHostExit(state, info),
+        onUpdateAlert: (state, data) => this.handleUpdateAlert(state.api.meta.id, data),
         onLog: (apiId, line) => {
           const runtime = this.runtimes.get(apiId)
           if (runtime) this.pushLog(runtime, line)
@@ -175,7 +187,7 @@ export class SourceEngine {
       // Derive the transport from the platform, exactly as before: the
       // restricted launcher is what win32 uses and what the file transport
       // exists for.
-      'auto'
+      this.transport
     )
     return this.host
   }
@@ -239,7 +251,11 @@ export class SourceEngine {
 
   /** Stop every source process and release resources. */
   async stopAll(): Promise<void> {
-    const stops = [...this.runtimes.values()].map((runtime) => this.stop(runtime.api.meta.id))
+    const apiIds = new Set([
+      ...this.runtimes.keys(),
+      ...this.pendingStarts.keys()
+    ])
+    const stops = [...apiIds].map((apiId) => this.stop(apiId))
     await Promise.all(stops)
   }
 
@@ -248,8 +264,36 @@ export class SourceEngine {
     await this.startAll()
   }
 
-  private async start(api: LoadedApi): Promise<void> {
-    await this.stop(api.meta.id)
+  private async start(api: LoadedApi, scriptOverride?: string): Promise<void> {
+    const apiId = api.meta.id
+    const generation = this.nextGeneration(apiId)
+    const transient = scriptOverride !== undefined
+    this.trackPendingStart(apiId, generation, true)
+    if (transient) this.trackTransientLaunch(apiId, generation, true)
+    try {
+      // Do not route this through public stop(): this launch owns the new token,
+      // while public stop must invalidate starts already in flight.
+      await this.stopRuntime(apiId)
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+        if (transient) throw new Error('音源候选版本启动已取消')
+        return
+      }
+
+      if (transient) {
+        const header = describeScript(scriptOverride, api.meta.name)
+        api = {
+          ...api,
+          source: scriptOverride,
+          meta: {
+            ...api.meta,
+            name: header.name,
+            description: header.description,
+            version: header.version,
+            author: header.author,
+            homepage: header.homepage
+          }
+        }
+      }
 
     // ---- Pre-flight validation ----------------------------------------
     //
@@ -272,7 +316,9 @@ export class SourceEngine {
       // Quarantine, not merely "record an error": this is a verdict about the
       // script, and it must survive a restart so a habitual "enable
       // everything" cannot re-arm it.
-      this.store.quarantine(api.meta.id, reason)
+      if (!transient && this.isCurrentGeneration(apiId, generation) && this.isEnabled(apiId)) {
+        this.store.quarantine(apiId, reason)
+      }
       this.emit('scriptError', api.meta.id, reason)
       throw new Error(reason)
     }
@@ -297,7 +343,9 @@ export class SourceEngine {
         `音源运行时缺失: ${this.hostPath}\n` +
         `打包版本需要把 source-host.js 放在 asar 之外` +
         `（electron-builder.yml 的 asarUnpack）。`
-      this.store.setError(api.meta.id, reason)
+      if (!transient && this.isCurrentGeneration(apiId, generation) && this.isEnabled(apiId)) {
+        this.store.setError(apiId, reason)
+      }
       this.emit('scriptError', api.meta.id, reason)
       throw new Error(reason)
     }
@@ -319,26 +367,59 @@ export class SourceEngine {
     try {
       state = await host.start(api, api.source)
     } catch (error) {
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+        if (transient) throw new Error('音源候选版本启动已取消', { cause: error })
+        return
+      }
       const message = error instanceof Error ? error.message : String(error)
-      this.store.setError(api.meta.id, message)
-      this.store.setEnabled(api.meta.id, false)
+      if (!transient) {
+        this.store.setError(api.meta.id, message)
+        this.store.setEnabled(api.meta.id, false)
+      }
       this.rebuildOwners()
-      this.emit('sourcesChanged')
+      this.emit('sourcesChanged', api.meta.id)
       this.emit('scriptError', api.meta.id, message)
       throw error
     }
-    const runtime: ScriptRuntime = { api, host: state, sources: state.sources }
+
+    // stop() may have run while host.start() waited for the source's init
+    // handshake. Dispose the late process before it can enter the provider map.
+    if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+      await host.teardown(state, new Error('音源已停止'))
+      if (transient) throw new Error('音源候选版本启动已取消')
+      return
+    }
+    const runtime: ScriptRuntime = { api, host: state, sources: state.sources, transient }
     this.runtimes.set(api.meta.id, runtime)
+    this.rebuildOwners()
+    this.emit('sourcesChanged', api.meta.id)
 
     try {
       await state.ready
-      this.store.setError(api.meta.id, undefined)
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+        if (this.runtimes.get(apiId) === runtime) {
+          this.runtimes.delete(apiId)
+          if (!state.dead) await host.teardown(state, new Error('音源已停止'))
+          this.rebuildOwners()
+          this.emit('sourcesChanged', apiId)
+        }
+        if (transient) throw new Error('音源候选版本启动已取消')
+        return
+      }
+      if (!transient) this.store.setError(api.meta.id, undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // Reap the child. Disabling the source below bypasses `stop()`, so without
       // this a script that hangs on init keeps its process — and its memory
       // ceiling — resident until the app exits.
-      await host.teardown(state, new Error(message))
+      if (!state.dead) await host.teardown(state, new Error(message))
+      if (this.runtimes.get(apiId) === runtime) this.runtimes.delete(apiId)
+      this.rebuildOwners()
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+        this.emit('sourcesChanged', apiId)
+        if (transient) throw new Error('音源候选版本启动已取消', { cause: error })
+        return
+      }
       // A script that terminates itself silently on startup is the signature of
       // an anti-tamper / environment-probe design — the class that includes the
       // source observed shutting a machine down. Quarantining it means the user
@@ -352,9 +433,15 @@ export class SourceEngine {
         const reason =
           `${message}\n该脚本在启动时静默结束了自己的进程，符合自我保护型脚本特征。` +
           `已自动隔离停用；确认安全后可在音源管理里解除隔离。`
-        this.store.quarantine(api.meta.id, reason)
+        if (!transient) this.store.quarantine(api.meta.id, reason)
         this.emit('scriptError', api.meta.id, reason)
         throw new Error(reason)
+      }
+      if (transient) {
+        this.rebuildOwners()
+        this.emit('sourcesChanged', api.meta.id)
+        this.emit('scriptError', api.meta.id, message)
+        throw error
       }
       this.store.setError(api.meta.id, message)
       // The source never came up, so the stored "enabled" flag would now lie:
@@ -363,10 +450,25 @@ export class SourceEngine {
       // is exactly what a retry affordance should look like.
       this.store.setEnabled(api.meta.id, false)
       this.rebuildOwners()
-      this.emit('sourcesChanged')
+      this.emit('sourcesChanged', api.meta.id)
       this.emit('scriptError', api.meta.id, message)
       throw error
     }
+    } finally {
+      this.trackPendingStart(apiId, generation, false)
+      if (transient) this.trackTransientLaunch(apiId, generation, false)
+    }
+  }
+
+  private handleUpdateAlert(apiId: string, data: unknown): void {
+    const currentGeneration = this.lifecycle.get(apiId)
+    if (currentGeneration !== undefined && this.transientLaunches.get(apiId)?.has(currentGeneration)) return
+    const runtime = this.runtimes.get(apiId)
+    if (runtime?.transient) return
+    const source = this.store.get(apiId)
+    if (!source?.meta.enabled || !source.meta.allowShowUpdateAlert) return
+    const message = formatUpdateAlert(data)
+    if (message) this.emit('updateAlert', apiId, message)
   }
 
   /**
@@ -379,6 +481,14 @@ export class SourceEngine {
    */
   private handleHostExit(state: RuntimeState, info: ExitInfo): void {
     const apiId = state.api.meta.id
+    const runtime = this.runtimes.get(apiId)
+    if (runtime?.transient) {
+      this.runtimes.delete(apiId)
+      this.rebuildOwners()
+      this.emit('scriptError', apiId, info.reason)
+      this.emit('sourcesChanged', apiId)
+      return
+    }
     this.rebuildOwners()
     if (info.intentional) return
 
@@ -393,7 +503,7 @@ export class SourceEngine {
     // retry.
     this.store.setError(apiId, info.reason)
     this.store.setEnabled(apiId, false)
-    this.emit('sourcesChanged')
+    this.emit('sourcesChanged', apiId)
   }
 
   /**
@@ -466,12 +576,53 @@ export class SourceEngine {
   }
 
   async stop(apiId: string): Promise<void> {
+    this.nextGeneration(apiId)
+    await this.stopRuntime(apiId)
+  }
+
+  private async stopRuntime(apiId: string): Promise<void> {
     const runtime = this.runtimes.get(apiId)
     if (!runtime) return
     this.runtimes.delete(apiId)
     await this.teardown(runtime, new Error('音源已停止'))
     this.rebuildOwners()
-    this.emit('sourcesChanged')
+    this.emit('sourcesChanged', apiId)
+  }
+
+  private nextGeneration(apiId: string): number {
+    const generation = (this.lifecycle.get(apiId) ?? 0) + 1
+    this.lifecycle.set(apiId, generation)
+    return generation
+  }
+
+  private isCurrentGeneration(apiId: string, generation: number): boolean {
+    return this.lifecycle.get(apiId) === generation
+  }
+
+  private isEnabled(apiId: string): boolean {
+    return this.store.get(apiId)?.meta.enabled === true
+  }
+
+  private trackPendingStart(apiId: string, generation: number, pending: boolean): void {
+    let starts = this.pendingStarts.get(apiId)
+    if (pending) {
+      if (!starts) this.pendingStarts.set(apiId, (starts = new Set()))
+      starts.add(generation)
+      return
+    }
+    starts?.delete(generation)
+    if (starts?.size === 0) this.pendingStarts.delete(apiId)
+  }
+
+  private trackTransientLaunch(apiId: string, generation: number, pending: boolean): void {
+    let starts = this.transientLaunches.get(apiId)
+    if (pending) {
+      if (!starts) this.transientLaunches.set(apiId, (starts = new Set()))
+      starts.add(generation)
+      return
+    }
+    starts?.delete(generation)
+    if (starts?.size === 0) this.transientLaunches.delete(apiId)
   }
 
   /**
@@ -493,10 +644,18 @@ export class SourceEngine {
     return this.runtimes.get(apiId)?.host.crashReason
   }
 
-  async reload(apiId: string): Promise<void> {
+  async reload(apiId: string, scriptOverride?: string): Promise<void> {
     const api = this.store.get(apiId)
     if (!api) throw new Error('音源不存在')
-    await this.start(api)
+    await this.start(api, scriptOverride)
+  }
+
+  /** Promote a trial runtime after its bytes have been persisted successfully. */
+  commitCandidate(apiId: string): void {
+    const runtime = this.runtimes.get(apiId)
+    if (!runtime) return
+    runtime.transient = false
+    runtime.api = this.store.get(apiId) ?? runtime.api
   }
 
   /** Every source advertised by every live script, de-duplicated by id. */
@@ -536,6 +695,16 @@ export class SourceEngine {
   supports(source: SourceId, action: SourceAction): boolean {
     const info = this.getSources().find((item) => item.id === source)
     return Boolean(info?.actions.includes(action))
+  }
+
+  /** Whether one active LX script owns a stable playback stamp for this action. */
+  supportsProvider(source: SourceId, providerId: string, action: SourceAction): boolean {
+    return this.providersFor(source).some((apiId) => {
+      const runtime = this.runtimes.get(apiId)
+      if (!runtime || runtime.host.dead) return false
+      if (providerId !== apiId && providerId !== runtime.api.meta.stableId) return false
+      return Boolean(runtime.sources.find((item) => item.id === source)?.actions.includes(action))
+    })
   }
 
   /**
@@ -580,9 +749,10 @@ export class SourceEngine {
     source: SourceId,
     action: SourceAction,
     info: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    providerId?: string
   ): Promise<T> {
-    return this.requestWithFallback<T>(source, action, info, signal)
+    return this.requestWithFallback<T>(source, action, info, signal, providerId)
   }
 
   /**
@@ -597,16 +767,19 @@ export class SourceEngine {
     source: SourceId,
     action: SourceAction,
     info: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    providerId?: string
   ): Promise<T> {
     if (signal?.aborted) throw new Error('请求已取消')
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
       if (!runtime || runtime.host.dead) return false
+      if (providerId && providerId !== apiId && providerId !== runtime.api.meta.stableId) return false
       return runtime.sources.some((item) => item.id === source)
     })
 
     if (candidates.length === 0) {
+      if (providerId) throw new Error(`音源「${providerId}」已停止或不存在，请重新选择音源后重试`)
       throw new Error(`没有可用的音源支持「${source}」`)
     }
 
@@ -662,15 +835,20 @@ export class SourceEngine {
     musicInfo: OnlineMusicInfo,
     preferred: Quality,
     strict = false
-  ): Promise<{ url: string; quality: Quality; apiId?: string }> {
+  ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string }> {
+    const requestedProviderId = musicInfo.providerId
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
       return Boolean(
-        runtime && !runtime.host.dead && runtime.sources.some((item) => item.id === source)
+        runtime && !runtime.host.dead && runtime.sources.some((item) => item.id === source) &&
+        (!requestedProviderId || requestedProviderId === apiId || requestedProviderId === runtime.api.meta.stableId)
       )
     })
 
     if (candidates.length === 0) {
+      if (requestedProviderId) {
+        throw new Error(`曲目绑定的音源「${requestedProviderId}」已停止或不存在，请重新匹配后播放`)
+      }
       throw new Error(`音源「${source}」已停止或没有可用的音源支持该平台`)
     }
 
@@ -700,7 +878,14 @@ export class SourceEngine {
             musicInfo: toLegacyOnline(musicInfo)
           })
           if (isValidMusicUrl(url)) {
-            return { url: url.trim(), quality, apiId }
+            return {
+              url: url.trim(),
+              quality,
+              apiId,
+              providerId: runtime?.api.meta.stableId ?? apiId,
+              providerName: runtime?.api.meta.name ?? apiId,
+              providerVersion: this.store.versionOf(apiId)
+            }
           }
           scriptErrors.push(`${quality}: 未返回有效播放地址`)
         } catch (error) {
@@ -723,7 +908,13 @@ export class SourceEngine {
     musicInfo: OnlineMusicInfo,
     signal?: AbortSignal
   ): Promise<{ lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string }> {
-    if (!this.supports(source, 'lyric')) {
+    if (musicInfo.providerId
+      ? !this.supportsProvider(source, musicInfo.providerId, 'lyric')
+      : !this.supports(source, 'lyric')) {
+      if (musicInfo.providerId && !this.providersFor(source).some((id) => {
+        const runtime = this.runtimes.get(id)
+        return runtime && (runtime.api.meta.stableId === musicInfo.providerId || id === musicInfo.providerId)
+      })) throw new Error(`曲目绑定的音源「${musicInfo.providerId}」已停止或不存在，请重新匹配后重试`)
       return { lyric: '' }
     }
     // Note: for lyric/pic the source type ('music') is what LX passes as
@@ -734,7 +925,7 @@ export class SourceEngine {
       tlyric?: string
       rlyric?: string
       lxlyric?: string
-    }>(source, 'lyric', { type: 'music', musicInfo: toLegacyOnline(musicInfo) }, signal)
+    }>(source, 'lyric', { type: 'music', musicInfo: toLegacyOnline(musicInfo) }, signal, musicInfo.providerId)
 
     // LX silently drops oversized translation/romanisation payloads; mirror
     // those ceilings so a bloated response degrades instead of breaking layout.
@@ -749,12 +940,14 @@ export class SourceEngine {
 
   /** Fetch cover art when the source implements the `pic` action. */
   async getPic(source: SourceId, musicInfo: OnlineMusicInfo, signal?: AbortSignal): Promise<string> {
-    if (!this.supports(source, 'pic')) return ''
+    if (musicInfo.providerId
+      ? !this.supportsProvider(source, musicInfo.providerId, 'pic')
+      : !this.supports(source, 'pic')) return ''
     try {
       const url = await this.request<unknown>(source, 'pic', {
         type: 'music',
         musicInfo: toLegacyOnline(musicInfo)
-      }, signal)
+      }, signal, musicInfo.providerId)
       return isValidMusicUrl(url) ? url : ''
     } catch {
       if (signal?.aborted) throw new Error('请求已取消')
@@ -830,6 +1023,37 @@ export function isValidMusicUrl(value: unknown): value is string {
     return false
   }
   return true
+}
+
+/** Convert the LX updateAlert payload into bounded, plain text for a toast. */
+function formatUpdateAlert(data: unknown): string | undefined {
+  let message = ''
+  let version = ''
+  if (typeof data === 'string') {
+    message = data
+  } else if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>
+    if (typeof record.version === 'string') version = record.version
+    for (const key of ['message', 'notice', 'text', 'msg']) {
+      if (typeof record[key] === 'string' && record[key].trim()) {
+        message = record[key] as string
+        break
+      }
+    }
+    if (!message) {
+      try { message = JSON.stringify(data) } catch { message = '' }
+    }
+  } else if (data !== undefined && data !== null) {
+    message = String(data)
+  }
+
+  const formatted = [version ? `v${version}` : '', message]
+    .filter(Boolean)
+    .join('：')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return formatted ? formatted.slice(0, 400) : undefined
 }
 
 /** Truncate to `max`, returning `undefined` for empty input. */

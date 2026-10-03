@@ -79,6 +79,7 @@ const resultMeta = computed(() => {
   return activeSource.value === 'local' ? local : `${local} · 在线 ${total.value} 条`
 })
 const hasSources = computed(() => library.playableSources.length > 0)
+const hasOnlineSearchPlatforms = computed(() => platforms.value.some(platform => !VIEW_SCOPES.some(scope => scope.id === platform.id)))
 
 /*
  * Type-ahead over the local library — the same index and keyboard model the title
@@ -328,13 +329,25 @@ async function playAll(): Promise<void> {
   await player.playQueue(results.value, 0, searchLabel('搜索'))
 }
 onMounted(() => {
-  // A failure here costs only the extra tabs; `全部` and `本地音乐` are always
-  // present, and a broken search surfaces through runSearch's own error rather
-  // than silently hiding platforms.
+  // `全部` and `本地音乐` remain available even if the main process cannot
+  // enumerate admitted platforms. A remembered tab that is no longer admitted
+  // returns to `全部` instead of leaving the search view on an invisible scope.
   void window.jj.music.providers()
-    .then((providers) => { platforms.value = [...VIEW_SCOPES, ...providers] })
-    .catch(() => undefined)
-  if (keyword.value) void runSearch()
+    .then((providers) => {
+      platforms.value = [...VIEW_SCOPES, ...providers]
+      if (!platforms.value.some(platform => platform.id === activeSource.value)) {
+        activeSource.value = 'all'
+        saveView({ source: 'all' })
+      }
+    })
+    .catch(() => {
+      platforms.value = [...VIEW_SCOPES]
+      if (!VIEW_SCOPES.some(platform => platform.id === activeSource.value)) {
+        activeSource.value = 'all'
+        saveView({ source: 'all' })
+      }
+    })
+    .finally(() => { if (keyword.value) void runSearch() })
 })
 watch(() => route.query.q, value => {
   keyword.value = typeof value === 'string' ? value : ''
@@ -501,7 +514,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
       </div>
     </div>
     <div v-if="searchError" class="search-status">{{ searchError }} · 本地曲库不受影响</div>
-    <div v-if="!hasSources && searched && activeSource !== 'local'" class="notice"><span>本地音乐可直接播放，在线音乐需启用音源。</span><button class="btn btn--ghost" @click="router.push('/sources')">音源管理</button></div>
+    <div v-if="!hasOnlineSearchPlatforms && searched && activeSource !== 'local'" class="notice"><span>当前只显示本地匹配。在线目录请求需要你同意，并启用且验证声明了对应平台的 LX 音源。</span><button class="btn btn--ghost" @click="router.push('/sources')">音源管理</button></div>
     <TrackList v-if="results.length" ref="searchList" :tracks="results" :show-source="true" observe-end @end-reached="loadMore()" @play="(_, index) => playAt(index)"/>
     <div v-else-if="searched && !searching" class="empty"><span class="empty__title">没有找到「{{ submittedQuery }}」</span><span class="empty__hint">换个关键词试试。</span></div>
     <div v-else-if="!searched" class="empty"><span class="empty__title">发现本地收藏，也搜索在线音乐</span><span class="empty__hint">输入歌名、艺术家或专辑，搜索所有来源。</span></div>

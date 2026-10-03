@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /** Landing page: quick entry points, library status, and 音源 status. */
-import { toMediaUrl } from '@shared/media-url'
-import { isLocalTrack, type PlayableTrack } from '@shared/types'
+import type { PlayableTrack } from '@shared/types'
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
+import { trackCoverUrl } from '../utils/track-cover'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
@@ -30,8 +30,7 @@ const recentRail = computed(() => recent.value.slice(0, 12))
 /* History mixes local files, which carry an extracted cover on disk, with online
  * tracks, which only have the remote art URL. */
 function coverUrl(track: PlayableTrack): string | null {
-  if (isLocalTrack(track)) return track.coverPath ? toMediaUrl(track.coverPath) : null
-  return track.picUrl ?? null
+  return trackCoverUrl(track, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null
 }
 
 async function playRecent(index: number): Promise<void> {

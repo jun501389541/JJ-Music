@@ -26,6 +26,12 @@ export type Quality = '128k' | '320k' | 'flac' | 'flac24bit' | 'hires' | 'atmos'
  */
 export const LX_QUALITIES: Quality[] = ['128k', '320k', 'flac', 'flac24bit']
 
+/** Bounds shared by renderer-facing online entity pagination and its service. */
+export const ONLINE_ENTITY_PAGE_SIZE = 20
+export const ONLINE_ARTIST_MAX_PAGES = 500
+export const ONLINE_ALBUM_MAX_TRACKS = 500
+export const ONLINE_ALBUM_MAX_PAGES = Math.ceil(ONLINE_ALBUM_MAX_TRACKS / ONLINE_ENTITY_PAGE_SIZE)
+
 /** Source ids the LX custom-source API recognises. */
 export const LX_SOURCE_IDS = ['kw', 'kg', 'tx', 'wy', 'mg', 'local'] as const
 
@@ -239,6 +245,10 @@ export interface UserApiMeta {
   version: string
   author: string
   homepage: string
+  /** Direct JavaScript URL used for import, when available. */
+  updateUrl?: string
+  /** Summary of the last automatic or manual update check; never includes script bytes. */
+  updateCheck?: SourceUpdateCheck
   /** Whether the script may raise update alerts. */
   allowShowUpdateAlert: boolean
   /** Number of sources the script advertised after init. */
@@ -303,6 +313,8 @@ export type UpdateCheckFailure =
  * user approves the exact text reported here.
  */
 export interface UpdatePlan {
+  /** Whether this is a version bump or changed bytes under the same version. */
+  change: 'newVersion' | 'contentChanged'
   /** Version installed now, from the stored script's header. */
   currentVersion: string
   /** Version the fetched script advertises. */
@@ -335,6 +347,16 @@ export interface UpdateCheckResult {
   message?: string
   /** The update on offer; present only when `ok` is true. */
   plan?: UpdatePlan
+}
+
+/** Persisted summary for the last source update check. Candidate script bytes are never stored here. */
+export interface SourceUpdateCheck {
+  checkedAt: number
+  state: 'checking' | 'available' | 'current' | 'failed'
+  currentVersion?: string
+  nextVersion?: string
+  sha256?: string
+  message?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -418,6 +440,10 @@ export interface OnlineMusicInfo {
   interval?: string
   /** Album name, when known. */
   albumName?: string
+  /** Platform-scoped artist identities, when the source returned them. */
+  artistRefs?: OnlineArtistRef[]
+  /** Platform-scoped album identity, when the source returned it. */
+  albumRef?: OnlineAlbumRef
   /** Cover art URL, when known. LX calls this `img` in the delivered shape. */
   picUrl?: string
   /**
@@ -445,6 +471,41 @@ export interface OnlineMusicInfo {
     strMediaMid?: string
     qualitys?: Array<{ type: string; size?: string }>
   }
+}
+
+/** One source-scoped artist identity; a name without an id is only a candidate query. */
+export interface OnlineArtistRef {
+  id?: string
+  name: string
+  pictureUrl?: string
+}
+
+/** One source-scoped album identity; a name without an id is only a candidate query. */
+export interface OnlineAlbumRef {
+  id?: string
+  name: string
+  coverUrl?: string
+  artistRefs?: OnlineArtistRef[]
+}
+
+/** Result of a gated artist or album detail request. */
+export interface OnlineEntityPage<T> {
+  status: 'available' | 'unavailable'
+  entity?: T
+  tracks: OnlineMusicInfo[]
+  page: number
+  total: number
+  hasMore: boolean
+  truncated?: boolean
+  message?: string
+}
+
+/** Candidate choices are explicit; callers must not treat the first result as exact. */
+export interface OnlineEntityCandidates<T> {
+  status: 'candidates' | 'unavailable'
+  query: string
+  candidates: T[]
+  message?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -957,32 +1018,12 @@ export interface AppSettings extends UiPreferences {
   onlineLyricSource: OnlineLyricSource
   /** When the preferred source comes back empty, try the remaining ones in order. */
   onlineLyricFallback: boolean
-  /**
-   * Whether search and hot words may go to this app's own platform adapters.
-   *
-   * ## Why this exists
-   *
-   * `src/main/online/search.ts` has described its adapters as "optional and
-   * user-enabled" since it was written, but no such setting was ever added: the
-   * adapters in `search.ts` (`PROVIDERS`) and `hot-words.ts` (`ADAPTERS`) ran
-   * unconditionally, so a fresh install with no 音源 imported still queried five
-   * music platforms. That is the behaviour the capability protocol exists to
-   * remove — search is supposed to be answered by a source the user installed.
-   *
-   * Defaults to `false`, and that default is the whole point: the built-in path
-   * must never be reachable without the user asking for it. A fallback that turns
-   * itself on is indistinguishable from no gate at all.
-   *
-   * ## Why it was kept rather than deleted
-   *
-   * Removing the adapters would be irreversible and would leave the search page
-   * permanently empty on a machine with no source installed, including for a user
-   * who has no intention of importing one. Keeping them behind an explicit switch
-   * satisfies "off by default, no silent fallback" without taking the capability
-   * away. The two paths are never merged: a request goes to a 音源 **or** to an
-   * adapter, never to an adapter because a 音源 failed.
-   */
+  /** Legacy preference retained when reading older settings; it never grants platform access. */
   allowBuiltinOnlineSearch: boolean
+  /** Explicit permission for JJ-owned platform catalog requests when a matching LX source is active. */
+  onlineCatalogConsent: boolean
+  /** Internal one-time disclosure marker for existing installations. */
+  onlineCatalogConsentPrompted: boolean
   /** Download folder for online tracks. */
   downloadFolder: string
   downloadLyric: boolean
@@ -1083,6 +1124,12 @@ export interface PlatformProbeResult {
 export interface DownloadTask {
   id: string
   track: OnlineMusicInfo
+  /** LX stable script that actually resolved this download, when known. */
+  resolvedProviderId?: string
+  /** Display name of the LX script that actually resolved this download. */
+  resolvedProviderName?: string
+  /** SourceStore digest for the script version that resolved this download. */
+  resolvedProviderVersion?: string
   quality: Quality
   status: 'queued' | 'resolving' | 'downloading' | 'tagging' | 'completed' | 'failed' | 'cancelled'
   received: number

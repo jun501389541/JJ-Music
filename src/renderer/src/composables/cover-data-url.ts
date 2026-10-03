@@ -51,13 +51,13 @@ function loadImage(source: string): Promise<HTMLImageElement> {
  * URL — which is what the SMTC path does when a canvas gets tainted — would be a
  * broken image here rather than a graceful absence.
  */
-export async function coverDataUrl(track: PlayableTrack | null): Promise<string> {
+export async function coverDataUrl(track: PlayableTrack | null, permittedOnlineCover?: string): Promise<string> {
   if (!track) return ''
   const source = isLocalTrack(track)
     ? track.coverPath
       ? toMediaUrl(track.coverPath)
       : ''
-    : track.picUrl
+    : permittedOnlineCover
   if (!source) return ''
   try {
     const image = await loadImage(source)

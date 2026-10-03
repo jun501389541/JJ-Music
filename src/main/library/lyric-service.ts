@@ -101,6 +101,7 @@ export async function lyricFromOtherPlatforms(
   deps: {
     match?: typeof matchMetadata
     fetchLyric?: typeof fetchOnlineLyric
+    sources?: readonly SourceId[]
   } = {},
   signal?: AbortSignal
 ): Promise<LyricResult> {
@@ -121,7 +122,9 @@ export async function lyricFromOtherPlatforms(
   // `ONLINE_SOURCE_IDS`' job — a platform added to the search adapters must not
   // be skipped here just because nobody remembered to edit a second table.
   const ranked = [...LYRIC_FALLBACK_PRIORITY, ...ONLINE_SOURCE_IDS.filter((source) => !LYRIC_FALLBACK_PRIORITY.includes(source))]
-  const others = ranked.filter((source) => source !== music.source)
+  const allowed = deps.sources ? new Set(deps.sources) : undefined
+  const others = ranked.filter((source) => source !== music.source && (!allowed || allowed.has(source)))
+  if (others.length === 0) return { lyric: '' }
 
   let matches
   try {

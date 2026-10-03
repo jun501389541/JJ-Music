@@ -7,7 +7,6 @@
  * the bottom. The now-playing view is a full-window overlay rather than a
  * route change so the player bar never unmounts and audio is never interrupted.
  */
-import { toMediaUrl } from '@shared/media-url'
 import type { DesktopLyricCommand, DesktopLyricPayload } from '@shared/desktop-lyric'
 import { activeLines } from '@shared/desktop-lyric'
 import { coverDataUrl } from './composables/cover-data-url'
@@ -30,6 +29,7 @@ import type { UpdateStatus } from '@shared/update-types'
 import { startScrollMemory } from './composables/use-scroll-memory'
 import { startMediaSession } from './composables/use-media-session'
 import { accentApplied, applyAccent, applyAccentFromImage, resetAccent } from './theme/accent'
+import { trackCoverUrl } from './utils/track-cover'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
@@ -39,6 +39,7 @@ const toast = useToastStore()
 
 const ui = useUiStore()
 let offUpdateChanged: (() => void) | undefined
+let offSourceUpdateAlert: (() => void) | undefined
 const promptedUpdates = new Set<string>()
 function onUpdateChanged(state: UpdateStatus): void {
   if (!state.version) return
@@ -117,11 +118,7 @@ function applyTheme(theme: string): void {
  * falls back to the static accent token.
  */
 const currentCover = computed(() => {
-  const track = player.currentTrack
-  if (!track) return null
-  if ('coverPath' in track && track.coverPath) return toMediaUrl(track.coverPath)
-  if ('picUrl' in track && track.picUrl) return track.picUrl
-  return null
+  return trackCoverUrl(player.currentTrack, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null
 })
 watch([currentCover, () => library.settings.accent, () => library.settings.theme], ([url, accent, theme], _, onCleanup) => {
   let current = true
@@ -211,7 +208,8 @@ watch(
   () => player.currentTrack,
   track => {
     const wanted = track
-    void coverDataUrl(track).then(url => {
+    const coverUrl = trackCoverUrl(track, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id))
+    void coverDataUrl(track, coverUrl).then(url => {
       // A fast track change must not let the older decode win the picture.
       if (player.currentTrack === wanted) lyricCover.value = url
     })
@@ -276,7 +274,9 @@ watch(desktopLyricPayload, payload => {
  * is the play/pause/next/previous/seek surface plus whatever the system needs to
  * draw a scrubber.
  * ---------------------------------------------------------------- */
-startMediaSession(player)
+startMediaSession(player, track =>
+  trackCoverUrl(track, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id))
+)
 
 /**
  * Apply a request from the overlay, by writing the matching preference.
@@ -388,6 +388,7 @@ async function onDrop(event: DragEvent): Promise<void> {
 
 onUnmounted(() => {
   offUpdateChanged?.()
+  offSourceUpdateAlert?.()
   systemTheme.removeEventListener('change', onSystemTheme)
   offTransportCommand?.()
   offDesktopLyricCommand?.()
@@ -436,6 +437,10 @@ watch(
 
 onMounted(async () => {
   offUpdateChanged = window.jj.updates.onChanged(onUpdateChanged)
+  offSourceUpdateAlert = window.jj.sources.onUpdateAlert(notice => {
+    const author = notice.author ? `（${notice.author}）` : ''
+    toast.info(`${notice.name}${author}：${notice.message}`)
+  })
   /*
    * Before `library.init()`: the pages below it can be scrolled as soon as they
    * paint, and an offset that is missed is a page that opens at the top.

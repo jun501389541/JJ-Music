@@ -185,9 +185,14 @@ const fileSend = (message: Record<string, unknown>): void => {
         appendFileSync(join(scratchDir, 'console.log'), `[${message.level ?? 'log'}] ${message.message ?? ''}\n`, 'utf8')
         break
       }
-      case 'update-alert':
+      case 'update-alert': {
+        const final = join(scratchDir, 'update-alert.json')
+        const tmp = `${final}.tmp`
+        writeFileSync(tmp, JSON.stringify({ data: message.data }), 'utf8')
+        renameSync(tmp, final)
         appendFileSync(join(scratchDir, 'console.log'), `[update] ${JSON.stringify(message.data)}\n`, 'utf8')
         break
+      }
       default:
         break
     }
@@ -561,47 +566,47 @@ const lx = {
  * contract, and letting a JJ source occupy it would make the two protocols
  * ambiguous at the one place they are dispatched.
  */
-const jj = {
-  version: init.jj!.version,
-  apiId: init.jj!.apiId,
-  EVENTS: { ready: 'ready', request: 'request' } as const,
-  on(name: string, handler: (request: unknown) => unknown): Promise<void> {
-    if (name !== 'request') {
-      return Promise.reject(new Error(`The event is not supported: ${name}`))
-    }
-    if (typeof handler !== 'function') {
-      return Promise.reject(new Error('The handler must be a function'))
-    }
-    capabilityHandler = handler
-    return Promise.resolve()
-  },
-  /**
-   * Announce that the provider is initialised.
-   *
-   * `info` is the provider's self-description in the shape `JjProviderInfo`
-   * describes: `{ version, capabilities, sources }`. It is passed through
-   * unvalidated — validation is the parent's job, and it is the parent that
-   * must decide what an unknown capability means.
-   */
-  ready(info: unknown): Promise<void> {
-    if (initFailed) return Promise.reject(new Error('Script initialization already failed'))
-    if (hasInited) return Promise.reject(new Error('Script is inited'))
-    hasInited = true
-    send({ type: 'ready', sources: {}, jj: info })
-    return Promise.resolve()
-  },
-  utils
+const target = globalThis as unknown as Record<string, unknown>
+target.lx = lx
+if (init.jj) {
+  const jj = {
+    version: init.jj.version,
+    apiId: init.jj.apiId,
+    EVENTS: { ready: 'ready', request: 'request' } as const,
+    on(name: string, handler: (request: unknown) => unknown): Promise<void> {
+      if (name !== 'request') {
+        return Promise.reject(new Error(`The event is not supported: ${name}`))
+      }
+      if (typeof handler !== 'function') {
+        return Promise.reject(new Error('The handler must be a function'))
+      }
+      capabilityHandler = handler
+      return Promise.resolve()
+    },
+    /**
+     * Announce that the provider is initialised.
+     *
+     * `info` is the provider's self-description in the shape `JjProviderInfo`
+     * describes: `{ version, capabilities, sources }`. It is passed through
+     * unvalidated — validation is the parent's job, and it is the parent that
+     * must decide what an unknown capability means.
+     */
+    ready(info: unknown): Promise<void> {
+      if (initFailed) return Promise.reject(new Error('Script initialization already failed'))
+      if (hasInited) return Promise.reject(new Error('Script is inited'))
+      hasInited = true
+      send({ type: 'ready', sources: {}, jj: info })
+      return Promise.resolve()
+    },
+    utils
+  }
+  target.jj = jj
 }
 
 /* ------------------------------------------------------------------ *
  * Install the environment and run the script
  * ------------------------------------------------------------------ */
 
-const target = globalThis as unknown as Record<string, unknown>
-target.lx = lx
-// Only a source that declared `jj` in its init payload can see this, so an LX
-// source's global surface is byte-for-byte what it was before.
-if (init.jj) target.jj = jj
 installBrowserShims(target)
 
 target.console = {

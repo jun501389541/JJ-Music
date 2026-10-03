@@ -31,6 +31,7 @@ export const IPC = {
    */
   downloadsOpenFolder: 'downloads:open-folder',
   downloadsChooseFolder: 'downloads:choose-folder',
+  playlistImportProviders: 'playlist:import-providers',
   playlistImportPreview: 'playlist:import-preview',
   playlistImportSave: 'playlist:import-save',
   // Window controls (frameless window)
@@ -98,6 +99,7 @@ export const IPC = {
   sourcesVerifyPlatform: 'sources:verify-platform',
   sourcesLogs: 'sources:logs',
   sourcesChanged: 'sources:changed',
+  sourcesUpdateAlert: 'sources:update-alert',
   /*
    * Update checking (E6).
    *
@@ -116,10 +118,17 @@ export const IPC = {
   /** Search every platform in parallel and merge the results. */
   musicSearchAll: 'music:search-all',
   musicCancel: 'music:cancel',
-  /** Platforms that have a built-in search adapter. */
+  /** Platforms with an enabled, healthy LX source and catalog consent. */
   musicSearchProviders: 'music:search-providers',
   /** What each platform's users are searching right now, for the search page. */
   musicHotWords: 'music:hot-words',
+  /** Exact-ID, source-scoped online artist and album detail pages. */
+  onlineArtistPage: 'online:artist-page',
+  onlineAlbumPage: 'online:album-page',
+  onlineEntityArtwork: 'online:entity-artwork',
+  /** Name-based detail lookup returns choices for the user to select explicitly. */
+  onlineArtistCandidates: 'online:artist-candidates',
+  onlineAlbumCandidates: 'online:album-candidates',
   musicUrl: 'music:url',
   musicLyric: 'music:lyric',
   musicPic: 'music:pic',

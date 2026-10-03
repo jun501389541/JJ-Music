@@ -6,8 +6,9 @@
  */
 import { useLibraryStore } from './library'
 import { toMediaUrl } from '@shared/media-url'
+import { stripScriptCoverData, stripScriptCoverDataFromTracks } from '@shared/persisted-track'
 import { defineStore } from 'pinia'
-import { computed, ref, shallowRef, toRaw } from 'vue'
+import { computed, onScopeDispose, ref, shallowRef, toRaw } from 'vue'
 import type { AudioEngine } from '@shared/audio-engine'
 import { EQUALIZER_PRESETS } from '@shared/audio-engine'
 import type {
@@ -32,6 +33,8 @@ import { cancellableMusic } from '../utils/cancellable-music'
 interface ResolvedSource {
   url: string
   quality?: Quality
+  providerId?: string
+  providerName?: string
   /** True when the URL came from a 音源 script and may expire. */
   ephemeral: boolean
 }
@@ -40,7 +43,7 @@ const URL_CACHE_TTL_MS = 5 * 60_000
 const URL_CACHE_LIMIT = 128
 
 function urlKey(track: OnlineMusicInfo, preferred: Quality): string {
-  return `${track.source}::${track.id}::${preferred}`
+  return `${track.source}::${track.id}::${track.providerId ?? ''}::${preferred}`
 }
 
 function sameRecording(a: OnlineMusicInfo, b: OnlineMusicInfo): boolean {
@@ -124,11 +127,19 @@ export const usePlayerStore = defineStore('player', () => {
    * (a locally preferred file has no tier at all).
    */
   const resolvedQuality = ref<Quality | null>(null)
+  /** Actual LX script that returned the current playback URL. */
+  const resolvedSourceName = ref<string | null>(null)
   const equalizer = ref<number[]>([...EQUALIZER_PRESETS['平坦']])
   const equalizerPreset = ref('平坦')
 
   /** Cache of resolved URLs, keyed by track id + quality. */
   const urlCache = new Map<string, { source: ResolvedSource; expiresAt: number }>()
+
+  const unsubscribeSourcesChanged = typeof window !== 'undefined' &&
+    typeof window.jj?.sources?.onChanged === 'function'
+    ? window.jj.sources.onChanged(() => urlCache.clear())
+    : undefined
+  onScopeDispose(() => unsubscribeSourcesChanged?.())
 
   function cacheUrl(key: string, source: ResolvedSource): void {
     urlCache.delete(key)
@@ -254,6 +265,8 @@ export const usePlayerStore = defineStore('player', () => {
       const resolved: ResolvedSource = {
         url: result.url,
         quality: result.quality,
+        providerId: result.providerId,
+        providerName: result.providerName,
         ephemeral: true
       }
       cacheUrl(key, resolved)
@@ -303,6 +316,8 @@ export const usePlayerStore = defineStore('player', () => {
         const resolved: ResolvedSource = {
           url: result.url,
           quality: result.quality,
+          providerId: result.providerId,
+          providerName: result.providerName,
           ephemeral: true
         }
         cacheUrl(urlKey(track, preferred), resolved)
@@ -489,6 +504,7 @@ export const usePlayerStore = defineStore('player', () => {
      * that then resolves at 128k is the same lie in the other direction.
      */
     resolvedQuality.value = null
+    resolvedSourceName.value = null
 
     // Silence the outgoing track straight away. Resolving a URL can take
     // seconds; leaving the old audio running until then is the reported bug.
@@ -503,6 +519,7 @@ export const usePlayerStore = defineStore('player', () => {
       // Recorded only once this attempt survived the generation check, so a
       // superseded resolve cannot leave the previous track labelled with it.
       resolvedQuality.value = source.quality ?? null
+      resolvedSourceName.value = isLocalTrack(track) ? null : source.providerName ?? null
 
       const instance = ensureEngine()
       /*
@@ -663,7 +680,11 @@ export const usePlayerStore = defineStore('player', () => {
     // "play this whole list", so there is no repeated megabyte-scale write to
     // throttle away. The queue is copied through JSON because a Vue proxy
     // cannot cross IPC - the same reason `writeSession` does it.
-    void useLibraryStore().updateSettings({ queueHistory: queueHistory.value }).catch(() => undefined)
+    const storedHistory = queueHistory.value.map(entry => ({
+      ...entry,
+      queue: stripScriptCoverDataFromTracks(entry.queue)
+    }))
+    void useLibraryStore().updateSettings({ queueHistory: storedHistory }).catch(() => undefined)
   }
 
   /**
@@ -952,11 +973,13 @@ export const usePlayerStore = defineStore('player', () => {
     const library = useLibraryStore()
     // Proxies cannot cross IPC; the queue is copied through JSON for the same
     // reason `recordPlayed` does it.
+    const storedTrack = stripScriptCoverData(toIpcPayload(track))
+    const storedQueue = stripScriptCoverDataFromTracks(queue.value.length ? queue.value : [track])
     void library.updateSettings({
       lastSession: JSON.parse(JSON.stringify({
-        track: toIpcPayload(track),
+        track: storedTrack,
         position: currentTime.value,
-        queue: queue.value.length ? queue.value : [track],
+        queue: storedQueue,
         index: currentIndex.value >= 0 ? currentIndex.value : 0,
         at: Date.now()
       }))
@@ -1063,6 +1086,7 @@ export const usePlayerStore = defineStore('player', () => {
     lyrics.value = null
     lyricSource.value = 'none'
     lyricError.value = null
+    resolvedSourceName.value = null
   }
 
   /* ------------------------------------------------------------ *
@@ -1309,6 +1333,7 @@ export const usePlayerStore = defineStore('player', () => {
     lyricSourceChoice,
     quality,
     resolvedQuality,
+    resolvedSourceName,
     equalizer,
     equalizerPreset,
     outputDeviceId,

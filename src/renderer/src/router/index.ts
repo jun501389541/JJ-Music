@@ -29,10 +29,9 @@ export const router = createRouter({
       meta: { title: '最近播放' }
     },
     {
+      // Preserve old bookmarks while the retired JJ-only leaderboard feature is unavailable.
       path: '/charts',
-      name: 'charts',
-      component: () => import('../views/LeaderboardView.vue'),
-      meta: { title: '榜单' }
+      redirect: '/discover'
     },
     {
       path: '/library',
@@ -64,6 +63,20 @@ export const router = createRouter({
       name: 'artists',
       component: () => import('../views/ArtistsView.vue'),
       meta: { title: '艺术家' }
+    },
+    {
+      path: '/online/artist/:source/:id?',
+      name: 'online-artist',
+      component: () => import('../views/OnlineEntityDetailView.vue'),
+      props: { kind: 'artist' },
+      meta: { title: '在线艺术家' }
+    },
+    {
+      path: '/online/album/:source/:id?',
+      name: 'online-album',
+      component: () => import('../views/OnlineEntityDetailView.vue'),
+      props: { kind: 'album' },
+      meta: { title: '在线专辑' }
     },
     {
       path: '/playlists',

@@ -18,7 +18,7 @@ defineEmits<{ openNowPlaying: [] }>()
  * never visited with a query resolve to themselves, and 返回 in the title bar is
  * still a real `router.back()`, so detail → grid stays one step.
  */
-const browse = [{ to: '/discover', label: '发现音乐', icon: 'cloud' }, { to: '/search', label: '全局搜索', icon: 'search' }, { to: '/charts', label: '榜单', icon: 'chart' }, { to: '/recent', label: '最近播放', icon: 'clock' }, { to: '/library', label: '歌曲', icon: 'music' }, { to: '/genres', label: '曲风', icon: 'genre' }, { to: '/albums', label: '专辑', icon: 'album' }, { to: '/artists', label: '艺术家', icon: 'artist' }]
+const browse = [{ to: '/discover', label: '发现音乐', icon: 'cloud' }, { to: '/search', label: '全局搜索', icon: 'search' }, { to: '/recent', label: '最近播放', icon: 'clock' }, { to: '/library', label: '歌曲', icon: 'music' }, { to: '/genres', label: '曲风', icon: 'genre' }, { to: '/albums', label: '专辑', icon: 'album' }, { to: '/artists', label: '艺术家', icon: 'artist' }]
 /*
  * 我喜欢的 and 默认列表 are the two built-in lists, and library.orderedPlaylists
  * always leads the block with them, so dragging is confined to the rows below:

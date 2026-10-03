@@ -41,10 +41,19 @@ export function playlistTrack(source: SourceId, item: Row): OnlineMusicInfo | nu
   }
   let id='', name='', singer='', album='', pic='', seconds=0
   let meta: OnlineMusicInfo['meta']={}
+  let artistRefs: OnlineMusicInfo['artistRefs']
+  let albumRef: OnlineMusicInfo['albumRef']
   if(source==='wy') {
-    id=String(item.id||'');name=item.name;singer=(item.ar||item.artists||[]).map((s:Row)=>s.name).join('、')
+    id=String(item.id||'');name=item.name
+    const refs: NonNullable<OnlineMusicInfo['artistRefs']>=(item.ar||item.artists||[]).flatMap((artist:Row)=> {
+      if(typeof artist.name!=='string' || !artist.name.trim())return []
+      return [{name:artist.name.trim(),...(artist.id!=null?{id:String(artist.id)}:{}),...(artist.picUrl?{pictureUrl:String(artist.picUrl)}:{})}]
+    })
+    artistRefs=refs
+    singer=refs.map(artist=>artist.name).join('、')
     const al=item.al||item.album||{};album=al.name;pic=al.picUrl;seconds=(item.dt||item.duration||0)/1000
     meta={songmid:id,albumId:al.id}
+    if(al.id!=null && typeof al.name==='string' && al.name.trim())albumRef={id:String(al.id),name:al.name.trim(),...(pic?{coverUrl:String(pic)}:{}),...(refs.length?{artistRefs:refs}:{})}
   } else if(source==='tx') {
     id=String(item.mid||item.songmid||'');name=item.title||item.songname||item.name;singer=(item.singer||[]).map((s:Row)=>s.name).join('、')
     const al=item.album||{};album=al.name||item.albumname;const mid=al.mid||item.albummid
@@ -60,18 +69,26 @@ export function playlistTrack(source: SourceId, item: Row): OnlineMusicInfo | nu
       qualitys:[['128k',id],['320k',item['320hash']||item.hash_320],['flac',item.sqhash||item.hash_flac]].filter(([,hash])=>hash).map(([type,hash])=>({type,hash}))}
   }
   if(!id || typeof name!=='string' || !name.trim())return null
-  return {id:`${source}_${id}`,name,singer:String(singer||''),source,albumName:album||'',picUrl:pic||'',interval:`${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`,meta}
+  return {id:`${source}_${id}`,name,singer:String(singer||''),source,albumName:album||'',...(artistRefs?.length?{artistRefs}:{}),...(albumRef?{albumRef}:{}),picUrl:pic||'',interval:`${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`,meta}
 }
 
-export async function importPlaylist(source: SourceId,input: string,http: typeof fetch=fetch): Promise<ImportedPlaylist> {
+export async function importPlaylist(
+  source: SourceId,
+  input: string,
+  http: typeof fetch = fetch,
+  assertAllowed: () => void = () => undefined
+): Promise<ImportedPlaylist> {
   const id=parsePlaylistId(source,input)
   const signal=AbortSignal.timeout(90000)
   async function json(url:string,referer:string,origin?:string):Promise<Row> {
+    // Pagination and detail completion can span many requests. Recheck just
+    // before each fetch so a revoked source cannot continue the sequence.
+    assertAllowed()
     const res=await http(url,{headers:{Referer:referer,...(origin?{Origin:origin}:{}),'User-Agent':'Mozilla/5.0'},signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])})
     const text=(await readBounded(res,20*1024*1024)).toString('utf8')
     try{return JSON.parse(text)}catch{throw Error('平台未返回歌单数据，请检查链接或稍后重试')}
   }
-  let rows:Row[]=[],total=0,name='',cover='',warnings:string[]=[]
+  let rows:Row[]=[],total=0,name='',cover='',warnings:string[]=[],pageLimitReached=false
   if(source==='wy') {
     const data=await json(`https://music.163.com/api/v6/playlist/detail?id=${id}&n=1000&s=0`,'https://music.163.com/')
     const list=data.playlist||data.result
@@ -118,6 +135,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
       // silence is exactly the kind of quiet half-result to avoid.
       if(!chunk.length||chunk.length<MG_PAGE_SIZE)break
       if(total&&rows.length>=total)break
+      if(page===MG_MAX_PAGE)pageLimitReached=true
     }
   } else {
     // One page size for both adapters, used in the request *and* in the
@@ -140,6 +158,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
       if(!chunk.length)break
       if(total) { if(rows.length>=total)break }
       else if(chunk.length<size)break
+      if(page===49&&(!total||rows.length<total))pageLimitReached=true
     }
   }
   const tracks:OnlineMusicInfo[]=[],seen=new Set<string>()
@@ -150,6 +169,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
   }
   if(invalid)warnings.push(`${invalid} 首歌曲信息无效，已跳过`)
   if(!tracks.length)throw Error('歌单为空或平台未返回可导入的歌曲')
+  if(pageLimitReached)warnings.push('已达到平台分页上限 5000 首，后续歌曲未读取。')
   if(total>tracks.length)warnings.push(`平台标记 ${total} 首，本次可导入 ${tracks.length} 首；其余可能受访问限制或超出 5000 首上限`)
   const coverUrl=normalizeCover(source,cover)
   return {name:name||`导入歌单 ${id}`,source,sourceListId:id,...(coverUrl?{coverUrl}:{}) ,tracks,total,warnings:[...new Set(warnings)]}

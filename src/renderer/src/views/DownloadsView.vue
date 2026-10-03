@@ -76,7 +76,7 @@ async function confirmRemove(deleteFile:boolean):Promise<void>{
   -->
   <article v-for="task in [...tasks].reverse()" :key="task.id" class="download-row">
     <strong class="dl-name">{{ task.track.name }}</strong>
-    <span class="dl-meta">{{ task.track.singer }} · {{ QUALITY_LABELS[task.quality] }} · {{ task.track.source }}</span>
+    <span class="dl-meta">{{ task.track.singer }} · {{ QUALITY_LABELS[task.quality] }} · {{ task.track.source }}<template v-if="task.resolvedProviderName"> · {{ task.resolvedProviderName }}</template></span>
     <span class="dl-size">{{ task.received ? size(task.received) + (task.total ? ' / ' + size(task.total) : '') : '—' }}</span>
     <span class="dl-status" :class="task.status">{{ statuses[task.status] }}</span>
     <span class="dl-actions"><button v-if="!['completed','failed','cancelled'].includes(task.status)" class="btn" @click="act(task,'cancel')">取消</button><button v-if="['failed','cancelled'].includes(task.status)" class="btn" @click="act(task,'retry')">重试</button><button class="btn btn--danger" @click="askRemove(task)">移除记录</button></span>

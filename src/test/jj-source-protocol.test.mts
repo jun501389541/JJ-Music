@@ -5,7 +5,7 @@ import {
   JJ_LEGACY_COMPATIBLE_CAPABILITIES,
   JJ_SOURCE_API_VERSION,
   LX_ACTIONS
-} from '../shared/types.js'
+} from './shared/types.js'
 import {
   JJ_MAX_BOARDS,
   JJ_MAX_ERROR_MESSAGE_CHARS,

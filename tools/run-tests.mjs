@@ -16,6 +16,9 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = join(repoRoot, 'out', 'test')
 const srcTestDir = join(repoRoot, 'src', 'test')
 const online = process.argv.includes('--online')
+const RETIRED_SUITES = new Map([
+  ['jj-provider-engine.test.mjs', 'JJ capability runtime routes were retired by E1; JJ-only review items R2–R6 remain deferred.']
+])
 
 function run(command, args, label) {
   process.stdout.write(`\n${'#'.repeat(72)}\n# ${label}\n${'#'.repeat(72)}\n`)
@@ -56,9 +59,13 @@ console.log('building engine bundle…')
 buildEngine()
 
 const staged = stageSuites()
+for (const [name, reason] of RETIRED_SUITES) {
+  if (staged.includes(name)) console.log(`SKIP  ${name}: ${reason}`)
+}
 // Live endpoint checks are separate from the repeatable regression run.
 const ONLINE_SUITES = ['lyrics-search.test.mjs', 'lyrics-tags.test.mjs']
-const suites = online ? staged.filter((name) => ONLINE_SUITES.includes(name)) : staged
+const active = staged.filter((name) => !RETIRED_SUITES.has(name))
+const suites = online ? active.filter((name) => ONLINE_SUITES.includes(name)) : active
 // An empty run is a green run by the arithmetic below, which is the one outcome
 // a gate must never produce: rename a live suite and `--online` would report
 // success having executed nothing.

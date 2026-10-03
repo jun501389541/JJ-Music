@@ -28,6 +28,15 @@ import { lyricCandidates } from './library/lyric-service.js'
  * a space, and `pathname` hands it back `%20`-encoded and impossible to open.
  */
 const indexSource = readFileSync(fileURLToPath(new URL('../../src/main/index.ts', import.meta.url)), 'utf8')
+const playlistImportView = readFileSync(fileURLToPath(new URL('../../src/renderer/src/views/PlaylistImportView.vue', import.meta.url)), 'utf8')
+const searchView = readFileSync(fileURLToPath(new URL('../../src/renderer/src/views/SearchView.vue', import.meta.url)), 'utf8')
+const trackList = readFileSync(fileURLToPath(new URL('../../src/renderer/src/components/TrackList.vue', import.meta.url)), 'utf8')
+const sourcesView = readFileSync(fileURLToPath(new URL('../../src/renderer/src/views/SourcesView.vue', import.meta.url)), 'utf8')
+const appView = readFileSync(fileURLToPath(new URL('../../src/renderer/src/App.vue', import.meta.url)), 'utf8')
+const playerBar = readFileSync(fileURLToPath(new URL('../../src/renderer/src/components/PlayerBar.vue', import.meta.url)), 'utf8')
+const nowPlayingView = readFileSync(fileURLToPath(new URL('../../src/renderer/src/views/NowPlayingView.vue', import.meta.url)), 'utf8')
+const discoverView = readFileSync(fileURLToPath(new URL('../../src/renderer/src/views/DiscoverView.vue', import.meta.url)), 'utf8')
+const mediaSession = readFileSync(fileURLToPath(new URL('../../src/renderer/src/composables/use-media-session.ts', import.meta.url)), 'utf8')
 
 test('歌词候选：调用方注入了 search 和 fetchLyric 时，两者都只走注入的那个', async () => {
   const searched = []
@@ -111,41 +120,33 @@ test('艺人头像：注入解析器返回 null 时，就是「没有头像」�
   assert.equal(result, null)
 })
 
-test('index.ts 的每一处注入都读的是实时开关值，不是启动时的快照', () => {
-  /*
-   * This is the other half of the guarantee: the seam is injectable (above), and
-   * the thing injected actually consults the setting. Reading `settings.get()`
-   * inside the arrow matters — a value captured at `createServices` time would
-   * mean the user has to restart the app for the switch to take effect, which
-   * reads as "the switch did nothing".
-   */
-  const gateReads = indexSource.match(/allowBuiltinOnlineSearch/g) ?? []
-  // playlistBackfillQualitys, lyricDeps.fetchLyric, ArtistImageStore, and the
-  // three SearchRouter/LibraryRouter call sites that predate this task.
-  assert.ok(gateReads.length >= 3, `expected several live gate reads, found ${gateReads.length}`)
+test('main process gates every online catalog request with live source state and consent', () => {
+  assert.match(indexSource, /sourcesByScript:\s*\(\)\s*=>\s*sourceEngine\.getSourcesByScript\(\)/)
+  assert.match(indexSource, /isScriptEnabled:\s*\(apiId\)\s*=>\s*sourceStore\.metas\(\)\.some/)
+  assert.match(indexSource, /catalogConsent:\s*\(\)\s*=>\s*settings\.get\(\)\.onlineCatalogConsent/)
 
-  // The artist-portrait gate must return null, not throw: `resolve()` reports a
-  // throw to the user as a failed lookup, and a switched-off lookup never
-  // happened.
-  assert.match(
-    indexSource,
-    /resolveArtistImage:\s*\(async[\s\S]{0,200}?allowBuiltinOnlineSearch[\s\S]{0,80}?: null\)/,
-    'artist image gate must resolve to null when the switch is off'
-  )
+  // This switch is retained only so settings files from older versions still load.
+  assert.doesNotMatch(indexSource, /\.settings\.get\(\)\.allowBuiltinOnlineSearch/)
+  assert.match(indexSource, /searchRouter\.search\(source, keyword, page, signal\)/)
+  assert.match(indexSource, /onlinePlatforms\.platforms\('artistImage'\)/)
+  assert.match(indexSource, /onlinePlatforms\.allows\(music\.source, 'lyrics'\)/)
+  assert.match(indexSource, /onlinePlatforms\.allows\(track\.source, 'cover'\)/)
+  assert.match(indexSource, /onlinePlatforms\.allows\(preview\.source, 'cover'\)/)
+  assert.match(indexSource, /onlinePlatforms\.allows\('wy', 'search'\)/)
+})
 
-  // The lyric fetcher gate must return an empty lyric rather than dropping the
-  // step, because the source order is the user's ranking and removing an entry
-  // would silently change what 「回退」 means.
-  assert.match(
-    indexSource,
-    /fetchLyric:\s*async[\s\S]{0,200}?allowBuiltinOnlineSearch[\s\S]{0,60}?return \{ lyric: '' \}/,
-    'lyric fetcher gate must return an empty lyric when the switch is off'
-  )
-
-  // The playlist badge gate must short-circuit before the detail fetch.
-  assert.match(
-    indexSource,
-    /if \(!requireServices\(\)\.settings\.get\(\)\.allowBuiltinOnlineSearch\) return \[\]/,
-    'playlist backfill must return an empty list when the switch is off'
-  )
+test('online catalog UI follows admitted sources and keeps saved offline records visible', () => {
+  assert.match(playlistImportView, /window\.jj\.playlistImport\.providers\(\)/)
+  assert.match(playlistImportView, /v-if="providers\.length"/)
+  assert.doesNotMatch(playlistImportView, /:src="preview\.coverUrl"/)
+  assert.match(searchView, /hasOnlineSearchPlatforms/)
+  assert.match(trackList, /不可用/)
+  assert.match(sourcesView, /在线目录请求/)
+  assert.match(trackList, /trackCoverUrl\(/)
+  assert.match(playerBar, /trackCoverUrl\(/)
+  assert.match(nowPlayingView, /trackCoverUrl\(/)
+  assert.match(discoverView, /trackCoverUrl\(/)
+  assert.match(appView, /trackCoverUrl\(/)
+  assert.match(appView, /startMediaSession\(player,[\s\S]{0,140}?trackCoverUrl\(/)
+  assert.match(mediaSession, /getCoverUrl\(track\)/)
 })

@@ -529,7 +529,7 @@ section('8. Multi-source ordering and failover')
  */
 function fakeRuntime(id, name, sources, attempts) {
   return {
-    api: { meta: { id, name }, source: '' },
+    api: { meta: { id, stableId: `stable-${id}`, name }, source: '' },
     host: {
       dead: false,
       sources,
@@ -547,7 +547,10 @@ function orderOf(engine) {
 }
 
 function multiSourceEngine(listOrder, runtimes) {
-  const engine = new SourceEngine({ list: () => listOrder }, 'unused')
+  const engine = new SourceEngine({
+    list: () => listOrder,
+    versionOf: apiId => `test-version-${apiId}`
+  }, 'unused')
   engine.runtimes = new Map(runtimes.map((r) => [r.api.meta.id, r]))
   engine.rebuildOwners()
   return engine
@@ -602,12 +605,28 @@ const track = {
 
 const served = await ordered.getMusicUrl('wy', track, 'flac')
 check('falls through failing sources to the first healthy one', served.apiId === 'b', String(served.apiId))
+check('returned playback identity is the successful stable script id', served.providerId === 'stable-b', String(served.providerId))
+check('returned playback identity includes the successful script name', served.providerName === '音源B', String(served.providerName))
+check('returned playback identity includes the successful script version', served.providerVersion === 'test-version-b', String(served.providerVersion))
 check('keeps the served quality', served.quality === 'flac', served.quality)
 check(
   'tried the failed sources in order before succeeding',
   attempts.calls[0] === 'c:flac' && attempts.calls.includes('a:flac') && attempts.calls.at(-1) === 'b:flac',
   attempts.calls.join(' ')
 )
+
+attempts.calls.length = 0
+const pinned = await ordered.getMusicUrl('wy', { ...track, providerId: 'stable-b' }, 'flac')
+check('a track stamped with a known LX stable id stays on that script', pinned.providerId === 'stable-b', String(pinned.providerId))
+check('a stamped script is not mixed with sibling URL attempts', attempts.calls.join(',') === 'b:flac', attempts.calls.join(','))
+attempts.calls.length = 0
+let missingProvider = ''
+try {
+  await ordered.getMusicUrl('wy', { ...track, providerId: 'removed-script' }, 'flac')
+} catch (error) {
+  missingProvider = error.message
+}
+check('a missing stamped provider is not silently rebound', missingProvider.includes('removed-script') && attempts.calls.length === 0, missingProvider)
 
 // Every script failing must produce one error naming each of them.
 const allFail = mkAttempts()

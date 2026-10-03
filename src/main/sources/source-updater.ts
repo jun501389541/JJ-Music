@@ -15,22 +15,21 @@
  *    replaces a script on its own, and `apply` is a separate call the UI makes
  *    after showing what it is about to overwrite.
  *
- * 2. **Identity survives.** The replacement goes through
- *    `SourceStore.importScript(..., { stableId })`, which matches the existing
- *    record by `stableId` rather than by name. Without that, an author rename
- *    would mint a new id and the user's library would come back "source
- *    missing" — the exact failure `stableId` was introduced to prevent.
+ * 2. **Identity survives.** The replacement goes through the source store's
+ *    update path, which keeps the existing stable identity rather than
+ *    re-importing by name. An author rename therefore cannot orphan tracks
+ *    already stamped with this provider.
  *
- * 3. **The download is untrusted.** The URL comes from a script's `@homepage`,
- *    i.e. from a third party. It goes through `safeFetchBytes`, which validates
+ * 3. **The download is untrusted.** The URL comes from the direct link used at
+ *    import or a script's `@homepage`. It goes through `safeFetchBytes`, which validates
  *    every redirect hop, refuses private and metadata addresses at connection
  *    time (see `pinned-dispatcher.ts`), and caps the body. A hostile or
- *    misconfigured homepage cannot turn an update check into an SSRF.
+ *    misconfigured link cannot turn an update check into an SSRF.
  *
  * 4. **A checksum is not a signature.** The fetched script is hashed and the
  *    hash is reported, so a user who already knows the expected value can
  *    confirm it — but nothing here proves *who* published the bytes. The
- *    homepage is not authenticated, and there is no publisher identity to check
+ *    address is not authenticated, and there is no publisher identity to check
  *    it against. Presenting SHA-256 as provenance would be a lie, so this
  *    module documents what it does and does not establish (see `sha256`).
  *
@@ -41,15 +40,106 @@
  *   serve a script" rather than a guess about which link on the page might be
  *   the download. Picking a link out of HTML has no reliable predicate, and
  *   guessing wrong means installing something the user never chose.
- * - **No automatic polling.** Nothing here runs on a timer; a check happens
- *   because the user asked for one.
+ * - **No automatic installation.** Daily checks may discover a candidate, but
+ *   only the user can approve and apply its bytes.
  * - **No version downgrade.** `planUpdate` refuses to move backwards, so a
  *   compromised homepage cannot push a user onto an older, vulnerable script by
  *   advertising a low version.
  */
 import { createHash } from 'node:crypto'
+import type { SourceUpdateCheck, UserApiMeta } from '@shared/types'
 import { describeScript, assessScriptRisk, type ScriptRiskReport } from './script-header'
 import { safeFetchBytes } from '../online/url-guard'
+import type { SourceStore } from './source-store'
+
+export interface UpdateLifecycle {
+  reload(id: string): Promise<void>
+}
+
+/**
+ * Apply an explicitly approved script update as one recoverable transaction.
+ * Disabled sources are updated on disk only; applying an update must not run
+ * code the user had deliberately left disabled.
+ */
+export async function applySourceUpdate(
+  store: SourceStore,
+  engine: UpdateLifecycle,
+  id: string,
+  script: string
+): Promise<UserApiMeta> {
+  const before = store.get(id)
+  if (!before) throw new Error('音源不存在，可能已被删除')
+  if (typeof script !== 'string' || !script.trim()) throw new Error('更新内容为空')
+  if (before.source === script) return before.meta
+
+  const wasEnabled = before.meta.enabled
+  const updated = store.replaceScript(id, script, '在线音源')
+  if (!updated) throw new Error('音源不存在，可能已被删除')
+  if (!wasEnabled) return updated
+
+  try {
+    await engine.reload(id)
+    return updated
+  } catch (updateError) {
+    if (!store.rollback(id)) {
+      throw new Error(`更新启动失败，且无法恢复旧版本：${messageOf(updateError)}`, { cause: updateError })
+    }
+
+    // Starting an unsafe candidate can quarantine and disable the record. The
+    // restored bytes have already passed the same validator before; clear only
+    // the candidate's verdict, then restore the user's prior enabled choice.
+    store.clearQuarantine(id)
+    if (wasEnabled) store.setEnabled(id, true)
+    try {
+      await engine.reload(id)
+    } catch (restoreError) {
+      throw new Error(
+        `更新失败，旧脚本文件已恢复，但旧版本重新启动失败：${messageOf(restoreError)}`,
+        { cause: new AggregateError([updateError, restoreError]) }
+      )
+    }
+    throw new Error(`更新启动失败，已自动恢复旧版本：${messageOf(updateError)}`, { cause: updateError })
+  }
+}
+
+/** Roll back only after confirmation, and restore the current script if that fails. */
+export async function rollbackSourceUpdate(
+  store: SourceStore,
+  engine: UpdateLifecycle,
+  id: string
+): Promise<UserApiMeta> {
+  const before = store.get(id)
+  if (!before) throw new Error('音源不存在，可能已被删除')
+  const wasEnabled = before.meta.enabled
+  if (!store.rollback(id)) throw new Error('没有可回退的版本')
+  const rolledBack = store.get(id)
+  if (!rolledBack) throw new Error('回退后找不到音源记录')
+  if (!wasEnabled) return rolledBack.meta
+
+  try {
+    await engine.reload(id)
+    return rolledBack.meta
+  } catch (rollbackError) {
+    if (!store.rollback(id)) {
+      throw new Error(`回退启动失败，且无法恢复当前版本：${messageOf(rollbackError)}`, { cause: rollbackError })
+    }
+    store.clearQuarantine(id)
+    store.setEnabled(id, true)
+    try {
+      await engine.reload(id)
+    } catch (restoreError) {
+      throw new Error(
+        `回退失败，当前版本文件已恢复，但重新启动失败：${messageOf(restoreError)}`,
+        { cause: new AggregateError([rollbackError, restoreError]) }
+      )
+    }
+    throw new Error(`回退版本启动失败，已恢复回退前版本：${messageOf(rollbackError)}`, { cause: rollbackError })
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 /**
  * Upper bound on a script fetched during an update check.
@@ -74,6 +164,7 @@ export type UpdateCheckFailure =
 
 /** Outcome of comparing a fetched script against the installed one. */
 export interface UpdatePlan {
+  change: 'newVersion' | 'contentChanged'
   /** Version string currently installed, as parsed from the stored script. */
   currentVersion: string
   /** Version string advertised by the fetched script. */
@@ -207,12 +298,16 @@ export type UpdateFetcher = (url: string) => Promise<{ body: Buffer }>
 export interface UpdateSource {
   /** Version currently installed (already parsed from the stored script). */
   currentVersion: string
-  /** `@homepage` from the installed script. */
+  /** Direct JavaScript URL used for import; preferred when it is available. */
+  updateUrl?: string
+  /** `@homepage` from the installed script, used as a fallback. */
   homepage: string
+  /** Installed script text, used to detect changed bytes under the same version. */
+  currentScript?: string
 }
 
 /**
- * Check whether a newer script is available at the source's homepage.
+ * Check whether a newer script is available at its direct import URL or homepage.
  *
  * Never throws for an expected condition — a missing homepage or an
  * unreachable host is a normal result, reported through `reason`/`message`.
@@ -222,30 +317,31 @@ export async function checkForUpdate(
   source: UpdateSource,
   fetchBytes: UpdateFetcher = safeFetchBytes
 ): Promise<UpdateCheckResult> {
-  const homepage = source.homepage.trim()
-  if (!homepage) {
+  const address = source.updateUrl?.trim() || source.homepage.trim()
+  const addressLabel = source.updateUrl?.trim() ? '导入链接' : '@homepage'
+  if (!address) {
     return {
       ok: false,
       reason: 'noHomepage',
-      message: '该音源没有填写 @homepage，无法自动检查更新。请从作者发布页手动下载后重新导入。'
+      message: '该音源没有保存脚本直链，也没有填写 @homepage，无法自动检查更新。请从作者发布页手动下载后重新导入。'
     }
   }
 
   let url: URL
   try {
-    url = new URL(homepage)
+    url = new URL(address)
   } catch {
     return {
       ok: false,
       reason: 'notAUrl',
-      message: `@homepage「${homepage}」不是一个有效的 http(s) 链接，无法自动检查更新。`
+      message: `${addressLabel}「${address}」不是一个有效的 http(s) 链接，无法自动检查更新。`
     }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return {
       ok: false,
       reason: 'notAUrl',
-      message: `@homepage「${homepage}」不是 http(s) 链接，出于安全考虑不会请求它。`
+      message: `${addressLabel}「${address}」不是 http(s) 链接，出于安全考虑不会请求它。`
     }
   }
 
@@ -261,12 +357,12 @@ export async function checkForUpdate(
     return {
       ok: false,
       reason: 'blocked',
-      message: `无法从 @homepage 获取脚本：${error instanceof Error ? error.message : String(error)}`
+      message: `无法从${addressLabel}获取脚本：${error instanceof Error ? error.message : String(error)}`
     }
   }
 
   if (fetched.body.length === 0) {
-    return { ok: false, reason: 'empty', message: `@homepage「${homepage}」返回了空内容。` }
+    return { ok: false, reason: 'empty', message: `${addressLabel}「${address}」返回了空内容。` }
   }
 
   const script = fetched.body.toString('utf8')
@@ -275,7 +371,7 @@ export async function checkForUpdate(
       ok: false,
       reason: 'notAScript',
       message:
-        `@homepage「${homepage}」返回的内容不是音源脚本（可能是网页或其它文件）。` +
+        `${addressLabel}「${address}」返回的内容不是音源脚本（可能是网页或其它文件）。` +
         '请从作者发布页手动下载脚本后重新导入。'
     }
   }
@@ -284,20 +380,23 @@ export async function checkForUpdate(
   const nextVersion = header.version
   const comparison = compareVersions(source.currentVersion, nextVersion)
 
-  if (comparison <= 0) {
+  const contentChanged = comparison === 0 &&
+    source.currentScript !== undefined && source.currentScript !== script
+  if (comparison < 0 || (comparison === 0 && !contentChanged)) {
     const same = comparison === 0
     return {
       ok: false,
       reason: same ? 'sameVersion' : 'notNewer',
       message: same
         ? `已是最新版本（${source.currentVersion || '未标注版本'}）。`
-        : `@homepage 上的脚本版本（${nextVersion || '未标注'}）不比当前版本（${source.currentVersion || '未标注'}）新，已忽略。`
+        : `${addressLabel}上的脚本版本（${nextVersion || '未标注'}）不比当前版本（${source.currentVersion || '未标注'}）新，已忽略。`
     }
   }
 
   return {
     ok: true,
     plan: {
+      change: contentChanged ? 'contentChanged' : 'newVersion',
       currentVersion: source.currentVersion,
       nextVersion,
       script,
@@ -306,6 +405,106 @@ export async function checkForUpdate(
       url: url.toString(),
       risk: assessScriptRisk(script)
     }
+  }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+const dailyChecksInFlight = new Set<string>()
+
+export interface DailyUpdateCheckOptions {
+  now?: () => number
+  check?: (source: UpdateSource) => Promise<UpdateCheckResult>
+  concurrency?: number
+  onChange?: (id: string, status: SourceUpdateCheck) => void | Promise<void>
+}
+
+/**
+ * Check enabled direct-link sources after startup, at most once per day.
+ *
+ * The persisted record contains only a small status summary. The candidate
+ * body stays in memory for a later, explicit manual check and confirmation.
+ */
+export async function checkDailySourceUpdates(
+  store: SourceStore,
+  options: DailyUpdateCheckOptions = {}
+): Promise<void> {
+  const now = options.now ?? Date.now
+  const check = options.check ?? ((source) => checkForUpdate(source))
+  const timestamp = now()
+  const due = store.list().filter(({ meta }) => {
+    if (!meta.enabled || !meta.updateUrl || dailyChecksInFlight.has(meta.id)) return false
+    const last = meta.updateCheck
+    // A persisted `checking` state means the previous process ended mid-request;
+    // retry it on the next startup. The in-memory set excludes live requests.
+    return !last || last.state === 'checking' || timestamp - last.checkedAt >= DAY_MS
+  })
+
+  for (const source of due) dailyChecksInFlight.add(source.meta.id)
+  const requestedConcurrency = Number.isFinite(options.concurrency ?? 2) ? Math.floor(options.concurrency ?? 2) : 2
+  const limit = Math.max(1, Math.min(4, requestedConcurrency))
+  let next = 0
+
+  const notify = async (id: string, status: SourceUpdateCheck): Promise<void> => {
+    try { await options.onChange?.(id, status) } catch { /* UI refresh must not fail the check. */ }
+  }
+
+  const runOne = async (loaded: ReturnType<SourceStore['list']>[number]): Promise<void> => {
+    const { meta } = loaded
+    const started: SourceUpdateCheck = { checkedAt: timestamp, state: 'checking' }
+    try {
+      if (!store.recordUpdateCheck(meta.id, started)) return
+      await notify(meta.id, started)
+      const result = await check({
+        currentVersion: loaded.meta.version,
+        updateUrl: loaded.meta.updateUrl,
+        homepage: loaded.meta.homepage,
+        currentScript: loaded.source
+      })
+      const status = summarizeUpdateCheck(result, timestamp)
+      if (store.recordUpdateCheck(meta.id, status)) await notify(meta.id, status)
+    } catch (error) {
+      const status: SourceUpdateCheck = {
+        checkedAt: timestamp,
+        state: 'failed',
+        currentVersion: meta.version,
+        message: `自动检查失败：${error instanceof Error ? error.message : String(error)}`
+      }
+      try {
+        if (store.recordUpdateCheck(meta.id, status)) await notify(meta.id, status)
+      } catch (persistError) {
+        console.error(`保存音源「${meta.name}」更新检查状态失败`, persistError)
+      }
+    } finally {
+      dailyChecksInFlight.delete(meta.id)
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, due.length) }, async () => {
+    while (next < due.length) {
+      const source = due[next++]!
+      await runOne(source)
+    }
+  })
+  await Promise.all(workers)
+}
+
+/** Reduce a full check result to a persistable status; script bytes never leave this process. */
+export function summarizeUpdateCheck(result: UpdateCheckResult, checkedAt: number): SourceUpdateCheck {
+  const plan = result.plan
+  const state: SourceUpdateCheck['state'] = result.ok && plan
+    ? 'available'
+    : result.reason === 'sameVersion' || result.reason === 'notNewer'
+      ? 'current'
+      : 'failed'
+  return {
+    checkedAt,
+    state,
+    ...(plan ? {
+      currentVersion: plan.currentVersion,
+      nextVersion: plan.nextVersion,
+      sha256: plan.sha256
+    } : {}),
+    ...(result.message ? { message: result.message } : {})
   }
 }
 

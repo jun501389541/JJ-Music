@@ -245,6 +245,10 @@ export interface UserApiMeta {
   version: string
   author: string
   homepage: string
+  /** Direct JavaScript URL used for import, when available. */
+  updateUrl?: string
+  /** Summary of the last automatic or manual update check; never includes script bytes. */
+  updateCheck?: SourceUpdateCheck
   /** Whether the script may raise update alerts. */
   allowShowUpdateAlert: boolean
   /** Number of sources the script advertised after init. */
@@ -309,6 +313,8 @@ export type UpdateCheckFailure =
  * user approves the exact text reported here.
  */
 export interface UpdatePlan {
+  /** Whether this is a version bump or changed bytes under the same version. */
+  change: 'newVersion' | 'contentChanged'
   /** Version installed now, from the stored script's header. */
   currentVersion: string
   /** Version the fetched script advertises. */
@@ -341,6 +347,16 @@ export interface UpdateCheckResult {
   message?: string
   /** The update on offer; present only when `ok` is true. */
   plan?: UpdatePlan
+}
+
+/** Persisted summary for the last source update check. Candidate script bytes are never stored here. */
+export interface SourceUpdateCheck {
+  checkedAt: number
+  state: 'checking' | 'available' | 'current' | 'failed'
+  currentVersion?: string
+  nextVersion?: string
+  sha256?: string
+  message?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -1108,6 +1124,12 @@ export interface PlatformProbeResult {
 export interface DownloadTask {
   id: string
   track: OnlineMusicInfo
+  /** LX stable script that actually resolved this download, when known. */
+  resolvedProviderId?: string
+  /** Display name of the LX script that actually resolved this download. */
+  resolvedProviderName?: string
+  /** SourceStore digest for the script version that resolved this download. */
+  resolvedProviderVersion?: string
   quality: Quality
   status: 'queued' | 'resolving' | 'downloading' | 'tagging' | 'completed' | 'failed' | 'cancelled'
   received: number

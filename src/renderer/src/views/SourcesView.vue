@@ -8,12 +8,13 @@
  * own console output.
  */
 import { useUiStore } from '../stores/ui'
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import type { UserApiMeta, UpdateCheckResult } from '@shared/types'
 import type { ValidationReport } from '@shared/validation'
 import { QUALITY_LABELS } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
+import { createSourceUpdateState } from '../utils/source-update-state'
 
 const library = useLibraryStore()
 const ui = useUiStore()
@@ -190,15 +191,14 @@ async function showLogs(api: UserApiMeta): Promise<void> {
 
 /** Which script's update panel is open, if any. */
 const updateFor = ref<string | null>(null)
-/** Which script is currently being checked, so only its button spins. */
-const checkingUpdate = ref<string | null>(null)
-/** Result of the last check, rendered by the panel above the script. */
-const updateResult = ref<UpdateCheckResult | null>(null)
+/** Results and pending requests are keyed by source ID to isolate concurrent checks. */
+const updateRequests = reactive(createSourceUpdateState<UpdateCheckResult>())
+const updateResult = computed(() => updateFor.value ? updateRequests.results.get(updateFor.value) ?? null : null)
 /** True while an approved update is being written. */
 const updating = ref(false)
 
 /**
- * Ask whether a newer script exists at the source's `@homepage`.
+ * Ask whether a newer script exists at its direct import URL or `@homepage`.
  *
  * Nothing is installed here. The result is held in `updateResult` and shown
  * with the version numbers, the address, the checksum and the risk rating, so
@@ -206,17 +206,15 @@ const updating = ref(false)
  */
 async function checkUpdate(api: UserApiMeta): Promise<void> {
   updateFor.value = api.id
-  checkingUpdate.value = api.id
-  updateResult.value = null
+  const generation = updateRequests.begin(api.id)
   try {
-    updateResult.value = await window.jj.sources.updates.check(api.id)
+    const result = await window.jj.sources.updates.check(api.id)
+    updateRequests.complete(api.id, generation, result)
   } catch (error) {
-    updateResult.value = {
+    updateRequests.complete(api.id, generation, {
       ok: false,
       message: error instanceof Error ? error.message : '检查更新失败'
-    }
-  } finally {
-    checkingUpdate.value = null
+    })
   }
 }
 
@@ -228,11 +226,13 @@ async function checkUpdate(api: UserApiMeta): Promise<void> {
  * reviewed.
  */
 async function applyUpdate(api: UserApiMeta): Promise<void> {
-  const plan = updateResult.value?.plan
+  const plan = updateRequests.results.get(api.id)?.plan
   if (!plan) return
   const confirmed = await ui.confirm(
     '更新音源',
-    `将「${api.name}」从 v${plan.currentVersion || '未标注'} 更新到 v${plan.nextVersion || '未标注'}？\n\n` +
+      (plan.change === 'contentChanged'
+        ? `「${api.name}」版本号仍为 v${plan.currentVersion || '未标注'}，但脚本内容已变化。仍需确认安装这份新内容吗？\n\n`
+        : `将「${api.name}」从 v${plan.currentVersion || '未标注'} 更新到 v${plan.nextVersion || '未标注'}？\n\n`) +
       `来源：${plan.url}\n\n` +
       `更新前的脚本会保留，你可以随时回退。`
   )
@@ -268,8 +268,8 @@ async function rollback(api: UserApiMeta): Promise<void> {
 }
 
 function dismissUpdate(): void {
+  if (updateFor.value) updateRequests.invalidate(updateFor.value)
   updateFor.value = null
-  updateResult.value = null
 }
 
 /** Human-readable size for the update panel. */
@@ -529,22 +529,34 @@ async function disableAll(): Promise<void> {
               <input type="checkbox" :checked="api.enabled" @change="toggle(api)" />
               <span class="switch__track"><span class="switch__thumb" /></span>
             </label>
-            <!--
-              Update check. Only shown when the script declares a @homepage,
-              because that is the only address an update can come from — a
-              button that can only ever answer "no homepage" is a dead control.
-            -->
+            <!-- Direct import URLs point at the script; @homepage is a fallback. -->
             <button
-              v-if="api.homepage"
+              v-if="api.updateUrl || api.homepage"
               class="icon-btn"
               type="button"
               title="检查更新"
-              :disabled="checkingUpdate === api.id"
+              :disabled="updateRequests.checking.has(api.id) || api.updateCheck?.state === 'checking'"
               @click="checkUpdate(api)"
             >
-              <span v-if="checkingUpdate === api.id" class="spinner" />
+              <span v-if="updateRequests.checking.has(api.id) || api.updateCheck?.state === 'checking'" class="spinner" />
               <span v-else>⇩</span>
             </button>
+            <button
+              v-if="api.updateCheck?.state === 'available'"
+              class="update__badge"
+              type="button"
+              :title="api.updateCheck.message || '后台检查发现更新；请重新检查以查看校验值和风险详情。'"
+              @click="checkUpdate(api)"
+            >
+              发现 v{{ api.updateCheck.nextVersion || '新版本' }} 更新
+            </button>
+            <span
+              v-else-if="api.updateCheck?.state === 'failed'"
+              class="script__author"
+              :title="api.updateCheck.message || '最近一次更新检查未成功'"
+            >
+              最近检查未成功
+            </span>
             <!--
               Rollback, offered only when an update actually replaced a script.
               Labelled with the version it would restore, so the user knows what
@@ -579,14 +591,14 @@ async function disableAll(): Promise<void> {
           reviewed ones, not who published them.
         -->
         <div v-if="updateFor === api.id" class="update">
-          <div v-if="checkingUpdate === api.id" class="update__row">
+          <div v-if="updateRequests.checking.has(api.id)" class="update__row">
             <span class="spinner" />
             <span>正在检查更新…</span>
           </div>
           <template v-else-if="updateResult">
             <div v-if="updateResult.ok && updateResult.plan" class="update__offer">
               <div class="update__head">
-                <span class="update__badge">发现新版本</span>
+                <span class="update__badge">{{ updateResult.plan.change === 'contentChanged' ? '同版本内容有变化' : '发现新版本' }}</span>
                 <span>
                   v{{ updateResult.plan.currentVersion || '未标注' }}
                   →

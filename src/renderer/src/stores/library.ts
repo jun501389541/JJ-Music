@@ -6,6 +6,7 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { stripScriptCoverData } from '@shared/persisted-track'
 import type {
   AppSettings,
   LocalMusicInfo,
@@ -267,7 +268,10 @@ export const useLibraryStore = defineStore('library', () => {
   function recordPlayed(track: PlayableTrack): void {
     const snapshot = JSON.parse(JSON.stringify(track)) as PlayableTrack
     recentPlayed.value = [snapshot, ...recentPlayed.value.filter(item => item.id !== track.id)].slice(0, 100)
-    if (ready.value) void updateSettings({ recentPlayed: JSON.parse(JSON.stringify(recentPlayed.value)) }).catch(error => console.error('播放记录保存失败', error))
+    if (ready.value) {
+      const persisted = recentPlayed.value.map(stripScriptCoverData)
+      void updateSettings({ recentPlayed: JSON.parse(JSON.stringify(persisted)) }).catch(error => console.error('播放记录保存失败', error))
+    }
   }
 
   const writeSettings = createSettingsWriter(

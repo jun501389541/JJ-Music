@@ -60,9 +60,11 @@ globalThis.Audio = FakeAudio
 globalThis.MediaError = { MEDIA_ERR_ABORTED: 1, MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 }
 
 let store
+let sourceChangeHandlers = []
 function setup() {
   setActivePinia(createPinia())
   FakeAudio.instances = []
+  sourceChangeHandlers = []
   globalThis.window = {
     AudioContext: FakeAudioContext,
     // The engine samples playback position on a timer. Kept inert: no test
@@ -73,7 +75,13 @@ function setup() {
     jj: {
       music: { url: async () => ({ url: 'https://test/audio', quality: '320k' }), enrich: async track => track },
       lyric: { resolve: async () => emptyLyric, searchOnline: async () => emptyLyric, importFile: async () => null },
-      sources: { available: async () => [] }
+      sources: {
+        available: async () => [],
+        onChanged: handler => {
+          sourceChangeHandlers.push(handler)
+          return () => { sourceChangeHandlers = sourceChangeHandlers.filter(item => item !== handler) }
+        }
+      }
     }
   }
   store = usePlayerStore()
@@ -240,6 +248,31 @@ test('alternate source skips live versions and duration mismatches', async () =>
   }
   await player.playTrack(online('a'))
   assert.equal(chosen, 'correct')
+})
+
+test('URL cache separates providers and the player exposes the script that served audio', async () => {
+  const player = setup()
+  let calls = 0
+  window.jj.music.url = async (_source, track) => {
+    calls++
+    return {
+      url: `https://test/${track.providerId}`,
+      quality: '320k',
+      providerId: track.providerId,
+      providerName: track.providerId === 'stable-b' ? '音源 B' : '音源 A'
+    }
+  }
+  const fromA = { ...online('same'), providerId: 'stable-a' }
+  const fromB = { ...online('same'), providerId: 'stable-b' }
+  await player.playQueue([fromA, fromB], 0)
+  assert.equal(player.resolvedSourceName, '音源 A')
+  await player.playTrackAt(1)
+  assert.equal(calls, 2, 'same platform/id/quality from different providers must resolve separately')
+  assert.equal(player.resolvedSourceName, '音源 B')
+  assert.match(FakeAudio.instances.at(-1).src, /stable-b/)
+  for (const handler of sourceChangeHandlers) handler()
+  await player.playTrackAt(1)
+  assert.equal(calls, 3, 'source lifecycle changes must invalidate URLs resolved by the previous script set')
 })
 
 test('empty queue replacement stops the previous audio', async () => {
@@ -524,6 +557,47 @@ test('starting a whole list pages back to the one it replaced, two deep', async 
   const labels = player.queueHistory.map(entry => entry.label)
   assert.deepEqual(labels, ['专辑 · 三', '专辑 · 二'], 'newest first, and only two pages behind the live one')
   assert.deepEqual(player.queueHistory[0].queue.map(t => t.id), ['d'])
+})
+
+test('script cover bytes remain live but are omitted from recent, history and resume persistence', async () => {
+  const player = setup()
+  const library = useLibraryStore()
+  const writes = []
+  window.jj.settings = {
+    update: async patch => {
+      const snapshot = JSON.parse(JSON.stringify(patch))
+      writes.push(snapshot)
+      return snapshot
+    }
+  }
+  library.ready = true
+
+  const image = `data:image/png;base64,${Buffer.alloc(128 * 1024).toString('base64')}`
+  const scriptedTrack = {
+    ...online('script-cover'),
+    picUrl: image,
+    assets: { cover: [{ origin: 'remote', provider: '音源脚本', at: 1 }] }
+  }
+
+  await player.playQueue([scriptedTrack], 0, '音源脚本歌单')
+  player.flushSession()
+  await flush()
+
+  assert.equal(player.currentTrack.picUrl, image, 'the active track retains the fetched cover')
+  const firstWrite = writes.find(patch => patch.lastSession)
+  assert.ok(firstWrite)
+  assert.equal(firstWrite.lastSession.track.picUrl, undefined)
+  assert.equal(firstWrite.lastSession.queue[0].picUrl, undefined)
+  const recentWrite = writes.find(patch => patch.recentPlayed)
+  assert.ok(recentWrite)
+  assert.equal(recentWrite.recentPlayed[0].picUrl, undefined)
+
+  await player.playQueue([online('replacement')], 0, '替换歌单')
+  await flush()
+  assert.equal(player.queueHistory[0].queue[0].picUrl, image, 'the in-memory history retains the cover')
+  const historyWrite = writes.find(patch => patch.queueHistory?.length)
+  assert.ok(historyWrite)
+  assert.equal(historyWrite.queueHistory[0].queue[0].picUrl, undefined)
 })
 
 test('replaying the same list is one event, and editing the queue is not a new list', async () => {

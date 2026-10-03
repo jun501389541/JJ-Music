@@ -32,7 +32,8 @@ import { assertIpcArgs, isCancellableRequestId } from './ipc-validation'
 import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
-import { checkForUpdate } from './sources/source-updater'
+import { applySourceUpdate, checkDailySourceUpdates, checkForUpdate, looksLikeScript, rollbackSourceUpdate, summarizeUpdateCheck } from './sources/source-updater'
+import { SourceMediaProxy } from './online/source-media-proxy'
 import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
 import { MusicLibrary } from './library/music-library'
@@ -284,11 +285,34 @@ if (debugPort && /^\d+$/.test(debugPort)) {
 
 /** `jjmedia://local/<url-encoded absolute path>` */
 const MEDIA_SCHEME = 'jjmedia'
+const SOURCE_STREAM_SCHEME = 'jjstream'
+const sourceMediaProxy = new SourceMediaProxy({
+  isProviderCurrent: identity => {
+    try {
+      const { sourceEngine, sourceStore } = requireServices()
+      return sourceEngine.supportsProvider(identity.sourceId as SourceId, identity.providerId, 'musicUrl') &&
+        sourceStore.versionOf(identity.providerId) === identity.providerVersion
+    } catch {
+      return false
+    }
+  }
+})
 
 // Must run before `app.ready`.
 protocol.registerSchemesAsPrivileged([
   {
     scheme: MEDIA_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+      bypassCSP: false
+    }
+  },
+  {
+    scheme: SOURCE_STREAM_SCHEME,
     privileges: {
       standard: true,
       secure: true,
@@ -621,8 +645,12 @@ async function createServices(): Promise<Services> {
   }
 
   sourceEngine.on({
-    sourcesChanged: () => {
+    sourcesChanged: (apiId) => {
       platformProbes.clear()
+      if (apiId) {
+        const providerId = sourceStore.get(apiId)?.meta.stableId ?? apiId
+        sourceMediaProxy.revokeProvider(providerId)
+      }
       mainWindow?.webContents.send(IPC.sourcesChanged)
     }
   })
@@ -1295,6 +1323,15 @@ function registerMediaProtocol(): void {
   })
 }
 
+/** Stream script audio from main after validating every URL/redirect hop. */
+function registerSourceAudioProtocol(): void {
+  protocol.handle(SOURCE_STREAM_SCHEME, (request) => sourceMediaProxy.handleRequest({
+    url: request.url,
+    method: request.method,
+    headers: request.headers
+  }))
+}
+
 /* ------------------------------------------------------------------ *
  * IPC
  * ------------------------------------------------------------------ */
@@ -1716,9 +1753,9 @@ function registerIpc(): void {
    * through this, because four copies of the same gate are four chances for one of
    * them to be narrower than the rest.
    */
-  function importScript(content: string, name: string): { meta: UserApiMeta; blocking: { title: string; detail: string }[] } {
+  function importScript(content: string, name: string, updateUrl?: string): { meta: UserApiMeta; blocking: { title: string; detail: string }[] } {
     const { sourceStore, sourceEngine } = requireServices()
-    const meta = sourceStore.import(content, name)
+    const meta = sourceStore.import(content, name, updateUrl)
     const loaded = sourceStore.get(meta.id)
     if (!loaded) return { meta, blocking: [] }
     const report = sourceEngine.validate(loaded.source, meta.name)
@@ -1799,7 +1836,8 @@ function registerIpc(): void {
     // undecoded name is the better label, so it is what is kept.
     let name = file
     try { name = decodeURIComponent(file) } catch { /* not percent-encoded */ }
-    const { meta, blocking } = importScript(content, name || '在线音源')
+    const updateUrl = looksLikeScript(content) ? new URL(link).toString() : undefined
+    const { meta, blocking } = importScript(content, name || '在线音源', updateUrl)
     await sourceEngine.startAll()
     if (blocking.length) {
       throw new Error(`「${meta.name}」未通过启动前校验，已导入但保持停用：\n${blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')}`)
@@ -1922,8 +1960,8 @@ function registerIpc(): void {
    * Check whether a newer version of an imported 音源 is available.
    *
    * This never installs anything. It fetches the script at the source's
-   * `@homepage` through the same guarded pipeline as every other outbound
-   * request (see `source-updater.ts`), compares versions, and returns what it
+   * the direct import URL (or, when absent, `@homepage`) through the same guarded
+   * pipeline as every other outbound request (see `source-updater.ts`), compares versions, and returns what it
    * found — including the download's SHA-256, which confirms the transfer but
    * says nothing about who published the bytes. The user sees the result and
    * decides; `sourcesUpdateApply` is the separate call that replaces anything.
@@ -1932,10 +1970,29 @@ function registerIpc(): void {
     const { sourceStore } = requireServices()
     const loaded = sourceStore.get(id)
     if (!loaded) throw new Error('音源不存在')
-    return checkForUpdate({
-      currentVersion: loaded.meta.version,
-      homepage: loaded.meta.homepage
-    })
+    const checkedAt = Date.now()
+    sourceStore.recordUpdateCheck(id, { checkedAt, state: 'checking' })
+    mainWindow?.webContents.send(IPC.sourcesChanged)
+    try {
+      const result = await checkForUpdate({
+        currentVersion: loaded.meta.version,
+        updateUrl: loaded.meta.updateUrl,
+        homepage: loaded.meta.homepage,
+        currentScript: loaded.source
+      })
+      sourceStore.recordUpdateCheck(id, summarizeUpdateCheck(result, checkedAt))
+      mainWindow?.webContents.send(IPC.sourcesChanged)
+      return result
+    } catch (error) {
+      sourceStore.recordUpdateCheck(id, {
+        checkedAt,
+        state: 'failed',
+        currentVersion: loaded.meta.version,
+        message: `检查更新失败：${error instanceof Error ? error.message : String(error)}`
+      })
+      mainWindow?.webContents.send(IPC.sourcesChanged)
+      throw error
+    }
   })
 
   /**
@@ -1953,11 +2010,7 @@ function registerIpc(): void {
   handle(IPC.sourcesUpdateApply, async (id: string, script: string) => {
     const { sourceStore, sourceEngine } = requireServices()
     if (typeof id !== 'string' || !id) throw new Error('音源不存在')
-    if (typeof script !== 'string' || !script.trim()) throw new Error('更新内容为空')
-    const meta = sourceStore.replaceScript(id, script, '在线音源')
-    if (!meta) throw new Error('音源不存在，可能已被删除')
-    await sourceEngine.reload(id)
-    return meta
+    return applySourceUpdate(sourceStore, sourceEngine, id, script)
   })
 
   /**
@@ -1969,9 +2022,7 @@ function registerIpc(): void {
    */
   handle(IPC.sourcesUpdateRollback, async (id: string) => {
     const { sourceStore, sourceEngine } = requireServices()
-    if (!sourceStore.rollback(id)) throw new Error('没有可回退的版本')
-    await sourceEngine.reload(id)
-    return sourceStore.metas().find(item => item.id === id) ?? null
+    return rollbackSourceUpdate(sourceStore, sourceEngine, id)
   })
 
   /* ---------------- online music ---------------- */
@@ -2069,8 +2120,15 @@ function registerIpc(): void {
     let cover: AssetRef | undefined = music.assets?.cover?.[0]
     let picUrl = music.picUrl ?? ''
     if (!picUrl) {
-      picUrl = await sourceEngine.getPic(music.source, music, signal)
-      if (picUrl) cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
+      const scriptPic = await sourceEngine.getPic(music.source, music, signal)
+      if (scriptPic) {
+        try {
+          picUrl = await sourceMediaProxy.imageDataUrl(scriptPic)
+          cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
+        } catch {
+          picUrl = ''
+        }
+      }
     } else if (!cover) {
       cover = { origin: 'remote', provider: '平台搜索结果', at: Date.now() }
     }
@@ -2091,7 +2149,16 @@ function registerIpc(): void {
     IPC.musicUrl,
     async (_source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) => {
       const { playbackRouter } = requireServices()
-      return playbackRouter.musicUrl(musicInfo, quality)
+      const result = await playbackRouter.musicUrl(musicInfo, quality)
+      if (!result.providerId || !result.providerVersion) throw new Error('音源没有可验证的身份，无法安全播放')
+      return {
+        ...result,
+        url: sourceMediaProxy.audioUrl(result.url, {
+          sourceId: _source,
+          providerId: result.providerId,
+          providerVersion: result.providerVersion
+        })
+      }
     }
   )
 
@@ -2102,7 +2169,10 @@ function registerIpc(): void {
 
   handle(IPC.musicPic, async (_source: SourceId, musicInfo: OnlineMusicInfo) => {
     const { playbackRouter } = requireServices()
-    return playbackRouter.pic(musicInfo)
+    const raw = await playbackRouter.pic(musicInfo)
+    if (!raw) return ''
+    try { return await sourceMediaProxy.imageDataUrl(raw) }
+    catch { return '' }
   })
 
   /**
@@ -2738,6 +2808,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     registerMediaProtocol()
+    registerSourceAudioProtocol()
     relaxCorsForMedia()
     services = await createServices()
     registerIpc()
@@ -2756,7 +2827,12 @@ if (!app.requestSingleInstanceLock()) {
 
     // Sources are started after the window exists so init errors can be shown.
     void services.sourceEngine.startAll()
-      .then(() => maybePromptOnlineCatalogConsent(services!))
+      .then(() => {
+        void checkDailySourceUpdates(services!.sourceStore, {
+          onChange: () => mainWindow?.webContents.send(IPC.sourcesChanged)
+        }).catch(error => console.error('音源每日更新检查失败:', error))
+        return maybePromptOnlineCatalogConsent(services!)
+      })
       .catch((error) => console.error('启用音源时未能显示在线目录说明:', error))
 
     app.on('activate', () => {

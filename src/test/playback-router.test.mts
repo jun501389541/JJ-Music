@@ -17,6 +17,7 @@ function createRouter() {
   const calls = []
   const sourceEngine = {
     supports: (source, action) => source === 'tx' && action === 'musicUrl',
+    supportsProvider: (source, providerId, action) => source === 'tx' && providerId === 'stable-b' && action === 'musicUrl',
     getMusicUrl: async (...args) => {
       calls.push(['musicUrl', ...args])
       return { url: 'https://example.test/song.mp3', quality: '128k', apiId: 'legacy-lx-id' }
@@ -78,4 +79,13 @@ test('supports only maps legacy playback capabilities to LX actions for unstampe
   assert.equal(router.supports(oldTrack, 'getLyric'), false)
   assert.equal(router.supports(makeTrack({ providerId: 'old-source-instance' }), 'getMusicUrl'), false)
   assert.equal(router.ownerOf(oldTrack), null)
+})
+
+test('a known LX stable provider id is routed to that provider', async () => {
+  const { calls, router } = createRouter()
+  const stamped = makeTrack({ providerId: 'stable-b' })
+  const result = await router.musicUrl(stamped, '128k')
+  assert.equal(result.apiId, 'legacy-lx-id')
+  assert.deepEqual(calls[0], ['musicUrl', 'tx', stamped, '128k', false])
+  assert.equal(router.supports(stamped, 'getMusicUrl'), true)
 })

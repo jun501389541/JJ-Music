@@ -269,7 +269,14 @@ const api = {
      */
     hotWords: (scope: SourceId | 'all') => invoke<HotWord[]>(IPC.musicHotWords, scope),
     url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) =>
-      invoke<{ url: string; quality: Quality }>(IPC.musicUrl, source, musicInfo, quality),
+      invoke<{
+        url: string
+        quality: Quality
+        apiId?: string
+        providerId?: string
+        providerName?: string
+        providerVersion?: string
+      }>(IPC.musicUrl, source, musicInfo, quality),
     lyric: (source: SourceId, musicInfo: OnlineMusicInfo) =>
       invoke<LyricResult>(IPC.musicLyric, source, musicInfo),
     pic: (source: SourceId, musicInfo: OnlineMusicInfo) =>

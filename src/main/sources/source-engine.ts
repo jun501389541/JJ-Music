@@ -97,7 +97,7 @@ interface ScriptRuntime {
 
 export interface SourceEngineEvents {
   /** A script finished init and reported its sources. */
-  sourcesChanged: () => void
+  sourcesChanged: (apiId?: string) => void
   /** A script failed to init or crashed. */
   scriptError: (apiId: string, error: string) => void
 }
@@ -325,14 +325,14 @@ export class SourceEngine {
       this.store.setError(api.meta.id, message)
       this.store.setEnabled(api.meta.id, false)
       this.rebuildOwners()
-      this.emit('sourcesChanged')
+      this.emit('sourcesChanged', api.meta.id)
       this.emit('scriptError', api.meta.id, message)
       throw error
     }
     const runtime: ScriptRuntime = { api, host: state, sources: state.sources }
     this.runtimes.set(api.meta.id, runtime)
     this.rebuildOwners()
-    this.emit('sourcesChanged')
+    this.emit('sourcesChanged', api.meta.id)
 
     try {
       await state.ready
@@ -367,7 +367,7 @@ export class SourceEngine {
       // is exactly what a retry affordance should look like.
       this.store.setEnabled(api.meta.id, false)
       this.rebuildOwners()
-      this.emit('sourcesChanged')
+      this.emit('sourcesChanged', api.meta.id)
       this.emit('scriptError', api.meta.id, message)
       throw error
     }
@@ -397,7 +397,7 @@ export class SourceEngine {
     // retry.
     this.store.setError(apiId, info.reason)
     this.store.setEnabled(apiId, false)
-    this.emit('sourcesChanged')
+    this.emit('sourcesChanged', apiId)
   }
 
   /**
@@ -475,7 +475,7 @@ export class SourceEngine {
     this.runtimes.delete(apiId)
     await this.teardown(runtime, new Error('音源已停止'))
     this.rebuildOwners()
-    this.emit('sourcesChanged')
+    this.emit('sourcesChanged', apiId)
   }
 
   /**
@@ -542,6 +542,16 @@ export class SourceEngine {
     return Boolean(info?.actions.includes(action))
   }
 
+  /** Whether one active LX script owns a stable playback stamp for this action. */
+  supportsProvider(source: SourceId, providerId: string, action: SourceAction): boolean {
+    return this.providersFor(source).some((apiId) => {
+      const runtime = this.runtimes.get(apiId)
+      if (!runtime || runtime.host.dead) return false
+      if (providerId !== apiId && providerId !== runtime.api.meta.stableId) return false
+      return Boolean(runtime.sources.find((item) => item.id === source)?.actions.includes(action))
+    })
+  }
+
   /**
    * Send a request to one specific script.
    *
@@ -584,9 +594,10 @@ export class SourceEngine {
     source: SourceId,
     action: SourceAction,
     info: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    providerId?: string
   ): Promise<T> {
-    return this.requestWithFallback<T>(source, action, info, signal)
+    return this.requestWithFallback<T>(source, action, info, signal, providerId)
   }
 
   /**
@@ -601,16 +612,19 @@ export class SourceEngine {
     source: SourceId,
     action: SourceAction,
     info: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    providerId?: string
   ): Promise<T> {
     if (signal?.aborted) throw new Error('请求已取消')
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
       if (!runtime || runtime.host.dead) return false
+      if (providerId && providerId !== apiId && providerId !== runtime.api.meta.stableId) return false
       return runtime.sources.some((item) => item.id === source)
     })
 
     if (candidates.length === 0) {
+      if (providerId) throw new Error(`音源「${providerId}」已停止或不存在，请重新选择音源后重试`)
       throw new Error(`没有可用的音源支持「${source}」`)
     }
 
@@ -666,15 +680,20 @@ export class SourceEngine {
     musicInfo: OnlineMusicInfo,
     preferred: Quality,
     strict = false
-  ): Promise<{ url: string; quality: Quality; apiId?: string }> {
+  ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string }> {
+    const requestedProviderId = musicInfo.providerId
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
       return Boolean(
-        runtime && !runtime.host.dead && runtime.sources.some((item) => item.id === source)
+        runtime && !runtime.host.dead && runtime.sources.some((item) => item.id === source) &&
+        (!requestedProviderId || requestedProviderId === apiId || requestedProviderId === runtime.api.meta.stableId)
       )
     })
 
     if (candidates.length === 0) {
+      if (requestedProviderId) {
+        throw new Error(`曲目绑定的音源「${requestedProviderId}」已停止或不存在，请重新匹配后播放`)
+      }
       throw new Error(`音源「${source}」已停止或没有可用的音源支持该平台`)
     }
 
@@ -704,7 +723,14 @@ export class SourceEngine {
             musicInfo: toLegacyOnline(musicInfo)
           })
           if (isValidMusicUrl(url)) {
-            return { url: url.trim(), quality, apiId }
+            return {
+              url: url.trim(),
+              quality,
+              apiId,
+              providerId: runtime?.api.meta.stableId ?? apiId,
+              providerName: runtime?.api.meta.name ?? apiId,
+              providerVersion: this.store.versionOf(apiId)
+            }
           }
           scriptErrors.push(`${quality}: 未返回有效播放地址`)
         } catch (error) {
@@ -727,7 +753,13 @@ export class SourceEngine {
     musicInfo: OnlineMusicInfo,
     signal?: AbortSignal
   ): Promise<{ lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string }> {
-    if (!this.supports(source, 'lyric')) {
+    if (musicInfo.providerId
+      ? !this.supportsProvider(source, musicInfo.providerId, 'lyric')
+      : !this.supports(source, 'lyric')) {
+      if (musicInfo.providerId && !this.providersFor(source).some((id) => {
+        const runtime = this.runtimes.get(id)
+        return runtime && (runtime.api.meta.stableId === musicInfo.providerId || id === musicInfo.providerId)
+      })) throw new Error(`曲目绑定的音源「${musicInfo.providerId}」已停止或不存在，请重新匹配后重试`)
       return { lyric: '' }
     }
     // Note: for lyric/pic the source type ('music') is what LX passes as
@@ -738,7 +770,7 @@ export class SourceEngine {
       tlyric?: string
       rlyric?: string
       lxlyric?: string
-    }>(source, 'lyric', { type: 'music', musicInfo: toLegacyOnline(musicInfo) }, signal)
+    }>(source, 'lyric', { type: 'music', musicInfo: toLegacyOnline(musicInfo) }, signal, musicInfo.providerId)
 
     // LX silently drops oversized translation/romanisation payloads; mirror
     // those ceilings so a bloated response degrades instead of breaking layout.
@@ -753,12 +785,14 @@ export class SourceEngine {
 
   /** Fetch cover art when the source implements the `pic` action. */
   async getPic(source: SourceId, musicInfo: OnlineMusicInfo, signal?: AbortSignal): Promise<string> {
-    if (!this.supports(source, 'pic')) return ''
+    if (musicInfo.providerId
+      ? !this.supportsProvider(source, musicInfo.providerId, 'pic')
+      : !this.supports(source, 'pic')) return ''
     try {
       const url = await this.request<unknown>(source, 'pic', {
         type: 'music',
         musicInfo: toLegacyOnline(musicInfo)
-      }, signal)
+      }, signal, musicInfo.providerId)
       return isValidMusicUrl(url) ? url : ''
     } catch {
       if (signal?.aborted) throw new Error('请求已取消')

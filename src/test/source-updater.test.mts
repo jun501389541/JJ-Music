@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync, inflateSync } from 'node:zlib'
+import { createServer } from 'node:http'
 
 import {
   MAX_UPDATE_BYTES,
@@ -15,6 +16,8 @@ import {
   parseVersion
 } from './sources/source-updater.js'
 import { SourceStore } from './sources/source-store.js'
+
+const { applySourceUpdate, rollbackSourceUpdate, checkDailySourceUpdates } = await import('./sources/source-updater.js')
 
 /**
  * 音源更新的版本比较、检查与回退（E6 / AC5）。
@@ -253,6 +256,7 @@ test('新版本提供完整的更新计划，含传输校验值和体积', async
   assert.equal(plan.script, NEXT)
   assert.equal(plan.bytes, Buffer.byteLength(NEXT, 'utf8'))
   assert.equal(plan.url, 'https://example.com/source.js')
+  assert.equal(plan.change, 'newVersion')
   // 校验值是下载内容的哈希，只证明传输一致。
   assert.equal(plan.sha256, `sha256:${createHash('sha256').update(Buffer.from(NEXT, 'utf8')).digest('hex')}`)
   assert.ok(plan.risk && typeof plan.risk.risk === 'string')
@@ -419,4 +423,244 @@ test('落盘时被替换的脚本用同样的 gz_ 编码', () => {
   const raw = 'gz_' + deflateSync(Buffer.from(CURRENT, 'utf8')).toString('base64')
   assert.equal(typeof raw, 'string')
   assert.ok(raw.startsWith('gz_'))
+})
+
+test('direct local HTTP checks distinguish new versions, changed bytes and unchanged scripts without executing code', async () => {
+  const changed = NEXT.replace('@version 1.2.0', '@version 1.0.0') +
+    '\nglobalThis.__jjUpdateCandidateExecuted = true\n'
+  const server = createServer((request, response) => {
+    response.statusCode = 200
+    response.setHeader('content-type', 'application/javascript; charset=utf-8')
+    response.end(request.url === '/changed.js' ? changed : request.url === '/old.js' ? CURRENT_STORED : NEXT)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const origin = `http://127.0.0.1:${address.port}`
+  const fetchLocal = async url => {
+    const response = await fetch(url)
+    return { body: Buffer.from(await response.arrayBuffer()) }
+  }
+  try {
+    globalThis.__jjUpdateCandidateExecuted = false
+    const newVersion = await checkForUpdate({
+      currentVersion: '1.0.0',
+      currentScript: CURRENT_STORED,
+      homepage: `${origin}/new.js`
+    }, fetchLocal)
+    assert.equal(newVersion.ok, true)
+    assert.equal(newVersion.plan.change, 'newVersion')
+
+    const changedBytes = await checkForUpdate({
+      currentVersion: '1.0.0',
+      currentScript: CURRENT_STORED,
+      homepage: `${origin}/changed.js`
+    }, fetchLocal)
+    assert.equal(changedBytes.ok, true)
+    assert.equal(changedBytes.plan.change, 'contentChanged')
+    assert.equal(changedBytes.plan.currentVersion, changedBytes.plan.nextVersion)
+
+    const unchanged = await checkForUpdate({
+      currentVersion: '1.0.0',
+      currentScript: CURRENT_STORED,
+      homepage: `${origin}/old.js`
+    }, fetchLocal)
+    assert.equal(unchanged.ok, false)
+    assert.equal(unchanged.reason, 'sameVersion')
+    assert.equal(globalThis.__jjUpdateCandidateExecuted, false, 'checking downloads and parses text; it never executes candidate code')
+  } finally {
+    delete globalThis.__jjUpdateCandidateExecuted
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+})
+
+test('direct-link imports retain their URL and checks prefer it over an author homepage', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jj-update-direct-link-'))
+  try {
+    const store = new SourceStore(dir)
+    const directUrl = 'https://raw.example.test/music/source.js'
+    const imported = store.import(CURRENT, '测试音源', directUrl)
+    assert.equal(imported.updateUrl, directUrl)
+    assert.equal(store.import(CURRENT, '测试音源').updateUrl, directUrl, 'reimporting identical bytes keeps their direct link')
+
+    const reloaded = new SourceStore(dir)
+    reloaded.load()
+    const loaded = reloaded.get(imported.id)
+    assert.equal(loaded.meta.updateUrl, directUrl, 'the JS import URL must survive app restart')
+
+    const urls = []
+    const result = await checkForUpdate({
+      currentVersion: loaded.meta.version,
+      homepage: 'https://author.example.test/profile',
+      updateUrl: loaded.meta.updateUrl,
+      currentScript: loaded.source
+    }, async url => { urls.push(url); return body(NEXT) })
+    assert.equal(result.ok, true)
+    assert.deepEqual(urls, [directUrl])
+    assert.equal(reloaded.get(imported.id).source, CURRENT_STORED, 'checking only inspects bytes; it does not install or execute them')
+    reloaded.import(NEXT, '测试音源')
+    assert.equal(reloaded.metas()[0].updateUrl, undefined, 'a changed local script must not retain a stale direct link')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('enabled direct-link sources are checked once per 24 hours without installing candidates', async () => {
+  assert.equal(typeof checkDailySourceUpdates, 'function', 'startup update checks must be testable and bounded')
+  const { dir, store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.import(CURRENT, '测试音源', 'https://raw.example.test/source.js')
+    store.setEnabled(meta.id, true)
+    let now = 1_800_000_000_000
+    const calls = []
+    const check = async source => {
+      calls.push(source.updateUrl)
+      return { ok: true, plan: { currentVersion: '1.0.0', nextVersion: '2.0.0', sha256: 'sha256:abc' } }
+    }
+    await checkDailySourceUpdates(store, { now: () => now, check })
+    await checkDailySourceUpdates(store, { now: () => now, check })
+    assert.deepEqual(calls, ['https://raw.example.test/source.js'])
+    assert.equal(store.get(meta.id).source, CURRENT_STORED)
+    assert.deepEqual(store.metas()[0].updateCheck, {
+      checkedAt: now,
+      state: 'available',
+      currentVersion: '1.0.0',
+      nextVersion: '2.0.0',
+      sha256: 'sha256:abc'
+    })
+    assert.equal('script' in store.metas()[0].updateCheck, false, 'candidate code must not be stored in the check summary')
+
+    now += 24 * 60 * 60 * 1000
+    await checkDailySourceUpdates(store, { now: () => now, check })
+    assert.equal(calls.length, 2)
+
+    const afterRestart = new SourceStore(dir)
+    afterRestart.load()
+    assert.equal(afterRestart.metas()[0].updateCheck.checkedAt, now)
+  } finally {
+    cleanup()
+  }
+})
+
+test('daily startup checks skip enabled sources without a direct URL and disabled direct-link sources', async () => {
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.setEnabled(meta.id, true)
+    store.import(CURRENT.replace('测试音源', '停用音源'), '停用音源', 'https://raw.example.test/disabled.js')
+    const calls = []
+    await checkDailySourceUpdates(store, {
+      now: () => 1_800_000_000_000,
+      check: async source => { calls.push(source.updateUrl); return { ok: false, reason: 'sameVersion' } }
+    })
+    assert.deepEqual(calls, [])
+  } finally {
+    cleanup()
+  }
+})
+
+test('坏更新会自动恢复旧脚本、启用状态与运行能力', async () => {
+  assert.equal(typeof applySourceUpdate, 'function', '更新安装应提供事务入口')
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.setEnabled(meta.id, true)
+    const stableId = meta.stableId
+    const starts = []
+    const engine = {
+      reload: async id => {
+        const loaded = store.get(id)
+        starts.push(loaded.source)
+        if (loaded.source === NEXT.trim()) {
+          store.quarantine(id, '候选版本初始化失败')
+          throw new Error('候选版本初始化失败')
+        }
+      }
+    }
+
+    await assert.rejects(
+      () => applySourceUpdate(store, engine, meta.id, NEXT.trim()),
+      /候选版本初始化失败/
+    )
+
+    const restored = store.get(meta.id)
+    assert.equal(restored.source, CURRENT_STORED)
+    assert.equal(restored.meta.version, '1.0.0')
+    assert.equal(restored.meta.stableId, stableId)
+    assert.equal(restored.meta.enabled, true)
+    assert.equal(store.isQuarantined(meta.id), false)
+    assert.deepEqual(starts, [NEXT.trim(), CURRENT_STORED], '候选与恢复版都必须实际启动')
+  } finally {
+    cleanup()
+  }
+})
+
+test('persist failure while replacing a script restores the in-memory version and enabled state', () => {
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.setEnabled(meta.id, true)
+    Reflect.set(store, 'persist', () => { throw new Error('disk full') })
+    assert.throws(() => store.replaceScript(meta.id, NEXT.trim(), '测试音源'), /disk full/)
+    const current = store.get(meta.id)
+    assert.equal(current?.source, CURRENT_STORED)
+    assert.equal(current?.meta.version, '1.0.0')
+    assert.equal(current?.meta.enabled, true)
+  } finally {
+    cleanup()
+  }
+})
+
+test('更新停用中的来源不会意外执行候选脚本', async () => {
+  assert.equal(typeof applySourceUpdate, 'function', '更新安装应提供事务入口')
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    let reloads = 0
+    const updated = await applySourceUpdate(store, { reload: async () => { reloads++ } }, meta.id, NEXT.trim())
+    assert.equal(updated.version, '1.2.0')
+    assert.equal(reloads, 0)
+    assert.equal(store.get(meta.id).meta.enabled, false)
+  } finally {
+    cleanup()
+  }
+})
+
+test('手动回退版启动失败会恢复当前版本及启用状态', async () => {
+  assert.equal(typeof rollbackSourceUpdate, 'function', '回退也应通过事务入口')
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.setEnabled(meta.id, true)
+    store.replaceScript(meta.id, NEXT.trim(), '测试音源')
+    const starts = []
+    const engine = {
+      reload: async id => {
+        const loaded = store.get(id)
+        starts.push(loaded.source)
+        if (loaded.source === CURRENT_STORED) {
+          store.quarantine(id, '旧版本已不可运行')
+          throw new Error('旧版本已不可运行')
+        }
+      }
+    }
+
+    await assert.rejects(() => rollbackSourceUpdate(store, engine, meta.id), /已恢复回退前版本/)
+    const restored = store.get(meta.id)
+    assert.equal(restored.source, NEXT.trim())
+    assert.equal(restored.meta.enabled, true)
+    assert.equal(store.isQuarantined(meta.id), false)
+    assert.deepEqual(starts, [CURRENT_STORED, NEXT.trim()])
+  } finally {
+    cleanup()
+  }
+})
+
+test('对停用音源执行手动回退只换文件，不运行脚本', async () => {
+  assert.equal(typeof rollbackSourceUpdate, 'function')
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.replaceScript(meta.id, NEXT.trim(), '测试音源')
+    let reloads = 0
+    const rolledBack = await rollbackSourceUpdate(store, { reload: async () => { reloads++ } }, meta.id)
+    assert.equal(rolledBack.version, '1.0.0')
+    assert.equal(reloads, 0)
+    assert.equal(store.get(meta.id).meta.enabled, false)
+  } finally {
+    cleanup()
+  }
 })

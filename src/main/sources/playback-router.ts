@@ -39,9 +39,11 @@ export class PlaybackRouter {
     track: OnlineMusicInfo,
     preferred: Quality,
     strict = false
-  ): Promise<{ url: string; quality: Quality; apiId?: string }> {
+  ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string }> {
     const providerId = this.ownerOf(track)
-    if (providerId) throw legacyProviderUnavailable(providerId)
+    if (providerId && !this.options.sourceEngine.supportsProvider(track.source, providerId, 'musicUrl')) {
+      throw legacyProviderUnavailable(providerId)
+    }
     return this.options.sourceEngine.getMusicUrl(track.source, track, preferred, strict)
   }
 
@@ -50,20 +52,27 @@ export class PlaybackRouter {
     signal?: AbortSignal
   ): Promise<{ lyric: string; tlyric?: string; rlyric?: string; lxlyric?: string }> {
     const providerId = this.ownerOf(track)
-    if (providerId) throw legacyProviderUnavailable(providerId)
+    if (providerId && !this.options.sourceEngine.supportsProvider(track.source, providerId, 'lyric')) {
+      throw legacyProviderUnavailable(providerId)
+    }
     return this.options.sourceEngine.getLyric(track.source, track, signal)
   }
 
   async pic(track: OnlineMusicInfo, signal?: AbortSignal): Promise<string> {
     const providerId = this.ownerOf(track)
-    if (providerId) throw legacyProviderUnavailable(providerId)
+    if (providerId && !this.options.sourceEngine.supportsProvider(track.source, providerId, 'pic')) {
+      throw legacyProviderUnavailable(providerId)
+    }
     return this.options.sourceEngine.getPic(track.source, track, signal)
   }
 
   supports(track: OnlineMusicInfo, capability: JjCapability, source: SourceId = track.source): boolean {
-    if (this.ownerOf(track)) return false
     const lxAction = LEGACY_ACTION_FOR[capability]
-    return lxAction ? this.options.sourceEngine.supports(source, lxAction) : false
+    if (!lxAction) return false
+    const providerId = this.ownerOf(track)
+    return providerId
+      ? this.options.sourceEngine.supportsProvider(source, providerId, lxAction)
+      : this.options.sourceEngine.supports(source, lxAction)
   }
 }
 
@@ -76,7 +85,7 @@ const LEGACY_ACTION_FOR: Partial<Record<JjCapability, 'musicUrl' | 'lyric' | 'pi
 function legacyProviderUnavailable(providerId: string): PlaybackError {
   return new PlaybackError(
     'providerMissing',
-    `曲目仍绑定旧版音源实例「${providerId}」，该来源协议已停用。请重新匹配曲目后播放。`,
+    `曲目绑定的音源实例「${providerId}」已不存在或不支持此操作。请重新匹配曲目后重试。`,
     providerId
   )
 }

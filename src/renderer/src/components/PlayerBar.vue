@@ -123,7 +123,7 @@ const timeLabel = computed(() => {
         back to the repo's own wording for a missing value («未知艺术家» /
         «未知曲目», the same convention TrackList and six other places use).
       -->
-      <span class="mini-meta"><strong>{{ player.currentTrack ? (player.currentTrack.name || '未知曲目') : '未载入歌曲' }}</strong><small><slot name="meta">{{ player.currentTrack ? (player.currentTrack.singer || '未知艺术家') : '选择一首歌曲，开始聆听' }}</slot></small></span>
+      <span class="mini-meta"><strong>{{ player.currentTrack ? (player.currentTrack.name || '未知曲目') : '未载入歌曲' }}</strong><small><slot name="meta">{{ player.currentTrack ? (player.currentTrack.singer || '未知艺术家') : '选择一首歌曲，开始聆听' }}</slot><template v-if="player.resolvedSourceName"> · {{ player.resolvedSourceName }}</template></small></span>
     </component>
     <component :is="bare ? 'div' : 'button'" class="mini-lyric" @click="openPlayingView">{{ player.error || lyric || '' }}</component>
   </div>

@@ -12,8 +12,8 @@ const release = {
 test('release source requests only fixed official metadata URLs', async () => {
   const original = globalThis.fetch
   const seen = []
-  globalThis.fetch = async url => {
-    seen.push(url)
+  globalThis.fetch = async (url, options) => {
+    seen.push({ url, accept: new Headers(options?.headers).get('accept') })
     if (url.endsWith('/releases/latest')) return new Response(JSON.stringify(release))
     return new Response('test')
   }
@@ -21,8 +21,10 @@ test('release source requests only fixed official metadata URLs', async () => {
     const result = await loadOfficialRelease()
     assert.equal(result.assetName, names[3])
     assert.deepEqual(seen, [
-      'https://api.github.com/repos/jun501389541/JJ-Music/releases/latest',
-      prefix + 'update-manifest.json', prefix + 'update-manifest.sig', prefix + 'latest.yml'
+      { url: 'https://api.github.com/repos/jun501389541/JJ-Music/releases/latest', accept: 'application/vnd.github+json' },
+      { url: prefix + 'update-manifest.json', accept: 'application/octet-stream' },
+      { url: prefix + 'update-manifest.sig', accept: 'application/octet-stream' },
+      { url: prefix + 'latest.yml', accept: 'application/octet-stream' }
     ])
   } finally { globalThis.fetch = original }
 })

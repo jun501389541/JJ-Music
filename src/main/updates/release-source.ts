@@ -5,8 +5,8 @@ const API = `https://api.github.com/repos/${REPO}/releases/latest`
 const RELEASES = `https://github.com/${REPO}/releases/download`
 const ASSET_NAMES = ['update-manifest.json', 'update-manifest.sig', 'latest.yml'] as const
 
-async function bounded(url: string, maxBytes: number): Promise<Buffer> {
-  const response = await fetch(url, { headers: { 'User-Agent': 'JJ-Music-Updater', Accept: 'application/octet-stream' }, signal: AbortSignal.timeout(20_000) })
+async function bounded(url: string, maxBytes: number, accept = 'application/octet-stream'): Promise<Buffer> {
+  const response = await fetch(url, { headers: { 'User-Agent': 'JJ-Music-Updater', Accept: accept }, signal: AbortSignal.timeout(20_000) })
   if (!response.ok || !response.body) throw new Error('无法读取官方更新文件')
   const length = Number(response.headers.get('content-length'))
   if (Number.isFinite(length) && length > maxBytes) throw new Error('官方更新文件过大')
@@ -25,7 +25,7 @@ async function bounded(url: string, maxBytes: number): Promise<Buffer> {
 }
 
 export async function loadOfficialRelease(): Promise<ReleasePayload> {
-  const release = JSON.parse((await bounded(API, 64_000)).toString('utf8')) as Record<string, unknown>
+  const release = JSON.parse((await bounded(API, 64_000, 'application/vnd.github+json')).toString('utf8')) as Record<string, unknown>
   const tag = release.tag_name
   if (typeof tag !== 'string' || !/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag) ||
       release.draft !== false || release.prerelease !== false || !Array.isArray(release.assets)) {

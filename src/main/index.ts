@@ -483,9 +483,11 @@ async function createServices(): Promise<Services> {
   })
   const artistImages = new ArtistImageStore(dataDir, {
     saveCover: (data, format) => library.saveCover(data, format),
+    allowsArtistImage: source => source
+      ? onlinePlatforms.allows(source, 'artistImage')
+      : onlinePlatforms.platforms('artistImage').length > 0,
     resolveArtistImage: (async (name, http) => {
-      const admitted = onlinePlatforms.platforms('artistImage')
-      return admitted.length ? resolveArtistImage(name, http, admitted) : null
+      return resolveArtistImage(name, http, () => onlinePlatforms.platforms('artistImage'))
     }) as ArtistImageResolver
   })
   const searchRouter = new SearchRouter({
@@ -494,7 +496,8 @@ async function createServices(): Promise<Services> {
   })
   const entityDetails = new OnlineEntityDetails({
     allows: (source, capability) => onlinePlatforms.allows(source, capability),
-    searchTracks: (source, keyword, page, signal) => searchRouter.search(source, keyword, page, signal)
+    searchTracks: (source, keyword, page, signal) => searchRouter.search(source, keyword, page, signal),
+    saveArtwork: (data, mimeType) => library.saveCover(data, mimeType)
   })
   const playbackRouter = new PlaybackRouter({ sourceEngine })
   const libraryRouter = new LibraryRouter({
@@ -645,6 +648,15 @@ async function createServices(): Promise<Services> {
   }
 
   sourceEngine.on({
+    updateAlert: (apiId, message) => {
+      const meta = sourceStore.get(apiId)?.meta
+      if (!meta || !meta.allowShowUpdateAlert) return
+      mainWindow?.webContents.send(IPC.sourcesUpdateAlert, {
+        name: meta.name,
+        author: meta.author,
+        message
+      })
+    },
     sourcesChanged: (apiId) => {
       platformProbes.clear()
       if (apiId) {
@@ -2058,6 +2070,8 @@ function registerIpc(): void {
     cancellableRequest(requestId, signal => requireServices().entityDetails.artistPage(source, id, page, signal)))
   handle(IPC.onlineAlbumPage, (source: SourceId, id: string, page = 1, requestId?: string) =>
     cancellableRequest(requestId, signal => requireServices().entityDetails.albumPage(source, id, page, signal)))
+  handle(IPC.onlineEntityArtwork, (source: SourceId, kind: 'artist' | 'album', url: string, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.artwork(source, kind, url, signal)))
   handle(IPC.onlineArtistCandidates, (source: SourceId, name: string, requestId?: string) =>
     cancellableRequest(requestId, signal => requireServices().entityDetails.artistCandidates(source, name, signal)))
   handle(IPC.onlineAlbumCandidates, (source: SourceId, name: string, requestId?: string) =>
@@ -2109,7 +2123,7 @@ function registerIpc(): void {
    * whatever it could find — a missing cover is not a failure.
    */
   handle(IPC.musicEnrich, async (music: OnlineMusicInfo, only?: unknown, requestId?: string) => cancellableRequest(requestId, async signal => {
-    const { sourceEngine, onlineLyric } = requireServices()
+    const { sourceEngine, onlineLyric, onlinePlatforms } = requireServices()
     // The renderer may name one source (the now-playing menu's switch); anything
     // it sends that is not one of the three is ignored rather than obeyed.
     const picked: OnlineLyricSource | undefined =
@@ -2119,7 +2133,7 @@ function registerIpc(): void {
 
     let cover: AssetRef | undefined = music.assets?.cover?.[0]
     let picUrl = music.picUrl ?? ''
-    if (!picUrl) {
+    if (!picUrl && onlinePlatforms.allows(music.source, 'cover')) {
       const scriptPic = await sourceEngine.getPic(music.source, music, signal)
       if (scriptPic) {
         try {

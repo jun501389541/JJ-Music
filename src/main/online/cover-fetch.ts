@@ -88,10 +88,27 @@ export async function fetchCoverBytes(
   if (!url) return null
   const allowedHosts = music.source ? COVER_HOSTS[music.source] : undefined
   if (!allowedHosts) return null
+  return fetchCoverUrl(music.source, url, getBytes)
+}
+
+/** Fetch a platform artwork URL under the same host, byte, timeout and MIME gates. */
+export async function fetchCoverUrl(
+  source: SourceId,
+  url: string,
+  getBytes: typeof safeFetchBytes = safeFetchBytes,
+  signal?: AbortSignal
+): Promise<CoverBytes | null> {
+  const allowedHosts = COVER_HOSTS[source]
+  if (!allowedHosts || typeof url !== 'string' || !url || url.length > 2048 || signal?.aborted) return null
   try {
-    const { body, contentType } = await getBytes(url, { maxBytes: MAX_BYTES, timeoutMs: TIMEOUT_MS, allowedHosts })
+    const { body, contentType } = await getBytes(url, {
+      maxBytes: MAX_BYTES,
+      timeoutMs: TIMEOUT_MS,
+      allowedHosts,
+      ...(signal ? { init: { signal } } : {})
+    })
     const mime = ACCEPTED_MIME[(contentType ?? 'image/jpeg').toLowerCase().split(';')[0].trim()]
-    if (!mime || body.length === 0) return null
+    if (!mime || body.length === 0 || signal?.aborted) return null
     return { data: new Uint8Array(body), mimeType: mime }
   } catch {
     return null

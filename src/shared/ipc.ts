@@ -99,6 +99,7 @@ export const IPC = {
   sourcesVerifyPlatform: 'sources:verify-platform',
   sourcesLogs: 'sources:logs',
   sourcesChanged: 'sources:changed',
+  sourcesUpdateAlert: 'sources:update-alert',
   /*
    * Update checking (E6).
    *
@@ -124,6 +125,7 @@ export const IPC = {
   /** Exact-ID, source-scoped online artist and album detail pages. */
   onlineArtistPage: 'online:artist-page',
   onlineAlbumPage: 'online:album-page',
+  onlineEntityArtwork: 'online:entity-artwork',
   /** Name-based detail lookup returns choices for the user to select explicitly. */
   onlineArtistCandidates: 'online:artist-candidates',
   onlineAlbumCandidates: 'online:album-candidates',

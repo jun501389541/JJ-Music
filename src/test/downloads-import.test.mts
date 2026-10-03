@@ -139,6 +139,15 @@ test('playlist pagination, detail completion, deduplication and partial imports 
   assert.equal(kgPages,2,'第二页只有 50 行，到这里才算完')
   await assert.rejects(()=>importPlaylist('tx','123',async()=>new Response(JSON.stringify({code:1}))))
 })
+test('playlist pagination rechecks admission before requesting the next page',async()=>{
+  let admitted=true,calls=0
+  await assert.rejects(()=>importPlaylist('kg','123',async()=>{
+    calls+=1;admitted=false
+    const info=Array.from({length:100},(_,index)=>({hash:`${index}`,songname:`Song ${index}`,singername:'Artist'}))
+    return new Response(JSON.stringify({status:1,data:{specialname:'Revoked',info}}))
+  },()=>{if(!admitted)throw Error('source admission revoked')}),/source admission revoked/)
+  assert.equal(calls,1,'revocation after the first page must prevent the next HTTP request')
+})
 test('a playlist with no reported total warns when the 5000-song paging limit is reached',async()=>{
   let page=0
   const result=await importPlaylist('kg','123',async()=>{

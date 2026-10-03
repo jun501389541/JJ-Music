@@ -16,6 +16,22 @@ test('在线封面需要同意目录请求并启用同平台音源', () => {
   assert.equal(trackCoverUrl(online, true, ['kw']), online.picUrl)
 })
 
+test('持久化的脚本封面 URL 不会绕过主进程图片代理', () => {
+  const persistedScriptCover = {
+    ...online,
+    picUrl: 'http://127.0.0.1:7890/private',
+    assets: { cover: [{ origin: 'remote', provider: '音源脚本', at: 1 }] }
+  }
+  assert.equal(trackCoverUrl(persistedScriptCover, true, ['kw']), undefined)
+  assert.equal(
+    trackCoverUrl({
+      ...persistedScriptCover,
+      picUrl: 'data:image/png;base64,YQ=='
+    }, true, ['kw']),
+    'data:image/png;base64,YQ=='
+  )
+})
+
 test('本地封面不受在线目录同意状态影响', () => {
   const local = { id: 'local_1', path: 'C:\\Music\\song.mp3', name: '本地歌曲', coverPath: 'C:\\Music\\cover.jpg' }
   assert.equal(trackCoverUrl(local, false, []), trackCoverUrl(local, true, []))

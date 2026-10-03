@@ -12,6 +12,7 @@ import {
 } from '@shared/types'
 import { safeFetchText } from './url-guard'
 import type { OnlineCapability } from './platform-registry'
+import { fetchCoverUrl, type CoverBytes } from './cover-fetch'
 
 const WY_HOST = 'music.163.com'
 const PAGE_SIZE = ONLINE_ENTITY_PAGE_SIZE
@@ -31,6 +32,8 @@ export interface OnlineEntityDetailsOptions {
     signal?: AbortSignal
   ) => Promise<{ list?: OnlineMusicInfo[]; servedBy?: string; message?: string }>
   fetchText?: typeof safeFetchText
+  fetchArtwork?: (source: SourceId, url: string, signal?: AbortSignal) => Promise<CoverBytes | null>
+  saveArtwork?: (data: Uint8Array, mimeType: string) => Promise<string | undefined>
 }
 
 interface ParsedAlbum {
@@ -44,12 +47,32 @@ export class OnlineEntityDetails {
   private readonly allows: OnlineEntityDetailsOptions['allows']
   private readonly searchTracks: OnlineEntityDetailsOptions['searchTracks']
   private readonly fetchText: typeof safeFetchText
+  private readonly fetchArtwork: NonNullable<OnlineEntityDetailsOptions['fetchArtwork']>
+  private readonly saveArtwork: OnlineEntityDetailsOptions['saveArtwork']
   private readonly albumCache = new Map<string, { expiresAt: number; value: ParsedAlbum }>()
 
   constructor(options: OnlineEntityDetailsOptions) {
     this.allows = options.allows
     this.searchTracks = options.searchTracks
     this.fetchText = options.fetchText ?? safeFetchText
+    this.fetchArtwork = options.fetchArtwork ?? ((source, url, signal) => fetchCoverUrl(source, url, undefined, signal))
+    this.saveArtwork = options.saveArtwork
+  }
+
+  /** Fetch allowed provider art in main and return only an app-local media URL. */
+  async artwork(source: SourceId, kind: EntityKind, url: string, signal?: AbortSignal): Promise<string> {
+    if (source !== 'wy' || (kind !== 'artist' && kind !== 'album') ||
+      typeof url !== 'string' || !url.trim() || url.length > 2048 || signal?.aborted || !this.saveArtwork) return ''
+    const capability = kind === 'artist' ? 'artistDetail' : 'albumDetail'
+    if (!this.allows(source, capability)) return ''
+
+    try {
+      const image = await this.fetchArtwork(source, url, signal)
+      if (!image || signal?.aborted || !this.allows(source, capability)) return ''
+      return await this.saveArtwork(image.data, image.mimeType) ?? ''
+    } catch {
+      return ''
+    }
   }
 
   async artistPage(source: SourceId, id: string, page = 1, signal?: AbortSignal): Promise<OnlineEntityPage<OnlineArtistRef>> {

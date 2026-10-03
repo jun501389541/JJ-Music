@@ -39,6 +39,7 @@ const toast = useToastStore()
 
 const ui = useUiStore()
 let offUpdateChanged: (() => void) | undefined
+let offSourceUpdateAlert: (() => void) | undefined
 const promptedUpdates = new Set<string>()
 function onUpdateChanged(state: UpdateStatus): void {
   if (!state.version) return
@@ -387,6 +388,7 @@ async function onDrop(event: DragEvent): Promise<void> {
 
 onUnmounted(() => {
   offUpdateChanged?.()
+  offSourceUpdateAlert?.()
   systemTheme.removeEventListener('change', onSystemTheme)
   offTransportCommand?.()
   offDesktopLyricCommand?.()
@@ -435,6 +437,10 @@ watch(
 
 onMounted(async () => {
   offUpdateChanged = window.jj.updates.onChanged(onUpdateChanged)
+  offSourceUpdateAlert = window.jj.sources.onUpdateAlert(notice => {
+    const author = notice.author ? `（${notice.author}）` : ''
+    toast.info(`${notice.name}${author}：${notice.message}`)
+  })
   /*
    * Before `library.init()`: the pages below it can be scrolled as soon as they
    * paint, and an offset that is missed is a page that opens at the top.

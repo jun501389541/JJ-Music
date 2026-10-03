@@ -141,6 +141,52 @@ test('disabled platform admission prevents detail and candidate requests', async
   assert.equal(f.searches, 0)
 })
 
+test('artist and album artwork are fetched by the main service and returned as local paths', async () => {
+  const fetched = []
+  const saved = []
+  const f = fixture({
+    fetchArtwork: async (source, url) => {
+      fetched.push({ source, url })
+      return { data: new Uint8Array([1, 2, 3]), mimeType: 'image/jpeg' }
+    },
+    saveArtwork: async (data, mimeType) => {
+      saved.push({ bytes: data.length, mimeType })
+      return 'jjmedia://local/covers/entity.jpg'
+    }
+  })
+
+  const portrait = await f.details.artwork('wy', 'artist', 'https://p1.music.126.net/a.jpg')
+  const cover = await f.details.artwork('wy', 'album', 'https://p1.music.126.net/b.jpg')
+
+  assert.equal(portrait, 'jjmedia://local/covers/entity.jpg')
+  assert.equal(cover, 'jjmedia://local/covers/entity.jpg')
+  assert.deepEqual(fetched.map(item => item.source), ['wy', 'wy'])
+  assert.deepEqual(saved, [
+    { bytes: 3, mimeType: 'image/jpeg' },
+    { bytes: 3, mimeType: 'image/jpeg' }
+  ])
+})
+
+test('entity artwork checks detail admission before fetch and again before saving', async () => {
+  let f
+  let fetches = 0
+  let saves = 0
+  f = fixture({
+    fetchArtwork: async () => {
+      fetches += 1
+      f.allow(false)
+      return { data: new Uint8Array([1]), mimeType: 'image/jpeg' }
+    },
+    saveArtwork: async () => { saves += 1; return 'jjmedia://local/should-not-save.jpg' }
+  })
+
+  assert.equal(await f.details.artwork('wy', 'artist', 'https://p1.music.126.net/a.jpg'), '')
+  assert.equal(fetches, 1)
+  assert.equal(saves, 0)
+  assert.equal(await f.details.artwork('wy', 'album', 'https://p1.music.126.net/b.jpg'), '')
+  assert.equal(fetches, 1, 'a disabled platform must not start another artwork request')
+})
+
 test('malformed runtime entity arguments fail closed without starting requests', async () => {
   const f = fixture()
 

@@ -35,7 +35,7 @@ test('a sole kw source enables only kw playlist imports and preserves metadata',
   const calls = []
   const router = new LibraryRouter({
     registry: registry(['kw']),
-    importBuiltin: async (...args) => { calls.push(args); return { ...playlist, coverUrl: 'https://example.test/cover.jpg' } }
+    importBuiltin: async (...args) => { calls.push(args.slice(0, 2)); return { ...playlist, coverUrl: 'https://example.test/cover.jpg' } }
   })
 
   const result = await router.importTracks('kw', 'https://example.test/playlist/123', '123')
@@ -50,6 +50,31 @@ test('a sole kw source enables only kw playlist imports and preserves metadata',
   assert.deepEqual(router.playablePlatforms(), ['kw'])
   assert.equal(denied.servedBy, 'none')
   assert.deepEqual(calls.length, 1)
+})
+
+test('playlist importer receives a live admission check for every request', async () => {
+  let enabled = true
+  let checks = 0
+  const liveRegistry = new OnlinePlatformRegistry({
+    sourcesByScript: () => [{ apiId: 'kw-api', sources: [{ id: 'kw', name: 'kw', actions: ['musicUrl'], qualitys: ['128k'] }] }],
+    isScriptEnabled: () => enabled,
+    catalogConsent: () => true
+  })
+  const router = new LibraryRouter({
+    registry: liveRegistry,
+    importBuiltin: async (_source, _input, assertAllowed) => {
+      assertAllowed()
+      enabled = false
+      checks += 1
+      assertAllowed()
+      return playlist
+    }
+  })
+
+  const result = await router.importTracks('kw', '123', '123')
+  assert.equal(result.reason, 'builtinFailed')
+  assert.match(result.message ?? '', /授权已撤销/)
+  assert.equal(checks, 1)
 })
 
 test('playlist adapter failures are returned as a visible failure', async () => {

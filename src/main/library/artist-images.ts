@@ -72,6 +72,8 @@ export class ArtistImageStore {
        * is what the offline suite relies on.
        */
       resolveArtistImage?: typeof resolveArtistImage
+      /** Live source + consent admission, rechecked before lookup and image fetch. */
+      allowsArtistImage?: (source?: SourceId) => boolean
     }
   ) {
     this.file = join(dataDir, 'artist-images.json')
@@ -172,6 +174,9 @@ export class ArtistImageStore {
   }
 
   private async resolve(name: string): Promise<string | null> {
+    if (this.deps.allowsArtistImage && !this.deps.allowsArtistImage()) {
+      throw new Error('source admission revoked')
+    }
     // The search calls go out over plain fetch (their URLs are built from our
     // own host table); only the returned picture address is someone else's
     // text, so that one is validated hop by hop.
@@ -183,6 +188,9 @@ export class ArtistImageStore {
       throw error
     }
     if (!found) return this.remember(name, null)
+    if (this.deps.allowsArtistImage && !this.deps.allowsArtistImage(found.source)) {
+      throw new Error('source admission revoked')
+    }
 
     // `found.url` is a string out of a platform's JSON, so it is pinned to that
     // platform's own CDN the way `online/cover-fetch.ts` pins a search result's:

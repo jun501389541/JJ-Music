@@ -53,7 +53,10 @@ import { safeFetchBytes } from '../online/url-guard'
 import type { SourceStore } from './source-store'
 
 export interface UpdateLifecycle {
-  reload(id: string): Promise<void>
+  /** Start a candidate without changing the stored script. */
+  reload(id: string, scriptOverride?: string): Promise<void>
+  /** Mark a successfully persisted candidate as the durable runtime. */
+  commitCandidate?(id: string): void
 }
 
 /**
@@ -73,32 +76,41 @@ export async function applySourceUpdate(
   if (before.source === script) return before.meta
 
   const wasEnabled = before.meta.enabled
-  const updated = store.replaceScript(id, script, '在线音源')
-  if (!updated) throw new Error('音源不存在，可能已被删除')
-  if (!wasEnabled) return updated
+  if (!wasEnabled) {
+    const updated = store.replaceScript(id, script, '在线音源')
+    if (!updated) throw new Error('音源不存在，可能已被删除')
+    return updated
+  }
 
   try {
-    await engine.reload(id)
-    return updated
+    await engine.reload(id, script)
   } catch (updateError) {
-    if (!store.rollback(id)) {
-      throw new Error(`更新启动失败，且无法恢复旧版本：${messageOf(updateError)}`, { cause: updateError })
-    }
-
-    // Starting an unsafe candidate can quarantine and disable the record. The
-    // restored bytes have already passed the same validator before; clear only
-    // the candidate's verdict, then restore the user's prior enabled choice.
-    store.clearQuarantine(id)
-    if (wasEnabled) store.setEnabled(id, true)
     try {
       await engine.reload(id)
     } catch (restoreError) {
       throw new Error(
-        `更新失败，旧脚本文件已恢复，但旧版本重新启动失败：${messageOf(restoreError)}`,
+        `更新启动失败，旧版本重新启动也失败：${messageOf(restoreError)}`,
         { cause: new AggregateError([updateError, restoreError]) }
       )
     }
     throw new Error(`更新启动失败，已自动恢复旧版本：${messageOf(updateError)}`, { cause: updateError })
+  }
+
+  try {
+    const updated = store.replaceScript(id, script, '在线音源')
+    if (!updated) throw new Error('音源不存在，可能已被删除')
+    engine.commitCandidate?.(id)
+    return updated
+  } catch (commitError) {
+    try {
+      await engine.reload(id)
+    } catch (restoreError) {
+      throw new Error(
+        `更新未能保存，旧版本重新启动也失败：${messageOf(restoreError)}`,
+        { cause: new AggregateError([commitError, restoreError]) }
+      )
+    }
+    throw commitError
   }
 }
 
@@ -111,29 +123,47 @@ export async function rollbackSourceUpdate(
   const before = store.get(id)
   if (!before) throw new Error('音源不存在，可能已被删除')
   const wasEnabled = before.meta.enabled
-  if (!store.rollback(id)) throw new Error('没有可回退的版本')
-  const rolledBack = store.get(id)
-  if (!rolledBack) throw new Error('回退后找不到音源记录')
-  if (!wasEnabled) return rolledBack.meta
+  const previousSource = store.previousSource(id)
+  if (!previousSource) throw new Error('没有可回退的版本')
+  if (!wasEnabled) {
+    if (!store.rollback(id)) throw new Error('没有可回退的版本')
+    const rolledBack = store.get(id)
+    if (!rolledBack) throw new Error('回退后找不到音源记录')
+    return rolledBack.meta
+  }
 
   try {
-    await engine.reload(id)
-    return rolledBack.meta
+    await engine.reload(id, previousSource)
   } catch (rollbackError) {
-    if (!store.rollback(id)) {
-      throw new Error(`回退启动失败，且无法恢复当前版本：${messageOf(rollbackError)}`, { cause: rollbackError })
-    }
-    store.clearQuarantine(id)
-    store.setEnabled(id, true)
     try {
       await engine.reload(id)
     } catch (restoreError) {
       throw new Error(
-        `回退失败，当前版本文件已恢复，但重新启动失败：${messageOf(restoreError)}`,
+        `回退启动失败，当前版本重新启动也失败：${messageOf(restoreError)}`,
         { cause: new AggregateError([rollbackError, restoreError]) }
       )
     }
     throw new Error(`回退版本启动失败，已恢复回退前版本：${messageOf(rollbackError)}`, { cause: rollbackError })
+  }
+
+  try {
+    if (!store.rollback(id)) throw new Error('没有可回退的版本')
+    const rolledBack = store.get(id)
+    if (!rolledBack) throw new Error('回退后找不到音源记录')
+    engine.commitCandidate?.(id)
+    return rolledBack.meta
+  } catch (commitError) {
+    // A failed durable rollback leaves the current script intact; restore its
+    // runtime so the live process and the persistent record agree.
+    try {
+      await engine.reload(id)
+    } catch (restoreError) {
+      throw new Error(
+        `回退未能保存，当前版本重新启动也失败：${messageOf(restoreError)}`,
+        { cause: new AggregateError([commitError, restoreError]) }
+      )
+    }
+    throw commitError
   }
 }
 
@@ -381,7 +411,7 @@ export async function checkForUpdate(
   const comparison = compareVersions(source.currentVersion, nextVersion)
 
   const contentChanged = comparison === 0 &&
-    source.currentScript !== undefined && source.currentScript !== script
+    source.currentScript !== undefined && normalizeScriptLineEnding(source.currentScript) !== normalizeScriptLineEnding(script)
   if (comparison < 0 || (comparison === 0 && !contentChanged)) {
     const same = comparison === 0
     return {
@@ -406,6 +436,11 @@ export async function checkForUpdate(
       risk: assessScriptRisk(script)
     }
   }
+}
+
+/** Ignore terminal line endings when deciding whether a same-version script changed. */
+function normalizeScriptLineEnding(script: string): string {
+  return script.replace(/(?:\r\n|\n|\r)+$/, '')
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000

@@ -25,6 +25,7 @@ const repoRoot = join(__dirname, '..', '..')
 
 const { SourceStore } = await import('./sources/source-store.js')
 const { SourceEngine } = await import('./sources/source-engine.js')
+const { applySourceUpdate } = await import('./sources/source-updater.js')
 const { parseScriptHeader } = await import('./sources/script-header.js')
 const { buildQualityLadder, isValidMusicUrl, normaliseSources } = await import(
   './sources/source-engine.js'
@@ -193,19 +194,25 @@ const lxLifecycleScript = [
   '  return "https://cdn.test/" + source + ".flac"',
   '})',
   'lx.send(lx.EVENT_NAMES.updateAlert, { version: "2.0.1", message: "update available" })',
+  'lx.send(lx.EVENT_NAMES.updateAlert, { version: "2.0.2", message: "must not be delivered" }).catch(() => {})',
   'lx.send(lx.EVENT_NAMES.inited, { status: true, sources: {',
   '  wy: { type: "music", actions: ["musicUrl"], qualitys: ["128k"] },',
   '  tx: { type: "music", actions: ["musicUrl"], qualitys: ["128k"] }',
   '} })'
 ].join('\n')
 
-async function verifyLxLifecycle(label, transport) {
+async function verifyLxLifecycle(label, transport, allowShowUpdateAlert = true) {
   const dir = mkdtempSync(join(tmpdir(), `jjmusic-${transport}-lx-`))
   const transportStore = new SourceStore(dir)
   transportStore.load()
-  const meta = transportStore.import(lxLifecycleScript, `${label} LX 音源`)
+  const payload = allowShowUpdateAlert
+    ? lxLifecycleScript
+    : JSON.stringify({ userApis: [{ id: 'lx-alert-off', name: `${label} LX 音源`, script: lxLifecycleScript, allowShowUpdateAlert: false }] })
+  const meta = transportStore.import(payload, `${label} LX 音源`)
   transportStore.setEnabled(meta.id, true)
   const transportEngine = new SourceEngine(transportStore, workerPath, transport)
+  const updateNotices = []
+  transportEngine.on({ updateAlert: (_id, message) => { updateNotices.push(message) } })
   let startupError = ''
   try {
     await transportEngine.reload(meta.id)
@@ -218,6 +225,18 @@ async function verifyLxLifecycle(label, transport) {
   check(`${label} LX v2 initialises`, !startupError && sources.includes('wy'), startupError || `sources=${sources.join(',')}; lastError=${storeMeta?.lastError ?? ''}`)
   check(`${label} LX v2 advertises both platforms`, sources.includes('wy') && sources.includes('tx'), sources.join(','))
   check(`${label} receives updateAlert`, transportEngine.getLogs(meta.id).some((line) => line.includes('update available')), transportEngine.getLogs(meta.id).join(' | '))
+  check(
+    `${label} rejects a second updateAlert per LX run`,
+    !transportEngine.getLogs(meta.id).some((line) => line.includes('must not be delivered')),
+    transportEngine.getLogs(meta.id).join(' | ')
+  )
+  check(
+    `${label} updateAlert respects allowShowUpdateAlert`,
+    allowShowUpdateAlert
+      ? updateNotices.length === 1 && updateNotices[0].includes('update available') && !updateNotices[0].includes('must not be delivered')
+      : updateNotices.length === 0,
+    JSON.stringify(updateNotices)
+  )
 
   for (const source of ['wy', 'tx']) {
     const track = {
@@ -244,6 +263,7 @@ async function verifyLxLifecycle(label, transport) {
 }
 
 await verifyLxLifecycle('IPC', 'ipc')
+await verifyLxLifecycle('IPC with update notices disabled', 'ipc', false)
 if (process.platform === 'win32') await verifyLxLifecycle('Windows file transport', 'file')
 
 check('Windows enables restricted source launch', process.platform !== 'win32' || supportsRestrictedLaunch())
@@ -450,6 +470,141 @@ await brokenEngine.stopAll()
 const missingEngine = new SourceEngine(brokenStore, join(brokenDir, 'nope.js'))
 await missingEngine.startAll().catch(() => undefined)
 check('missing worker path is handled without hanging', true)
+
+// Disabling a source while its process is still reporting in must invalidate
+// that launch, even though there is not a registered runtime for stop() yet.
+const pendingDir = mkdtempSync(join(tmpdir(), 'jjmusic-pending-start-'))
+const pendingStore = new SourceStore(pendingDir)
+pendingStore.load()
+const pendingMeta = pendingStore.import(
+  '/*! * @name 已安装版本 * @version 1 */\nlx.on(lx.EVENT_NAMES.request, () => 1)',
+  '待启动音源'
+)
+pendingStore.setEnabled(pendingMeta.id, true)
+const pendingEngine = new SourceEngine(pendingStore, workerPath)
+let signalStartEntered
+let finishPendingStart
+let pendingTeardowns = 0
+const startEntered = new Promise(resolve => { signalStartEntered = resolve })
+const pendingState = {
+  api: pendingStore.get(pendingMeta.id),
+  sources: [{ id: 'wy', name: '测试平台', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] }],
+  ready: Promise.resolve(),
+  pending: new Map(),
+  nextId: 1,
+  dead: false,
+  logs: [],
+  scratchDir: '',
+  fileMode: false
+}
+Reflect.set(pendingEngine, 'host', {
+  start: async api => {
+    pendingState.api = api
+    signalStartEntered()
+    return new Promise(resolve => { finishPendingStart = () => resolve(pendingState) })
+  },
+  teardown: async state => { pendingTeardowns++; state.dead = true }
+})
+const pendingLaunch = pendingEngine.reload(pendingMeta.id)
+await startEntered
+pendingStore.setEnabled(pendingMeta.id, false)
+await pendingEngine.stop(pendingMeta.id)
+finishPendingStart()
+await pendingLaunch
+check('disabling a pending source prevents late runtime publication', pendingEngine.getSources().length === 0)
+check('late pending runtime is torn down', pendingTeardowns === 1, String(pendingTeardowns))
+check('pending source remains disabled after start settles', pendingStore.metas()[0]?.enabled === false)
+rmSync(pendingDir, { recursive: true, force: true })
+
+// Cancelling a candidate launch is an update failure, not a successful trial.
+// The updater must keep the installed bytes even when the late host start is
+// cleaned up after the user disables the source.
+const cancelledUpdateDir = mkdtempSync(join(tmpdir(), 'jjmusic-cancelled-update-'))
+const cancelledUpdateStore = new SourceStore(cancelledUpdateDir)
+cancelledUpdateStore.load()
+const installedUpdateScript = '/*! * @name 已安装版本 * @version 1 */\nlx.on(lx.EVENT_NAMES.request, () => 1)'
+const candidateUpdateScript = '/*! * @name 候选版本 * @version 2 */\nlx.on(lx.EVENT_NAMES.request, () => 2)'
+const cancelledUpdateMeta = cancelledUpdateStore.import(installedUpdateScript, '更新竞态音源')
+cancelledUpdateStore.setEnabled(cancelledUpdateMeta.id, true)
+const cancelledUpdateEngine = new SourceEngine(cancelledUpdateStore, workerPath)
+let signalCandidateStart
+let finishCandidateStart
+let candidateTeardowns = 0
+const candidateStartEntered = new Promise(resolve => { signalCandidateStart = resolve })
+const candidateState = {
+  api: cancelledUpdateStore.get(cancelledUpdateMeta.id),
+  sources: [{ id: 'wy', name: '测试平台', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] }],
+  ready: Promise.resolve(),
+  pending: new Map(),
+  nextId: 1,
+  dead: false,
+  logs: [],
+  scratchDir: '',
+  fileMode: false
+}
+Reflect.set(cancelledUpdateEngine, 'host', {
+  start: async api => {
+    if (api.source === candidateUpdateScript) {
+      signalCandidateStart()
+      return new Promise(resolve => { finishCandidateStart = () => resolve(candidateState) })
+    }
+    throw new Error('unexpected installed-version start')
+  },
+  teardown: async state => { candidateTeardowns++; state.dead = true }
+})
+const cancelledUpdate = applySourceUpdate(
+  cancelledUpdateStore,
+  cancelledUpdateEngine,
+  cancelledUpdateMeta.id,
+  candidateUpdateScript
+)
+await candidateStartEntered
+cancelledUpdateStore.setEnabled(cancelledUpdateMeta.id, false)
+await cancelledUpdateEngine.stop(cancelledUpdateMeta.id)
+const disabledUpdateFile = readFileSync(cancelledUpdateStore.path, 'utf8')
+finishCandidateStart()
+let cancelledUpdateError = ''
+try {
+  await cancelledUpdate
+} catch (error) {
+  cancelledUpdateError = error instanceof Error ? error.message : String(error)
+}
+check('disabling during candidate startup rejects the update', cancelledUpdateError.length > 0, cancelledUpdateError)
+check('cancelled candidate startup preserves the installed script', cancelledUpdateStore.get(cancelledUpdateMeta.id)?.source === installedUpdateScript)
+check('cancelled candidate startup preserves the durable disabled record', readFileSync(cancelledUpdateStore.path, 'utf8') === disabledUpdateFile)
+check('cancelled candidate process is torn down', candidateTeardowns === 1, String(candidateTeardowns))
+check('cancelled candidate is not published as a platform provider', cancelledUpdateEngine.getSources().length === 0)
+rmSync(cancelledUpdateDir, { recursive: true, force: true })
+
+// A failed update candidate is a trial. It must not overwrite the installed
+// script's enabled/error/quarantine state before the updater decides to commit.
+const trialDir = mkdtempSync(join(tmpdir(), 'jjmusic-trial-'))
+const trialStore = new SourceStore(trialDir)
+trialStore.load()
+const installedTrialScript = '/*! * @name 已安装版本 * @version 1 */\nlx.on(lx.EVENT_NAMES.request, () => 1)'
+const trialMeta = trialStore.import(installedTrialScript, '已安装版本')
+trialStore.setEnabled(trialMeta.id, true)
+const trialFileBefore = readFileSync(trialStore.path, 'utf8')
+const trialEngine = new SourceEngine(trialStore, workerPath)
+Reflect.set(trialEngine, 'host', {
+  start: async () => { throw new Error('candidate startup failed') },
+  teardown: async () => undefined
+})
+try {
+  await trialEngine.reload(
+    trialMeta.id,
+    '/*! * @name 候选版本 * @version 2 */\nlx.on(lx.EVENT_NAMES.request, () => 2)'
+  )
+} catch {
+  /* expected: the fake host rejects candidate startup */
+}
+const trialCurrent = trialStore.get(trialMeta.id)
+check('failed candidate start preserves the installed script', trialCurrent?.source === installedTrialScript)
+check('failed candidate start preserves enabled state', trialCurrent?.meta.enabled === true)
+check('failed candidate start does not record a candidate error', trialCurrent?.meta.lastError === undefined)
+check('failed candidate start does not quarantine the installed script', trialStore.isQuarantined(trialMeta.id) === false)
+check('failed candidate start leaves durable data unchanged', readFileSync(trialStore.path, 'utf8') === trialFileBefore)
+rmSync(trialDir, { recursive: true, force: true })
 
 // An import must leave the script disabled: nothing runs until asked.
 const disarmDir = mkdtempSync(join(tmpdir(), 'jjmusic-disarm-'))

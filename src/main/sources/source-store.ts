@@ -259,7 +259,14 @@ export class SourceStore {
     }
     delete record.updateCheck
     this.apis[index] = record
-    this.persist()
+    try {
+      this.persist()
+    } catch (error) {
+      // A failed rollback must not leave the in-memory view ahead of disk.
+      // The caller can then retry or keep running the still-current version.
+      this.apis[index] = existing
+      throw error
+    }
     return true
   }
 
@@ -284,8 +291,21 @@ export class SourceStore {
     return this.apis.find((api) => api.id === id || api.stableId === id)
   }
 
+  /** Previous script decoded for a trial start before an explicit rollback. */
+  previousSource(id: string): string | undefined {
+    const api = this.apis.find((item) => item.id === id || item.stableId === id)
+    if (!api?.previousScript) return undefined
+    return decodeScript(api.previousScript)
+  }
+
   /** Insert or replace by id, keeping the existing id when overwriting. */
-  private upsert(entry: { source: string; name: string; stableId?: string; updateUrl?: string }): UserApiMeta {
+  private upsert(entry: {
+    source: string
+    name: string
+    stableId?: string
+    updateUrl?: string
+    allowShowUpdateAlert?: boolean
+  }): UserApiMeta {
     const header = describeScript(entry.source, entry.name)
 
     // Match the incoming script to an existing record by *identity* first and
@@ -313,7 +333,7 @@ export class SourceStore {
       version: header.version,
       author: header.author,
       homepage: header.homepage,
-      allowShowUpdateAlert: true,
+      allowShowUpdateAlert: entry.allowShowUpdateAlert ?? existing?.allowShowUpdateAlert ?? true,
       script: encodeScript(entry.source),
       ...(entry.updateUrl
         ? { updateUrl: entry.updateUrl }
@@ -544,7 +564,7 @@ function isStoredApi(value: unknown): value is StoredApi {
 export function parseImportPayload(
   payload: string,
   fallbackName: string
-): Array<{ source: string; name: string; stableId?: string }> {
+): Array<{ source: string; name: string; stableId?: string; allowShowUpdateAlert?: boolean }> {
   const trimmed = payload.trim()
   const out: Array<{ source: string; name: string; stableId?: string }> = []
 
@@ -575,7 +595,10 @@ export function parseImportPayload(
               out.push({
                 source,
                 name: item.name || fallbackName,
-                ...(item.stableId ? { stableId: item.stableId } : {})
+                ...(item.stableId ? { stableId: item.stableId } : {}),
+                ...(typeof item.allowShowUpdateAlert === 'boolean'
+                  ? { allowShowUpdateAlert: item.allowShowUpdateAlert }
+                  : {})
               })
             }
           }

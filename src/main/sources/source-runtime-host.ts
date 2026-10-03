@@ -32,7 +32,7 @@
  */
 
 import { fork } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -242,6 +242,8 @@ export interface HostCallbacks {
   onExit(state: RuntimeState, info: ExitInfo): void
   /** Console output from the child, already trimmed and split. */
   onLog?(apiId: string, line: string): void
+  /** LX script authors may send a user-facing update notice during startup. */
+  onUpdateAlert?(state: RuntimeState, data: unknown): void
 }
 
 /** Message shapes the host understands over IPC. */
@@ -499,6 +501,9 @@ export class SourceRuntimeHost {
     const dir = state.scratchDir
     let logOffset = 0
     let settled = false
+    // LX specifies updateAlert at most once per script run, so the file
+    // transport has one notification to consume rather than a stream/queue.
+    let updateAlertRead = false
 
     const settleOnce = (error?: Error): void => {
       if (settled) return
@@ -518,6 +523,20 @@ export class SourceRuntimeHost {
     const poll = setInterval(() => {
       // Console output first, so an init error arrives with its context.
       drainLog()
+
+      if (!updateAlertRead) {
+        const alertPath = join(dir, 'update-alert.json')
+        try {
+          if (existsSync(alertPath)) {
+            updateAlertRead = true
+            const alert = JSON.parse(readFileSync(alertPath, 'utf8')) as { data?: unknown }
+            this.callbacks.onUpdateAlert?.(state, alert.data)
+          }
+        } catch {
+          // A partial/invalid notification is ignored; it cannot block startup.
+          updateAlertRead = true
+        }
+      }
 
       const ready = readReady(dir)
       if (ready && !settled) {
@@ -653,6 +672,7 @@ export class SourceRuntimeHost {
         break
       case 'update-alert':
         state.logs.push(`[update] ${JSON.stringify(message.data)}`)
+        this.callbacks.onUpdateAlert?.(state, message.data)
         break
       case 'log':
         this.pushLog(state, `[${message.level ?? 'log'}] ${message.message ?? ''}`)

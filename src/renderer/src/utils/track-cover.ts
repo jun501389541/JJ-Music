@@ -12,6 +12,14 @@ export function trackCoverUrl(
   if (!catalogConsent || !ONLINE_SOURCE_IDS.includes(track.source) || !playableSourceIds.includes(track.source)) {
     return undefined
   }
+  const fromScript = track.assets?.cover?.some(cover => cover.provider === '音源脚本')
+  // Script URLs are persisted with tracks. Returning one directly as <img src>
+  // bypasses the main-process SSRF guard (including for loopback/private IPs).
+  // Script image bytes already passed through the proxy are data URLs and can
+  // remain usable for the current in-memory track.
+  if (fromScript && !/^data:image\/(?:png|jpeg|gif|webp|avif);base64,/i.test(track.picUrl ?? '')) {
+    return undefined
+  }
   return track.picUrl || undefined
 }
 

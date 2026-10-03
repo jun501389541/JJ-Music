@@ -185,9 +185,14 @@ const fileSend = (message: Record<string, unknown>): void => {
         appendFileSync(join(scratchDir, 'console.log'), `[${message.level ?? 'log'}] ${message.message ?? ''}\n`, 'utf8')
         break
       }
-      case 'update-alert':
+      case 'update-alert': {
+        const final = join(scratchDir, 'update-alert.json')
+        const tmp = `${final}.tmp`
+        writeFileSync(tmp, JSON.stringify({ data: message.data }), 'utf8')
+        renameSync(tmp, final)
         appendFileSync(join(scratchDir, 'console.log'), `[update] ${JSON.stringify(message.data)}\n`, 'utf8')
         break
+      }
       default:
         break
     }

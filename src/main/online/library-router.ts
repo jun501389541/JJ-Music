@@ -13,7 +13,7 @@ export type { LibraryUnavailableReason, RoutedLeaderboards, RoutedTrackPage }
 
 export interface LibraryRouterOptions {
   registry: OnlinePlatformRegistry
-  importBuiltin?: (source: SourceId, input: string) => Promise<ImportedPlaylist>
+  importBuiltin?: (source: SourceId, input: string, assertAllowed: () => void) => Promise<ImportedPlaylist>
 }
 
 /**
@@ -23,11 +23,12 @@ export interface LibraryRouterOptions {
  */
 export class LibraryRouter {
   private readonly registry: OnlinePlatformRegistry
-  private readonly importBuiltin: (source: SourceId, input: string) => Promise<ImportedPlaylist>
+  private readonly importBuiltin: (source: SourceId, input: string, assertAllowed: () => void) => Promise<ImportedPlaylist>
 
   constructor(options: LibraryRouterOptions) {
     this.registry = options.registry
-    this.importBuiltin = options.importBuiltin ?? importPlaylist
+    this.importBuiltin = options.importBuiltin ?? ((source, input, assertAllowed) =>
+      importPlaylist(source, input, fetch, assertAllowed))
   }
 
   playablePlatforms(): SourceId[] {
@@ -55,7 +56,11 @@ export class LibraryRouter {
     }
 
     try {
-      const preview = await this.importBuiltin(source, input)
+      const assertAllowed = () => {
+        if (!this.registry.allows(source, 'playlistImport')) throw new Error('音源已停用或在线目录请求授权已撤销')
+      }
+      const preview = await this.importBuiltin(source, input, assertAllowed)
+      assertAllowed()
       return {
         list: preview.tracks,
         page: 1,

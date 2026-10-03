@@ -27,6 +27,7 @@ const entityId = computed(() => typeof route.params.id === 'string' ? route.para
 const queryName = computed(() => typeof route.query.name === 'string' ? route.query.name.trim() : '')
 const state = ref<ViewState>('idle')
 const entity = ref<EntityRef | null>(null)
+const artwork = ref('')
 const candidates = ref<EntityRef[]>([])
 const tracks = ref<OnlineMusicInfo[]>([])
 const message = ref('')
@@ -36,6 +37,7 @@ const hasMore = ref(false)
 const truncated = ref(false)
 let generation = 0
 let activeRequestId: string | null = null
+let activeArtworkRequestId: string | null = null
 
 const kindLabel = computed(() => props.kind === 'artist' ? '艺术家' : '专辑')
 const platformLabel = computed(() => source.value === 'wy' ? '网易云音乐' : `${source.value.toUpperCase()} 平台`)
@@ -43,9 +45,10 @@ const title = computed(() => entity.value?.name || queryName.value || kindLabel.
 const pageTotal = computed(() => Math.max(1, Math.ceil(total.value / 20)))
 
 function cancelActiveRequest(): void {
-  if (!activeRequestId) return
-  window.jj.music.cancel(activeRequestId)
+  if (activeRequestId) window.jj.music.cancel(activeRequestId)
+  if (activeArtworkRequestId) window.jj.music.cancel(activeArtworkRequestId)
   activeRequestId = null
+  activeArtworkRequestId = null
 }
 
 function beginRequest(): { current: number; id: string } {
@@ -61,6 +64,7 @@ async function load(): Promise<void> {
   state.value = 'loading'
   message.value = ''
   entity.value = null
+  artwork.value = ''
   candidates.value = []
   tracks.value = []
   total.value = 0
@@ -84,6 +88,7 @@ async function load(): Promise<void> {
       total.value = result.total
       hasMore.value = result.hasMore
       truncated.value = result.truncated === true
+      void loadArtwork(result.entity, request.current)
       return
     }
 
@@ -111,6 +116,24 @@ async function load(): Promise<void> {
     message.value = error instanceof Error ? error.message : '读取在线详情失败。'
   } finally {
     if (request.current === generation) activeRequestId = null
+  }
+}
+
+async function loadArtwork(target: EntityRef, expectedGeneration: number): Promise<void> {
+  const url = props.kind === 'artist'
+    ? (target as OnlineArtistRef).pictureUrl
+    : (target as OnlineAlbumRef).coverUrl
+  if (!url) return
+
+  const requestId = `online-entity-artwork-${Date.now()}-${expectedGeneration}`
+  activeArtworkRequestId = requestId
+  try {
+    const localPath = await window.jj.onlineDetails.artwork(source.value, props.kind, url, requestId)
+    if (expectedGeneration === generation && localPath.startsWith('jjmedia://')) artwork.value = localPath
+  } catch {
+    // Artwork is optional; a failed image must not hide the entity or its tracks.
+  } finally {
+    if (activeArtworkRequestId === requestId) activeArtworkRequestId = null
   }
 }
 
@@ -150,6 +173,14 @@ onUnmounted(cancelActiveRequest)
     </button>
 
     <header class="online-entity__header">
+      <img
+        v-if="artwork"
+        class="online-entity__artwork"
+        :class="{ 'online-entity__artwork--artist': kind === 'artist' }"
+        :src="artwork"
+        :alt="`${title}${kind === 'artist' ? '的头像' : '的封面'}`"
+        @error="artwork = ''"
+      >
       <div>
         <p class="online-entity__eyebrow">{{ platformLabel }} · 在线{{ kindLabel }}</p>
         <h1 class="view__title">{{ title }}</h1>
@@ -217,7 +248,9 @@ onUnmounted(cancelActiveRequest)
 .online-entity{display:flex;flex-direction:column;gap:18px}
 .online-entity__back{align-self:flex-start;display:inline-flex;align-items:center;gap:4px;border:0;padding:4px 0;background:none;color:var(--text-secondary);font:inherit;cursor:pointer}
 .online-entity__back:hover{color:var(--text-primary)}
-.online-entity__header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px}
+.online-entity__header{display:flex;align-items:center;justify-content:flex-start;gap:18px}
+.online-entity__artwork{width:112px;height:112px;flex:none;object-fit:cover;border-radius:14px;background:var(--surface-raised);box-shadow:0 8px 24px rgba(0,0,0,.16)}
+.online-entity__artwork--artist{border-radius:50%}
 .online-entity__eyebrow{margin:0 0 6px;color:var(--text-secondary);font-size:12px}
 .online-entity__message{margin:0;padding:12px 14px;border-radius:10px;background:var(--surface-raised);color:var(--text-secondary);font-size:13px}
 .online-entity__candidate-section{display:flex;flex-direction:column;gap:8px;max-width:680px}

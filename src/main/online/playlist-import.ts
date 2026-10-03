@@ -72,10 +72,18 @@ export function playlistTrack(source: SourceId, item: Row): OnlineMusicInfo | nu
   return {id:`${source}_${id}`,name,singer:String(singer||''),source,albumName:album||'',...(artistRefs?.length?{artistRefs}:{}),...(albumRef?{albumRef}:{}),picUrl:pic||'',interval:`${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`,meta}
 }
 
-export async function importPlaylist(source: SourceId,input: string,http: typeof fetch=fetch): Promise<ImportedPlaylist> {
+export async function importPlaylist(
+  source: SourceId,
+  input: string,
+  http: typeof fetch = fetch,
+  assertAllowed: () => void = () => undefined
+): Promise<ImportedPlaylist> {
   const id=parsePlaylistId(source,input)
   const signal=AbortSignal.timeout(90000)
   async function json(url:string,referer:string,origin?:string):Promise<Row> {
+    // Pagination and detail completion can span many requests. Recheck just
+    // before each fetch so a revoked source cannot continue the sequence.
+    assertAllowed()
     const res=await http(url,{headers:{Referer:referer,...(origin?{Origin:origin}:{}),'User-Agent':'Mozilla/5.0'},signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])})
     const text=(await readBounded(res,20*1024*1024)).toString('utf8')
     try{return JSON.parse(text)}catch{throw Error('平台未返回歌单数据，请检查链接或稍后重试')}

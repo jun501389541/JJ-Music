@@ -425,6 +425,16 @@ test('落盘时被替换的脚本用同样的 gz_ 编码', () => {
   assert.ok(raw.startsWith('gz_'))
 })
 
+test('同版本脚本只多出行尾换行时不误报内容更新', async () => {
+  const result = await checkForUpdate(
+    { currentVersion: '1.0.0', currentScript: CURRENT_STORED, homepage: 'https://example.com/source.js' },
+    async () => body(`${CURRENT_STORED}\r\n`)
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'sameVersion')
+  assert.equal(result.plan, undefined)
+})
+
 test('direct local HTTP checks distinguish new versions, changed bytes and unchanged scripts without executing code', async () => {
   const changed = NEXT.replace('@version 1.2.0', '@version 1.0.0') +
     '\nglobalThis.__jjUpdateCandidateExecuted = true\n'
@@ -557,6 +567,19 @@ test('daily startup checks skip enabled sources without a direct URL and disable
   }
 })
 
+test('LX import preserves allowShowUpdateAlert false', () => {
+  const { store, cleanup } = storeWith(CURRENT, '无更新提示音源')
+  try {
+    const imported = store.import(JSON.stringify({
+      userApis: [{ id: 'lx-alert-off', name: '无更新提示音源', script: CURRENT, allowShowUpdateAlert: false }]
+    }), 'LX 音源')
+    assert.equal(imported.allowShowUpdateAlert, false)
+    assert.equal(JSON.parse(readFileSync(store.path, 'utf8')).userApis[0].allowShowUpdateAlert, false)
+  } finally {
+    cleanup()
+  }
+})
+
 test('坏更新会自动恢复旧脚本、启用状态与运行能力', async () => {
   assert.equal(typeof applySourceUpdate, 'function', '更新安装应提供事务入口')
   const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
@@ -565,11 +588,10 @@ test('坏更新会自动恢复旧脚本、启用状态与运行能力', async ()
     const stableId = meta.stableId
     const starts = []
     const engine = {
-      reload: async id => {
-        const loaded = store.get(id)
-        starts.push(loaded.source)
-        if (loaded.source === NEXT.trim()) {
-          store.quarantine(id, '候选版本初始化失败')
+      reload: async (id, candidate) => {
+        const source = candidate ?? store.get(id).source
+        starts.push(source)
+        if (source === NEXT.trim()) {
           throw new Error('候选版本初始化失败')
         }
       }
@@ -607,6 +629,50 @@ test('persist failure while replacing a script restores the in-memory version an
   }
 })
 
+test('a confirmed update starts the candidate before disk commit and restores the old runtime if commit fails', async () => {
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.setEnabled(meta.id, true)
+    const started = []
+    const engine = {
+      reload: async (id, candidate) => {
+        started.push(candidate ?? store.get(id).source)
+      }
+    }
+    Reflect.set(store, 'persist', () => { throw new Error('disk full') })
+
+    await assert.rejects(() => applySourceUpdate(store, engine, meta.id, NEXT.trim()), /disk full/)
+
+    assert.deepEqual(started, [NEXT.trim(), CURRENT_STORED], 'the candidate is tried first and old bytes are restarted after commit failure')
+    assert.equal(store.get(meta.id).source, CURRENT_STORED)
+    assert.equal(store.get(meta.id).meta.enabled, true)
+    const disk = JSON.parse(readFileSync(store.path, 'utf8')).userApis[0]
+    assert.equal(disk.version, '1.0.0', 'failed commit must leave the durable version unchanged')
+    assert.equal(disk.enabled, true)
+  } finally {
+    cleanup()
+  }
+})
+
+test('a rollback write failure restores the in-memory and on-disk current version', () => {
+  const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
+  try {
+    store.setEnabled(meta.id, true)
+    store.replaceScript(meta.id, NEXT.trim(), '测试音源')
+    const diskBefore = readFileSync(store.path, 'utf8')
+    Reflect.set(store, 'persist', () => { throw new Error('disk full') })
+
+    assert.throws(() => store.rollback(meta.id), /disk full/)
+
+    assert.equal(store.get(meta.id).source, NEXT.trim())
+    assert.equal(store.get(meta.id).meta.version, '1.2.0')
+    assert.equal(store.get(meta.id).meta.enabled, true)
+    assert.equal(readFileSync(store.path, 'utf8'), diskBefore)
+  } finally {
+    cleanup()
+  }
+})
+
 test('更新停用中的来源不会意外执行候选脚本', async () => {
   assert.equal(typeof applySourceUpdate, 'function', '更新安装应提供事务入口')
   const { store, meta, cleanup } = storeWith(CURRENT, '测试音源')
@@ -629,11 +695,10 @@ test('手动回退版启动失败会恢复当前版本及启用状态', async ()
     store.replaceScript(meta.id, NEXT.trim(), '测试音源')
     const starts = []
     const engine = {
-      reload: async id => {
-        const loaded = store.get(id)
-        starts.push(loaded.source)
-        if (loaded.source === CURRENT_STORED) {
-          store.quarantine(id, '旧版本已不可运行')
+      reload: async (id, candidate) => {
+        const source = candidate ?? store.get(id).source
+        starts.push(source)
+        if (source === CURRENT_STORED) {
           throw new Error('旧版本已不可运行')
         }
       }

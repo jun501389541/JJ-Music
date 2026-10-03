@@ -235,6 +235,11 @@ const api = {
       const listener = (): void => handler()
       ipcRenderer.on(IPC.sourcesChanged, listener)
       return () => ipcRenderer.removeListener(IPC.sourcesChanged, listener)
+    },
+    onUpdateAlert: (handler: (notice: { name: string; author: string; message: string }) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, notice: { name: string; author: string; message: string }): void => handler(notice)
+      ipcRenderer.on(IPC.sourcesUpdateAlert, listener)
+      return () => ipcRenderer.removeListener(IPC.sourcesUpdateAlert, listener)
     }
   },
 
@@ -297,6 +302,8 @@ const api = {
   },
 
   onlineDetails: {
+    artwork: (source: SourceId, kind: 'artist' | 'album', url: string, requestId?: string) =>
+      invoke<string>(IPC.onlineEntityArtwork, source, kind, url, requestId),
     artistPage: (source: SourceId, id: string, page = 1, requestId?: string) =>
       invoke<OnlineEntityPage<OnlineArtistRef>>(IPC.onlineArtistPage, source, id, page, requestId),
     albumPage: (source: SourceId, id: string, page = 1, requestId?: string) =>

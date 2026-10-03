@@ -139,6 +139,17 @@ test('playlist pagination, detail completion, deduplication and partial imports 
   assert.equal(kgPages,2,'第二页只有 50 行，到这里才算完')
   await assert.rejects(()=>importPlaylist('tx','123',async()=>new Response(JSON.stringify({code:1}))))
 })
+test('a playlist with no reported total warns when the 5000-song paging limit is reached',async()=>{
+  let page=0
+  const result=await importPlaylist('kg','123',async()=>{
+    page+=1
+    const info=Array.from({length:100},(_,index)=>({hash:`${page}-${index}`,songname:`Song ${page}-${index}`,singername:'Artist'}))
+    return new Response(JSON.stringify({status:1,data:{specialname:'Large',info}}))
+  })
+  assert.equal(page,50)
+  assert.equal(result.tracks.length,5000)
+  assert.ok(result.warnings.some(message=>/分页上限/.test(message)))
+})
 test('咪咕歌单按封面与全部分页导入，音质与版权标识取自搜索适配器同一映射',async()=>{
   const seen=[]
   const http=async url=>{seen.push(String(url));const u=new URL(url),page=Number(u.searchParams.get('pageNo')||0)

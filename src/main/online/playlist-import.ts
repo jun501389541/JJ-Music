@@ -71,7 +71,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
     const text=(await readBounded(res,20*1024*1024)).toString('utf8')
     try{return JSON.parse(text)}catch{throw Error('平台未返回歌单数据，请检查链接或稍后重试')}
   }
-  let rows:Row[]=[],total=0,name='',cover='',warnings:string[]=[]
+  let rows:Row[]=[],total=0,name='',cover='',warnings:string[]=[],pageLimitReached=false
   if(source==='wy') {
     const data=await json(`https://music.163.com/api/v6/playlist/detail?id=${id}&n=1000&s=0`,'https://music.163.com/')
     const list=data.playlist||data.result
@@ -118,6 +118,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
       // silence is exactly the kind of quiet half-result to avoid.
       if(!chunk.length||chunk.length<MG_PAGE_SIZE)break
       if(total&&rows.length>=total)break
+      if(page===MG_MAX_PAGE)pageLimitReached=true
     }
   } else {
     // One page size for both adapters, used in the request *and* in the
@@ -140,6 +141,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
       if(!chunk.length)break
       if(total) { if(rows.length>=total)break }
       else if(chunk.length<size)break
+      if(page===49&&(!total||rows.length<total))pageLimitReached=true
     }
   }
   const tracks:OnlineMusicInfo[]=[],seen=new Set<string>()
@@ -150,6 +152,7 @@ export async function importPlaylist(source: SourceId,input: string,http: typeof
   }
   if(invalid)warnings.push(`${invalid} 首歌曲信息无效，已跳过`)
   if(!tracks.length)throw Error('歌单为空或平台未返回可导入的歌曲')
+  if(pageLimitReached)warnings.push('已达到平台分页上限 5000 首，后续歌曲未读取。')
   if(total>tracks.length)warnings.push(`平台标记 ${total} 首，本次可导入 ${tracks.length} 首；其余可能受访问限制或超出 5000 首上限`)
   const coverUrl=normalizeCover(source,cover)
   return {name:name||`导入歌单 ${id}`,source,sourceListId:id,...(coverUrl?{coverUrl}:{}) ,tracks,total,warnings:[...new Set(warnings)]}

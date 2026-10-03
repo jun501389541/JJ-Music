@@ -957,32 +957,12 @@ export interface AppSettings extends UiPreferences {
   onlineLyricSource: OnlineLyricSource
   /** When the preferred source comes back empty, try the remaining ones in order. */
   onlineLyricFallback: boolean
-  /**
-   * Whether search and hot words may go to this app's own platform adapters.
-   *
-   * ## Why this exists
-   *
-   * `src/main/online/search.ts` has described its adapters as "optional and
-   * user-enabled" since it was written, but no such setting was ever added: the
-   * adapters in `search.ts` (`PROVIDERS`) and `hot-words.ts` (`ADAPTERS`) ran
-   * unconditionally, so a fresh install with no 音源 imported still queried five
-   * music platforms. That is the behaviour the capability protocol exists to
-   * remove — search is supposed to be answered by a source the user installed.
-   *
-   * Defaults to `false`, and that default is the whole point: the built-in path
-   * must never be reachable without the user asking for it. A fallback that turns
-   * itself on is indistinguishable from no gate at all.
-   *
-   * ## Why it was kept rather than deleted
-   *
-   * Removing the adapters would be irreversible and would leave the search page
-   * permanently empty on a machine with no source installed, including for a user
-   * who has no intention of importing one. Keeping them behind an explicit switch
-   * satisfies "off by default, no silent fallback" without taking the capability
-   * away. The two paths are never merged: a request goes to a 音源 **or** to an
-   * adapter, never to an adapter because a 音源 failed.
-   */
+  /** Legacy preference retained when reading older settings; it never grants platform access. */
   allowBuiltinOnlineSearch: boolean
+  /** Explicit permission for JJ-owned platform catalog requests when a matching LX source is active. */
+  onlineCatalogConsent: boolean
+  /** Internal one-time disclosure marker for existing installations. */
+  onlineCatalogConsentPrompted: boolean
   /** Download folder for online tracks. */
   downloadFolder: string
   downloadLyric: boolean

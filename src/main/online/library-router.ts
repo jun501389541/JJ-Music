@@ -6,17 +6,15 @@ import type {
   RoutedTrackPage,
   SourceId
 } from '@shared/types'
+import type { OnlinePlatformRegistry } from './platform-registry'
 import { importPlaylist } from './playlist-import'
 
 export type { LibraryUnavailableReason, RoutedLeaderboards, RoutedTrackPage }
 
 export interface LibraryRouterOptions {
-  /** Temporary legacy gate; E2 replaces it with per-platform LX admission. */
-  allowBuiltin: () => boolean
+  registry: OnlinePlatformRegistry
   importBuiltin?: (source: SourceId, input: string) => Promise<ImportedPlaylist>
 }
-
-const BUILTIN_PLAYLIST_PLATFORMS: SourceId[] = ['wy', 'tx', 'mg', 'kw', 'kg']
 
 /**
  * Routes catalog playlist imports to JJ's platform adapters. LX v2 scripts do
@@ -24,16 +22,16 @@ const BUILTIN_PLAYLIST_PLATFORMS: SourceId[] = ['wy', 'tx', 'mg', 'kw', 'kg']
  * unavailable until F1 adds a supported catalog adapter.
  */
 export class LibraryRouter {
-  private readonly allowBuiltin: () => boolean
+  private readonly registry: OnlinePlatformRegistry
   private readonly importBuiltin: (source: SourceId, input: string) => Promise<ImportedPlaylist>
 
   constructor(options: LibraryRouterOptions) {
-    this.allowBuiltin = options.allowBuiltin
+    this.registry = options.registry
     this.importBuiltin = options.importBuiltin ?? importPlaylist
   }
 
   playablePlatforms(): SourceId[] {
-    return this.allowBuiltin() ? [...BUILTIN_PLAYLIST_PLATFORMS] : []
+    return this.registry.platforms('playlistImport')
   }
 
   leaderboardPlatforms(): SourceId[] {
@@ -48,8 +46,8 @@ export class LibraryRouter {
     source: SourceId,
     input: string,
     _id: string
-  ): Promise<RoutedTrackPage & { name?: string; coverUrl?: string }> {
-    if (!this.allowBuiltin()) {
+  ): Promise<RoutedTrackPage & { name?: string; coverUrl?: string; warnings?: string[] }> {
+    if (!this.registry.allows(source, 'playlistImport')) {
       return {
         list: [], page: 1, servedBy: 'none', reason: 'noProvider',
         message: '在线歌单导入当前不可用。'
@@ -65,7 +63,8 @@ export class LibraryRouter {
         hasMore: false,
         servedBy: 'builtin',
         name: preview.name,
-        ...(preview.coverUrl ? { coverUrl: preview.coverUrl } : {})
+        ...(preview.coverUrl ? { coverUrl: preview.coverUrl } : {}),
+        ...(preview.warnings.length ? { warnings: preview.warnings } : {})
       }
     } catch (error) {
       return {

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { toMediaUrl } from '@shared/media-url'
 import { isLocalTrack } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { playbackActions, trackActions } from '../utils/track-actions'
 import { formatTime } from '../utils/format'
+import { trackCoverUrl } from '../utils/track-cover'
 import AppIcon from './AppIcon.vue'
 import SliderBar from './SliderBar.vue'
 import TransportControls from './TransportControls.vue'
@@ -30,7 +30,7 @@ const player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
 function openMore(event: MouseEvent): void {
   ui.openMenu(event, props.extraMenu ? [...playbackActions(), ...props.extraMenu()] : playbackActions())
 }
-const cover = computed(() => { const t = player.currentTrack; return !t ? null : isLocalTrack(t) ? t.coverPath ? toMediaUrl(t.coverPath) : null : t.picUrl })
+const cover = computed(() => trackCoverUrl(player.currentTrack, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null)
 const lyric = computed(() => player.lyrics?.lines[player.activeLyricIndex]?.text)
 const spec = computed(() => { const t = player.currentTrack; return t && isLocalTrack(t) && t.sampleRate ? `${t.sampleRate / 1000} kHz` : t && !isLocalTrack(t) ? t.source.toUpperCase() : '—' })
 

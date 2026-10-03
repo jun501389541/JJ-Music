@@ -37,9 +37,10 @@ import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
 import { MusicLibrary } from './library/music-library'
 import { PlaylistStore, SettingsStore } from './store/settings-store'
-import { searchOnline, searchProviders, fetchNeteaseDetails } from './online/search'
+import { searchProviders, fetchNeteaseDetails } from './online/search'
 import { HotWordSource } from './online/hot-words'
 import { SearchRouter } from './online/search-router'
+import { OnlinePlatformRegistry } from './online/platform-registry'
 import { LibraryRouter } from './online/library-router'
 import { PlaybackRouter } from './sources/playback-router'
 import { fetchOnlineLyric } from './online/lyrics'
@@ -325,7 +326,9 @@ interface Services {
   pendingAssets: PendingAssetStore
   sourceStore: SourceStore
   sourceEngine: SourceEngine
-  /** Routes catalog search and hot words to built-in adapters when allowed. */
+  /** Live, per-platform admission for all JJ-owned catalog adapters. */
+  onlinePlatforms: OnlinePlatformRegistry
+  /** Routes catalog search and hot words through onlinePlatforms. */
   searchRouter: SearchRouter
   /** Resolves playback through the shared LX source lifecycle. */
   playbackRouter: PlaybackRouter
@@ -395,31 +398,48 @@ function requireServices(): Services {
   return services
 }
 
+let catalogConsentPrompt: Promise<void> | undefined
+
+/** Disclose the migrated platform path once, before an active LX source can open it. */
+function maybePromptOnlineCatalogConsent(svc: Services = requireServices()): Promise<void> {
+  if (catalogConsentPrompt) return catalogConsentPrompt
+  const current = svc.settings.get()
+  if (current.onlineCatalogConsent || current.onlineCatalogConsentPrompted || svc.onlinePlatforms.eligiblePlatforms().length === 0) {
+    return Promise.resolve()
+  }
+
+  catalogConsentPrompt = (async () => {
+    const options = {
+      type: 'question' as const,
+      title: '允许在线目录请求？',
+      message: 'JJ Music 的目录适配器会向对应音乐平台请求搜索、热词、歌词、封面、歌单和艺人图片资料。LX 音源脚本负责解析播放地址；只有启用且健康的音源声明了对应平台，JJ Music 才会请求该平台。',
+      buttons: ['暂不', '同意并开启'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    }
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+    const result = parent
+      ? await dialog.showMessageBox(parent, options)
+      : await dialog.showMessageBox(options)
+    await svc.settings.update({
+      onlineCatalogConsentPrompted: true,
+      onlineCatalogConsent: result.response === 1
+    })
+  })().catch((error) => {
+    console.error('在线目录说明未能显示:', error)
+  }).finally(() => {
+    catalogConsentPrompt = undefined
+  })
+  return catalogConsentPrompt
+}
+
 async function createServices(): Promise<Services> {
   await migrateLegacyData()
   const dataDir = app.getPath('userData')
   const settings = new SettingsStore(dataDir)
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
-  const artistImages = new ArtistImageStore(dataDir, {
-    saveCover: (data, format) => library.saveCover(data, format),
-    /*
-     * Gated like every other built-in platform path.
-     *
-     * `resolveArtistImage` searches 咪咕/QQ/网易云/酷狗 for a portrait, and left to
-     * its own default it does that unconditionally — one more path that issues
-     * built-in platform requests on an install where the user has switched them
-     * off. With the switch off there is no portrait to be had: the artist page
-     * shows its 「没有头像」 state, which is the same answer it already gives for
-     * a singer no platform has a photo of.
-     *
-     * Returning `null` rather than throwing is deliberate. `resolve` treats a
-     * throw as "the lookup could not be completed" and reports that to the user
-     * as a failure; a switched-off lookup did not fail, it was never asked.
-     */
-    resolveArtistImage: (async (...args: Parameters<ArtistImageResolver>) =>
-      settings.get().allowBuiltinOnlineSearch ? resolveArtistImage(...args) : null) as ArtistImageResolver
-  })
   const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
   const hotWords = new HotWordSource(undefined, {
@@ -429,17 +449,25 @@ async function createServices(): Promise<Services> {
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
   const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'))
+  const onlinePlatforms = new OnlinePlatformRegistry({
+    sourcesByScript: () => sourceEngine.getSourcesByScript(),
+    isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled),
+    catalogConsent: () => settings.get().onlineCatalogConsent
+  })
+  const artistImages = new ArtistImageStore(dataDir, {
+    saveCover: (data, format) => library.saveCover(data, format),
+    resolveArtistImage: (async (name, http) => {
+      const admitted = onlinePlatforms.platforms('artistImage')
+      return admitted.length ? resolveArtistImage(name, http, admitted) : null
+    }) as ArtistImageResolver
+  })
   const searchRouter = new SearchRouter({
     hotWords,
-    // Read live rather than captured: the user can flip this in Settings while
-    // the app is running, and a cached copy would keep the old answer until
-    // restart — which reads as the switch not working.
-    allowBuiltin: () => settings.get().allowBuiltinOnlineSearch,
+    registry: onlinePlatforms
   })
   const playbackRouter = new PlaybackRouter({ sourceEngine })
-  // Playlist import shares the same temporary gate as search.
   const libraryRouter = new LibraryRouter({
-    allowBuiltin: () => settings.get().allowBuiltinOnlineSearch
+    registry: onlinePlatforms
   })
 
   await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load(), hotWords.load()])
@@ -455,24 +483,32 @@ async function createServices(): Promise<Services> {
   const onlineLyric = (music: OnlineMusicInfo, only?: OnlineLyricSource, signal?: AbortSignal) => {
     const preference = settings.get()
     /*
-     * 内置平台这一步是可选的，且由用户在设置里开关。
-     *
-     * 曾经它无条件直连内置适配器，所以即使用户把内置平台请求全关掉，
-     * 「平台」这一步仍会发出请求——正是 AC3 要断掉的那条路。现在它和搜索、
-     * 热词、歌单共用一个 `allowBuiltinOnlineSearch`，读的是实时值而不是快照，
-     * 免得用户改了开关要重启才生效。
-     *
-     * 关掉时这一步返回空歌词，而不是从顺序里删掉：`lyricSourceOrder` 的
-     * 先后是用户排的（脚本 / 平台 / 搜索），删掉会让「回退」这一列悄悄改意义。
-     * 返回空等同于「这一步没找到」，于是自然落到下一步。
+     * JJ's lyric adapter is optional and uses the same live source-plus-consent
+     * registry as search. Returning an empty lyric when the platform is not
+     * admitted keeps the user's configured script / platform / search fallback
+     * order intact.
      */
-    const allowBuiltin = preference.allowBuiltinOnlineSearch
     return resolveOnlineLyricByOrder(
       lyricSourceOrder(preference.onlineLyricSource, preference.onlineLyricFallback, only),
       {
         script: () => playbackRouter.lyric(music, signal),
-        platform: () => allowBuiltin ? fetchOnlineLyric(music, signal) : Promise.resolve({ lyric: '' }),
-        search: () => lyricFromOtherPlatforms(music, {}, signal)
+        platform: () => onlinePlatforms.allows(music.source, 'lyrics')
+          ? fetchOnlineLyric(music, signal)
+          : Promise.resolve({ lyric: '' }),
+        search: () => lyricFromOtherPlatforms(music, {
+          sources: onlinePlatforms.platforms('lyrics'),
+          match: (local, options) => matchMetadata(local, {
+            ...options,
+            search: async (source, keyword, requestSignal) => {
+              if (!onlinePlatforms.allows(source, 'lyrics')) return []
+              return (await searchRouter.search(source, keyword, 1, requestSignal)).list
+            }
+          }),
+          fetchLyric: async (candidate, requestSignal) =>
+            onlinePlatforms.allows(candidate.source, 'lyrics')
+              ? fetchOnlineLyric(candidate, requestSignal)
+              : { lyric: '' }
+        }, signal)
       },
       signal
     )
@@ -483,28 +519,27 @@ async function createServices(): Promise<Services> {
    * as the search page.
    *
    * `lyricCandidates` and `searchLyricOnline` match a local track against the
-   * built-in adapters. Left to their own defaults they reach them directly, which
-   * is a fifth and sixth path that issues built-in platform requests on an install
-   * where the user switched them off — the same defect `IPC.matchMetadata` was
-   * fixed for.
+   * platform adapters. Every search and lyric fetch is checked against the live
+   * platform registry, which requires consent and an enabled, healthy LX source
+   * declaring the requested platform.
    *
    * `search` is routed, not called directly, for that reason. `fetchLyric` fetches
-   * a *specific* track the search already returned, so it is not a search: it is
-   * gated to match, because with the built-in switch off there is nothing the
-   * search could have found on a built-in platform in the first place.
+   * a *specific* track the search already returned. It is still gated independently
+   * because source state may change between search and lyric retrieval.
    *
    * `provider` is the cache-isolation key (see `source-store.ts` `versionOf`).
-   * It is carried here rather than read inside `lyric-service` because only this
-   * layer knows which script is enabled; the service is a pure function of what
-   * it is handed, which is what keeps its offline tests honest.
+   * It is carried here rather than read inside `lyric-service` because this layer
+   * owns the live registry and source versions; the service stays a pure function
+   * of what it is handed, which keeps its offline tests honest.
    */
   const lyricDeps: LyricDeps = {
     search: async (source: SourceId, keyword: string, signal?: AbortSignal) => {
+      if (!onlinePlatforms.allows(source, 'lyrics')) return []
       const routed = await searchRouter.search(source, keyword, 1, signal)
       return routed.list
     },
     fetchLyric: async (music: OnlineMusicInfo, signal?: AbortSignal) => {
-      if (!settings.get().allowBuiltinOnlineSearch) return { lyric: '' }
+      if (!onlinePlatforms.allows(music.source, 'lyrics')) return { lyric: '' }
       return fetchOnlineLyric(music, signal)
     },
     provider: () => {
@@ -517,7 +552,9 @@ async function createServices(): Promise<Services> {
     settings: () => settings.get(), defaultFolder: join(app.getPath('downloads'), 'JJ Music'),
     resolve: (track, quality) => playbackRouter.musicUrl(track, quality, true),
     lyrics: async (track) => (await onlineLyric(track)).lyric,
-    cover: async track => track.picUrl || playbackRouter.pic(track),
+    cover: async track => track.picUrl && onlinePlatforms.allows(track.source, 'cover')
+      ? track.picUrl
+      : playbackRouter.pic(track),
     /*
      * The audio and cover URLs being fetched here were produced by an untrusted
      * source script, so this must validate every hop like the other
@@ -538,7 +575,7 @@ async function createServices(): Promise<Services> {
     trash: (path) => shell.trashItem(path)
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, searchRouter, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -1569,6 +1606,8 @@ function registerIpc(): void {
      * so the renderer's copy is corrected by the same call.
      */
     const { libraryFolders: _libraryFolders, downloadFolder: _downloadFolder, ...writable } = patch
+    // Editing the explicit consent setting is itself the one-time disclosure decision.
+    if (patch.onlineCatalogConsent !== undefined) writable.onlineCatalogConsentPrompted = true
     // 关掉「记录搜索历史」就把已存的也清掉，而且此后任何补丁想写历史都写不进去。
     // 只看这一次补丁不够：渲染层手里那份设置可能比主进程旧，而这个开关的意思就是
     // "别留"。同一份补丁里把它打开（快照恢复、重置）仍然允许带着列表进来。
@@ -1809,6 +1848,7 @@ function registerIpc(): void {
 
     sourceStore.setEnabled(id, true)
     await sourceEngine.reload(id)
+    await maybePromptOnlineCatalogConsent()
     return { started: true, report }
   })
 
@@ -1838,29 +1878,17 @@ function registerIpc(): void {
   )
 
   handle(IPC.sourcesVerifyPlatform, async (id: SourceId) => {
-    const { sourceEngine, settings } = requireServices()
+    const { sourceEngine } = requireServices()
     const source = sourceEngine.getSources().find(item => item.id === id)
     if (!source) throw new Error('该平台尚未启动或已停用')
     const existing = platformProbes.get(id)
     if (existing) return existing
     const request = probePlatform(source, {
-      /*
-       * The probe needs one playable track to test a URL against, and the only
-       * place to get one is a search. It prefers the 音源 path — the same one the
-       * search page uses — and falls back to the built-in adapter only when the
-       * user has switched those on, so the probe cannot become the one remaining
-       * code path that still calls a platform on a gate-closed install.
-       *
-       * The fallback is not "silent": this whole handler is a button the user
-       * pressed about a specific source, and an unsearchable platform yields the
-       * probe's own 'unknown' with a reason rather than a fabricated pass.
-       */
+      // Verification uses the same live catalog admission as the search page.
       search: async platform => {
         const { searchRouter } = requireServices()
         const routed = await searchRouter.search(platform, '晴天 周杰伦', 1)
-        if (routed.list.length > 0) return routed.list
-        if (!settings.get().allowBuiltinOnlineSearch) return []
-        return (await searchOnline(platform, '晴天 周杰伦', 1)).list
+        return routed.list
       },
       resolve: async track => (await requireServices().playbackRouter.musicUrl(track, '128k')).url,
       // The URL comes from a user-imported script, which this codebase already
@@ -1943,9 +1971,10 @@ function registerIpc(): void {
   /**
    * Search one platform, or all of them.
    *
-   * Goes through `SearchRouter`, which gates this app's built-in adapters on the
-   * user's online-search setting. LX v2 scripts provide playback resolution;
-   * catalog search remains an app-owned adapter until E2 adds per-platform admission.
+   * Goes through `SearchRouter`, which admits catalog requests only when the user
+   * has consented and an enabled, healthy LX source declares the requested platform.
+   * LX v2 scripts provide playback resolution; JJ Music's small adapters handle
+   * catalog search without duplicating the LX runtime.
    */
   handle(IPC.musicSearch, async (source: SourceId, keyword: string, page = 1, requestId?: string) => cancellableRequest(requestId, async signal => {
     const { searchRouter } = requireServices()
@@ -1958,8 +1987,8 @@ function registerIpc(): void {
   /**
    * Platforms the search UI should offer as tabs.
    *
-   * Only show tabs the current search router can serve. E2 replaces this
-   * temporary global gate with per-platform admission.
+   * Only show tabs the current search router can serve under live source state
+   * and catalog consent.
    */
   handle(IPC.musicSearchProviders, () => {
     const { searchRouter } = requireServices()
@@ -2178,6 +2207,10 @@ function registerIpc(): void {
     return settings.get().downloadFolder
   })
   const importPreviews = new Map<string, ImportedPlaylist>()
+  handle(IPC.playlistImportProviders, () => {
+    const admitted = new Set(requireServices().libraryRouter.playablePlatforms())
+    return searchProviders().filter((item) => admitted.has(item.id))
+  })
   handle(IPC.playlistImportPreview, async (source: SourceId, input: string) => {
     if (typeof input !== 'string' || input.length > 4096) throw Error('歌单链接无效')
     // The host recognises the link, not the script: `parsePlaylistId` is what rejects
@@ -2195,7 +2228,7 @@ function registerIpc(): void {
       ...(routed.coverUrl ? { coverUrl: routed.coverUrl } : {}),
       tracks: routed.list,
       total: routed.total ?? routed.list.length,
-      warnings: []
+      warnings: routed.warnings ?? []
     }
     if(importPreviews.size>=10)importPreviews.delete(importPreviews.keys().next().value!)
     importPreviews.set(token,preview)
@@ -2213,7 +2246,7 @@ function registerIpc(): void {
     try { await playlists.addTracks(playlist.id,tracks) } catch(error) {await playlists.remove(playlist.id);throw error}
     // 封面丢了不该让整次导入失败：用户要的是那一百多首歌。
     let coverFailed=false
-    if (preview.coverUrl) {
+    if (preview.coverUrl && requireServices().onlinePlatforms.allows(preview.source, 'cover')) {
       try {
         const saved=await fetchImportCover(preview,(data,format)=>library.saveCover(data,format))
         if(saved)await playlists.setCover(playlist.id,saved);else coverFailed=true
@@ -2272,7 +2305,7 @@ function registerIpc(): void {
      * 请求不再发出」，没有例外条款；留一处豁免，那句话就不成立了，下一个审计者
      * 还得读代码才知道到底有几处。所以宁可让徽标空着，也要让这条保证可被验证。
      */
-    if (!requireServices().settings.get().allowBuiltinOnlineSearch) return []
+    if (!requireServices().onlinePlatforms.allows('wy', 'search')) return []
     const tracks = await requireServices().playlists.getItems(listId)
     const wanted = tracks
       .filter((track) => !isLocalTrack(track) && track.source === 'wy' && !(track.meta?.qualitys?.length))
@@ -2612,7 +2645,9 @@ function registerIpc(): void {
        * `assetsExport` and are unaffected.)
        */
       delete effective.cover
-      if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))) {
+      if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))
+        && options?.coverFrom
+        && requireServices().onlinePlatforms.allows(options.coverFrom.source, 'cover')) {
         const cover = await fetchCoverBytes(options?.coverFrom)
         if (cover) effective.cover = cover
       }
@@ -2623,6 +2658,7 @@ function registerIpc(): void {
 
   /** Fetch a cover image for a matched track, returned as a data URL. */
   handle(IPC.matchCover, async (music: OnlineMusicInfo) => {
+    if (!requireServices().onlinePlatforms.allows(music.source, 'cover')) return null
     const cover = await fetchCoverBytes(music)
     if (!cover) return null
     return {
@@ -2704,6 +2740,8 @@ if (!app.requestSingleInstanceLock()) {
 
     // Sources are started after the window exists so init errors can be shown.
     void services.sourceEngine.startAll()
+      .then(() => maybePromptOnlineCatalogConsent(services!))
+      .catch((error) => console.error('启用音源时未能显示在线目录说明:', error))
 
     app.on('activate', () => {
       // Not `getAllWindows().length === 0`: the lyric overlay is a window too,

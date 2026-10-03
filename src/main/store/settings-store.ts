@@ -28,6 +28,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
   allowBuiltinOnlineSearch: false,
+  onlineCatalogConsent: false,
+  onlineCatalogConsentPrompted: false,
   downloadFolder: '',
   downloadLyric: true,
   downloadEmbedLyric: true,

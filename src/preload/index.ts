@@ -74,6 +74,7 @@ const api = {
     chooseFolder: () => invoke<string | null>(IPC.downloadsChooseFolder)
   },
   playlistImport: {
+    providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.playlistImportProviders),
     preview: (source: SourceId, input: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input),
     /**
      * Commit a previewed list. `ids` is the order and subset the user arranged in

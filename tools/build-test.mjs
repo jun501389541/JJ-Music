@@ -82,6 +82,7 @@ await build({
   join(repoRoot, 'src', 'main', 'library', 'pending-assets.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'platform-registry.ts'),
     join(repoRoot, 'src', 'main', 'online', 'library-router.ts'),
     join(repoRoot, 'src', 'main', 'online', 'hot-words.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'playback-router.ts'),
@@ -134,6 +135,7 @@ await build({
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'search-merge.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'cancellable-music.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'local-search.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'utils', 'track-cover.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'library.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'player.ts')
   ],

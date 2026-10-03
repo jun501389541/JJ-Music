@@ -231,9 +231,11 @@ export class HotWordSource {
    * from the first platform answered would mean the other three never appear on
    * screen, which is the opposite of what 全部 is for.
    */
-  async words(scope: SourceId | 'all'): Promise<HotWord[]> {
+  async words(scope: SourceId | 'all', allowedSources?: readonly SourceId[]): Promise<HotWord[]> {
     if (scope !== 'all' && !ADAPTERS.some((adapter) => adapter.source === scope)) return []
-    const wanted = scope === 'all' ? ADAPTERS.map((adapter) => adapter.source) : [scope]
+    const allowed = allowedSources ? new Set(allowedSources) : undefined
+    const wanted = (scope === 'all' ? ADAPTERS.map((adapter) => adapter.source) : [scope])
+      .filter((source) => !allowed || allowed.has(source))
     const lists = await Promise.all(wanted.map(async (source) => {
       const words = await this.showNow(source, scope === 'all')
       return words.map((text) => ({ text, source }))

@@ -5,7 +5,8 @@ import {
   HOT_WORD_SOURCES,
   HotWordSource
 } from './hot-words'
-import { searchAll, searchOnline, type SearchPage } from './search'
+import { searchOnline, type SearchPage } from './search'
+import { OnlinePlatformRegistry } from './platform-registry'
 
 /** Why a request came back empty, so the UI can say more than "0 results". */
 export type SearchUnavailableReason = 'noProvider' | 'builtinFailed'
@@ -27,14 +28,10 @@ export interface RoutedHotWords {
 
 export interface SearchRouterOptions {
   hotWords: HotWordSource
-  /** Temporary legacy gate; E2 replaces it with per-platform LX admission. */
-  allowBuiltin: () => boolean
+  registry: OnlinePlatformRegistry
   /** Adapter seams keep routing tests offline and deterministic. */
   searchOne?: typeof searchOnline
-  searchEverywhere?: typeof searchAll
 }
-
-const BUILTIN_SEARCH_PLATFORMS: SourceId[] = ['tx', 'wy', 'kw', 'kg', 'mg']
 
 /**
  * Routes catalog requests to JJ's platform adapters. LX v2 scripts resolve
@@ -42,50 +39,58 @@ const BUILTIN_SEARCH_PLATFORMS: SourceId[] = ['tx', 'wy', 'kw', 'kg', 'mg']
  */
 export class SearchRouter {
   private readonly hotWordSource: HotWordSource
-  private readonly allowBuiltin: () => boolean
+  private readonly registry: OnlinePlatformRegistry
   private readonly searchOne: typeof searchOnline
-  private readonly searchEverywhere: typeof searchAll
 
   constructor(options: SearchRouterOptions) {
     this.hotWordSource = options.hotWords
-    this.allowBuiltin = options.allowBuiltin
+    this.registry = options.registry
     this.searchOne = options.searchOne ?? searchOnline
-    this.searchEverywhere = options.searchEverywhere ?? searchAll
   }
 
   searchablePlatforms(): SourceId[] {
-    return this.allowBuiltin() ? [...BUILTIN_SEARCH_PLATFORMS] : []
+    return this.registry.platforms('search')
   }
 
   async search(source: SourceId | 'all', keyword: string, page = 1, signal?: AbortSignal): Promise<RoutedSearchPage> {
     const trimmed = keyword.trim()
     if (!trimmed) return { list: [], total: 0, allPage: 0, servedBy: 'none' }
 
-    if (!this.allowBuiltin() || source === 'local') {
+    if (source === 'local') {
       return {
         list: [],
         total: 0,
         allPage: 0,
         servedBy: 'none',
         reason: 'noProvider',
-        message: source === 'local'
-          ? '本地曲目不使用在线搜索。'
-          : '内置在线搜索当前不可用。'
+        message: '本地曲目不使用在线搜索。'
       }
     }
 
-    return this.searchViaBuiltin(source, trimmed, page, signal)
-  }
+    const allowed = this.registry.platforms('search')
+    const selected = source === 'all' ? allowed : allowed.includes(source) ? [source] : []
+    if (selected.length === 0) {
+      return {
+        list: [], total: 0, allPage: 0, servedBy: 'none', reason: 'noProvider',
+        message: '没有已启用且可用的音源支持在线目录请求。'
+      }
+    }
 
-  private async searchViaBuiltin(
-    source: SourceId | 'all',
-    keyword: string,
-    page: number,
-    signal?: AbortSignal
-  ): Promise<RoutedSearchPage> {
     try {
       if (source === 'all') {
-        const results = await this.searchEverywhere(keyword, page, signal)
+        const results = await Promise.all(selected.map(async (platform) => {
+          try {
+            return { ...(await this.searchOne(platform, trimmed, page, signal)), source: platform }
+          } catch (error) {
+            return {
+              source: platform,
+              list: [] as OnlineMusicInfo[],
+              total: 0,
+              allPage: 0,
+              error: error instanceof Error ? error.message : String(error)
+            }
+          }
+        }))
         const list = interleave(results.map((result) => result.list))
         const failed = results
           .filter((result) => result.error)
@@ -106,7 +111,7 @@ export class SearchRouter {
         }
       }
 
-      const result = await this.searchOne(source, keyword, page, signal)
+      const result = await this.searchOne(source, trimmed, page, signal)
       return { ...result, servedBy: 'builtin' }
     } catch (error) {
       return {
@@ -117,7 +122,9 @@ export class SearchRouter {
   }
 
   async hotWords(scope: SourceId | 'all'): Promise<RoutedHotWords> {
-    if (!this.allowBuiltin() || (scope !== 'all' && !HOT_WORD_SOURCES.includes(scope))) {
+    const allowed = this.registry.platforms('hotWords').filter((source) => HOT_WORD_SOURCES.includes(source))
+    const selected = scope === 'all' ? allowed : allowed.includes(scope) ? [scope] : []
+    if (selected.length === 0) {
       return {
         words: [],
         servedBy: 'none',
@@ -127,7 +134,7 @@ export class SearchRouter {
     }
 
     try {
-      const words = await this.hotWordSource.words(scope)
+      const words = await this.hotWordSource.words(scope, selected)
       return {
         words: words.slice(0, scope === 'all' ? HOT_WORD_AGGREGATE_LIMIT : HOT_WORD_LIMIT),
         servedBy: 'builtin'

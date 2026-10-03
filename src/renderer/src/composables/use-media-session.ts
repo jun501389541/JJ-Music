@@ -23,8 +23,7 @@
  * already moving.
  */
 import { onScopeDispose, watch } from 'vue'
-import { toMediaUrl } from '@shared/media-url'
-import { isLocalTrack, type PlayableTrack } from '@shared/types'
+import type { PlayableTrack } from '@shared/types'
 import type { usePlayerStore } from '../stores/player'
 
 type Player = ReturnType<typeof usePlayerStore>
@@ -79,12 +78,8 @@ async function toArtworkUrl(source: string): Promise<string | undefined> {
  * canvas is tainted, because the media layer fetches http(s) itself and is not
  * held to this page's CORS.
  */
-async function artworkFor(track: PlayableTrack): Promise<string | undefined> {
-  const source = isLocalTrack(track)
-    ? track.coverPath
-      ? toMediaUrl(track.coverPath)
-      : undefined
-    : track.picUrl || undefined
+async function artworkFor(track: PlayableTrack, getCoverUrl: (track: PlayableTrack) => string | undefined): Promise<string | undefined> {
+  const source = getCoverUrl(track)
   if (!source) return undefined
   try {
     return await toArtworkUrl(source)
@@ -99,7 +94,7 @@ async function artworkFor(track: PlayableTrack): Promise<string | undefined> {
  * Called once from the app root, next to the desktop-lyric watcher: both project
  * the same player state into a place the player store does not own.
  */
-export function startMediaSession(player: Player): void {
+export function startMediaSession(player: Player, getCoverUrl: (track: PlayableTrack) => string | undefined): void {
   if (!('mediaSession' in navigator)) return
 
   let generation = 0
@@ -137,7 +132,7 @@ export function startMediaSession(player: Player): void {
 
   async function publish(track: PlayableTrack): Promise<void> {
     const current = ++generation
-    const artwork = await artworkFor(track)
+    const artwork = await artworkFor(track, getCoverUrl)
     // A cover that lands after the user skipped ahead must not describe the
     // track that is no longer playing.
     if (current !== generation) {

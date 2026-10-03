@@ -56,3 +56,16 @@ test('跨平台匹配歌词：排除本平台、低分不要、拿到空歌词�
   const failing = await lyricFromOtherPlatforms(music, { match: async () => { throw new Error('搜索失败') }, fetchLyric: async () => ({ lyric: '不该被取' }) })
   assert.equal(failing.lyric, '')
 })
+
+test('跨平台歌词只搜索当前准入的平台', async () => {
+  const asked = []
+  await lyricFromOtherPlatforms(
+    { id: 'tx_1', source: 'tx', name: '晴天', singer: '周杰伦', interval: '04:29' },
+    {
+      sources: ['kw'],
+      match: async (_local, options) => { asked.push(options.sources); return [] }
+    }
+  )
+
+  assert.deepEqual(asked, [['kw']])
+})

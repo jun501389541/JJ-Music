@@ -432,7 +432,7 @@ async function disableAll(): Promise<void> {
       <div>
         <h1 class="view__title">音源管理</h1>
         <p class="view__subtitle">
-          导入 LX Music 格式的 <code>.js</code> 音源脚本，即可在线搜索与播放
+          LX 音源脚本负责解析播放地址；JJ Music 单独请求搜索、热词、歌词、封面和歌单目录数据。目录请求需你同意，并且只使用已启用、健康且声明了对应平台的音源。
         </p>
       </div>
       <div class="actions">
@@ -508,7 +508,7 @@ async function disableAll(): Promise<void> {
     <div v-if="library.userApis.length === 0" class="empty">
       <span class="empty__title">还没有导入任何音源</span>
       <span class="empty__hint">
-        JJ Music 本身不内置任何在线音乐平台的播放源。导入一个音源脚本后，即可搜索并解析播放地址。<br />
+        JJ Music 本身不内置在线播放源。导入音源脚本后可解析播放地址；在线目录请求还需要授权和对应平台的可用音源。<br />
         你现有的 <code>%APPDATA%\lx-music-desktop\LxDatas\user_api.json</code> 也可以直接选中导入。
       </span>
       <button class="btn btn--primary" type="button" @click="importFromFile">选择音源文件</button>
@@ -753,8 +753,8 @@ async function disableAll(): Promise<void> {
       <h2 class="notes__title">关于音源兼容性</h2>
       <ul class="notes__list">
         <li>
-          自定义音源脚本只能提供<strong>播放地址</strong>、歌词与封面（<code>musicUrl</code> /
-          <code>lyric</code> / <code>pic</code>），搜索功能由播放器自身实现。
+          LX 音源脚本提供<strong>播放地址</strong>，也可提供歌词或封面（<code>musicUrl</code> /
+          <code>lyric</code> / <code>pic</code>）；JJ Music 的平台目录请求单独受同意状态和对应的已启用、健康音源控制。
         </li>
         <li>
           脚本可声明的平台仅限 <code>kw</code>、<code>kg</code>、<code>tx</code>、<code>wy</code>、

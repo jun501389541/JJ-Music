@@ -10,13 +10,13 @@ import { trackActions } from '../utils/track-actions'
 import AppIcon from '../components/AppIcon.vue'
 import PlayerBar from '../components/PlayerBar.vue'
 import WindowControls from '../components/WindowControls.vue'
-import { toMediaUrl } from '@shared/media-url'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { describeAsset, isLocalTrack, ONLINE_LYRIC_SOURCES, ONLINE_LYRIC_SOURCE_LABELS, type OnlineLyricSource } from '@shared/types'
 import type { LyricCandidate } from '@shared/library-types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
+import { trackCoverUrl } from '../utils/track-cover'
 import { formatAudioSpec } from '../utils/format'
 import SpectrumVisualizer from '../components/SpectrumVisualizer.vue'
 import TagMatchDialog from '../components/TagMatchDialog.vue'
@@ -259,14 +259,7 @@ async function onImportLyric(): Promise<void> {
 }
 
 const cover = computed<string | null>(() => {
-  const track = player.currentTrack
-  if (!track) return null
-  if (isLocalTrack(track)) {
-    if (!track.coverPath) return null
-    const encoded = toMediaUrl(track.coverPath)
-    return encoded
-  }
-  return track.picUrl || null
+  return trackCoverUrl(player.currentTrack, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null
 })
 
 const spec = computed(() => {

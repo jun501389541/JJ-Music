@@ -21,19 +21,26 @@ function Inventory([string]$Root) {
   if (-not $folder.PSIsContainer -or ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw 'Legacy data directory is not a regular directory'
   }
-  $entries = @(Get-ChildItem -LiteralPath $Root -Recurse -Force)
-  $lines = @()
-  foreach ($entry in $entries) {
+  # Build relative names from each entry rather than subtracting absolute path
+  # lengths: Windows may mix an 8.3 root such as RUNNER~1 with long child paths.
+  $lines = New-Object 'System.Collections.Generic.List[string]'
+  Add-InventoryEntries -Directory $folder.FullName -RelativeDirectory '' -Lines $lines
+  return ,@($lines.ToArray() | Sort-Object)
+}
+
+function Add-InventoryEntries([string]$Directory, [string]$RelativeDirectory, [System.Collections.Generic.List[string]]$Lines) {
+  foreach ($entry in @(Get-ChildItem -LiteralPath $Directory -Force)) {
     if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
       throw "Legacy data contains a link: $($entry.FullName)"
     }
-    if (-not $entry.PSIsContainer) {
-      $relative = $entry.FullName.Substring($Root.TrimEnd('\').Length + 1)
+    $relative = if ($RelativeDirectory) { Join-Path $RelativeDirectory $entry.Name } else { $entry.Name }
+    if ($entry.PSIsContainer) {
+      Add-InventoryEntries -Directory $entry.FullName -RelativeDirectory $relative -Lines $Lines
+    } else {
       $hash = File-Sha256 $entry.FullName
-      $lines += "$relative|$($entry.Length)|$hash"
+      [void]$Lines.Add("$relative|$($entry.Length)|$hash")
     }
   }
-  return ,@($lines | Sort-Object)
 }
 
 function Copy-Verified([string]$Source, [string]$Target) {
@@ -75,6 +82,17 @@ try {
   $legacyData = Join-Path $InstallDir 'data'
   $legacyPointer = Join-Path $InstallDir 'data-location.json'
   $hasData = Test-Path -LiteralPath $legacyData
+  if ($hasData) {
+    $legacyInfo = Get-Item -LiteralPath $legacyData -Force
+    if ($legacyInfo.PSIsContainer -and
+        -not ($legacyInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        @(Get-ChildItem -LiteralPath $legacyData -Force).Count -eq 0) {
+      # The legacy installer creates this directory even when no account has
+      # ever stored shared data there. An empty regular directory has no
+      # profile ownership to guess and can be removed by the old uninstaller.
+      $hasData = $false
+    }
+  }
   $hasPointer = Test-Path -LiteralPath $legacyPointer
   if (-not $hasData -and -not $hasPointer) { exit 0 }
 

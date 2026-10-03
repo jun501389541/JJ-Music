@@ -94,6 +94,13 @@ test('per-machine legacy data fails closed because the current account cannot cl
   assert.equal(await readFile(join(f.install, 'data', 'settings.json'), 'utf8'), '{"theme":"dark"}\n')
 })
 
+test('per-machine install allows an empty legacy data directory with no profiles to claim', async () => {
+  const f = await fixture(false)
+  await mkdir(join(f.install, 'data'))
+  const result = run(f, 'all')
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+})
+
 test('per-machine legacy pointer alone also fails closed before copying it into an account', async () => {
   const f = await fixture(false)
   const pointer = JSON.stringify({ dir: join(f.root, 'external') })

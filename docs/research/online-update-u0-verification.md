@@ -1,6 +1,6 @@
 # 在线更新 U0：旧版数据安全核查
 
-状态：**U0 隔离环境数据安全验收通过**，绑定候选 Setup SHA-256 `4E35B04C18EECA5B74BB1DB03A5B8FCD6623E8EA5B8DF2B0852BF339702790FF`。全机旧版若有共享资料或指针，安装器必须先拒绝自动迁移（退出码 42）；人工确认账户归属、备份和逐文件恢复后可重试。本轮候选仍标记为 0.2.0，验证的是旧版卸载与资料迁移路径；真实升版和自动更新属于尚未完成的 U4。签名发布与公开发行开关保持关闭。
+状态：**v0.3.1 U0 隔离环境验收通过**，本地候选 Setup SHA-256 为 `793B8432194DDC019E45BE7057A75937B9104F1E292923BA78DD04A047A4D692`，以已校验的官方 v0.2.0 Setup 为旧版样本，完成下文五项 Windows Sandbox 场景。全机旧版存在共享资料时，安装器先以退出码 42 拒绝；明确样本账户归属、备份并逐文件校验后可重试。此次验证覆盖真实 v0.2.0 到 v0.3.1 安装器升级，不覆盖更新器自动下载、退出与安装流程（U4）。本地候选使用一次性 Ed25519 测试密钥，不得作为公开发行资产；公开发行包须由签名发布工作流生成。
 
 ## 已核实的事实
 
@@ -127,6 +127,20 @@ node tools/probe/upgrade-data.mjs compare 'C:\U0\before.json' 'C:\U0\migrated-pr
 
 早期候选的人工启动曾发现 `electron-updater` CommonJS 具名导入导致主进程报错；进程存活探针因此出现假阳性。导入已改为默认导入后解构，后续沙盒探针要求启动调试端点响应，内容样本还通过 UI 桥接读回实际资料。此历史故障不再作为当前候选的待办。U4 仍须以两个连续版本验证更新、退出与安装流程；不得在日常 Windows 环境运行会卸载旧版的测试。U5 为后续阶段。
 
-交付保存在 `feat/online-update` 分支的独立工作树。U1–U3 的签名发布草稿流程、更新服务、受限 IPC 与界面已实现并通过本地验证；默认构建不嵌入公钥，`JJ_UPDATE_U0_APPROVED` 未设置，更新服务仍报告“不可用”，不会触发检查、下载或安装。真实按用户安装已确认 NSIS 写入 `nsis-install.marker`；ZIP 不包含该标记。U0 的隔离环境数据安全矩阵已通过；U4 尚未执行，也没有创建或公开 GitHub Release。
+历史状态记录（截至 2026-09-28，发布前）：交付保存在 `feat/online-update` 分支的独立工作树。U1–U3 的签名发布草稿流程、更新服务、受限 IPC 与界面已实现并通过本地验证；不带发行配置的默认构建不嵌入公钥，因此更新服务保持“不可用”，不会触发检查、下载或安装。真实按用户安装已确认 NSIS 写入 `nsis-install.marker`；ZIP 不包含该标记。当时 U0 已通过隔离环境矩阵，U4 尚未执行，也没有创建或公开 GitHub Release。
 
 2026-09-26 后续开发验证：`npm run verify` 为 37/37 套件通过；`npm run dist` 生成 NSIS、ZIP、`latest.yml` 和固定仓库 `app-update.yml`；`node tools/probe/smoke-update-release.mjs release 0.2.0` 使用一次性测试密钥对真实打包产物签名、验签、核对六项资产后删除测试签名文件。打包生成的 `out/main/index.js` 显示公钥为空且 `available` 条件包含 `false`；`release/win-unpacked/resources/nsis-install.marker` 不存在。这些结果仅证明默认发行包的更新入口关闭，不证明 U0 或 U4 的安装安全。
+
+## 2026-09-29 v0.3.1 发布候选 U0 复验
+
+本轮真实旧版 Setup SHA-256 为 `0BD693A17390003757025645D2B121780A73A9FC985C49276D3CA78C7C6EF7C1`；所有场景的新候选 Setup SHA-256 均为 `793B8432194DDC019E45BE7057A75937B9104F1E292923BA78DD04A047A4D692`。沙盒输出位于执行工作树 `D:\Workspace\Codex\JJ Music\JJ-Music-online-update\.cache\u0-sandbox\v031-output-793B8432-run1\`，此目录是临时证据，不属于发行物。
+
+| 场景与证据 | 验收结果 |
+| --- | --- |
+| 全机安装，旧版仅留下空 `data`：`allusers-empty-data\allusers.json` | 官方 0.2.0 与新候选安装退出码均为 0；确认旧 `data` 存在但条目数为 0。新安装后旧目录清理，NSIS 标记存在；管理员及标准账户分别在自己的 Roaming `jj-music` 目录生成 35 个资料文件，ProgramData 和安装目录均未承载用户资料。 |
+| 按用户安装并迁移内容：`content\content.json`、`content\content-ui.json` | 旧资料共 39 个文件，迁移前后逐文件哈希一致；应用桥接探针读回当前账户 Roaming 目录、`light` 主题、音量 `0.37`、一首曲目的 `U0 Fixture Playlist`、`U0 Fixture Track` 曲库记录和禁用的 `U0 Fixture Source`。 |
+| 全机共享资料拒绝、备份、恢复与重试：`recovery\recovery.json` | 首次安装退出码 42，旧 EXE 与旧目录保留，未写新版标记。确认样本账户后，36 个旧文件的独立备份与账户目标逐文件校验通过；旧目录移出安装路径后重试退出码 0，备份和目标再次校验通过，应用读取到该账户 Roaming 目录及原设置。 |
+| 外部数据目录指针：`external\external.json` | 安装退出码 0；新指针与旧指针匹配，外部资料哈希保持一致，旧安装目录残留存在独立备份。新版启动成功，启动后没有重新创建安装目录 `data`，外部资料仍通过校验。 |
+| 目标资料冲突：`conflict\conflict.json` | 安装退出码 40；旧 EXE、旧资料哨兵和已有冲突目标均保留，目标前后哈希一致，未写入新版 NSIS 标记。 |
+
+上述五项均使用同一 SHA-256 的 v0.3.1 本地候选和真实官方 0.2.0 Setup。候选构建通过 `npm run verify`（38/38 套件）、`npm run dist` 与 `tools/probe/smoke-update-release.mjs` 的一次性密钥签名/验签及资产检查；临时签名文件已由探针清除。本地测试密钥与签名结果不用于发布。此矩阵验证安装器的数据迁移与失败保护；U4 的在线自动更新仍须在后续用两个连续公开版本独立验收。

@@ -29,10 +29,9 @@ export const router = createRouter({
       meta: { title: '最近播放' }
     },
     {
+      // Preserve old bookmarks while the retired JJ-only leaderboard feature is unavailable.
       path: '/charts',
-      name: 'charts',
-      component: () => import('../views/LeaderboardView.vue'),
-      meta: { title: '榜单' }
+      redirect: '/discover'
     },
     {
       path: '/library',

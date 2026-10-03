@@ -109,6 +109,7 @@ await build({
 await build({
   ...shared,
   entryPoints: [
+        join(repoRoot, 'src', 'shared', 'types.ts'),
         join(repoRoot, 'src', 'shared', 'media-url.ts'),
         // The overlay's geometry maths is the part of the feature that can fail
         // silently, so the suites import it the same way the app does.

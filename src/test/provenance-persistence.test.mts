@@ -34,7 +34,7 @@ const { toLegacyOnline } = await import('./sources/legacy-music-info.js')
 // is a build-time alias that a copied `.mjs` cannot resolve. Note the absence of a
 // type assertion: a copied `.mjs` is executed by plain Node, which does not know
 // `as`. The `.mts` source is type-checked separately by tsc.
-const { isLocalTrack } = await import('../shared/types.js')
+const { isLocalTrack } = await import('./shared/types.js')
 
 let dataDir = ''
 

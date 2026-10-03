@@ -545,8 +545,6 @@ export class SourceRuntimeHost {
       for (const [id, pending] of [...state.pending]) {
         const response = readResponse(dir, id)
         if (!response) continue
-        clearTimeout(pending.timer)
-        state.pending.delete(id)
         if (!response.ok) {
           pending.reject(new Error(response.error ?? '音源请求失败'))
           continue
@@ -662,8 +660,6 @@ export class SourceRuntimeHost {
       case 'response': {
         const pending = message.id !== undefined ? state.pending.get(message.id) : undefined
         if (!pending) return
-        clearTimeout(pending.timer)
-        state.pending.delete(message.id!)
         // Size-checked here, at the shared boundary, so both protocols inherit
         // the same ceiling — see `MAX_RESPONSE_BYTES` for why the child's own
         // memory limit does not cover this direction of travel.
@@ -682,8 +678,6 @@ export class SourceRuntimeHost {
       case 'response-error': {
         const pending = message.id !== undefined ? state.pending.get(message.id) : undefined
         if (!pending) return
-        clearTimeout(pending.timer)
-        state.pending.delete(message.id!)
         pending.reject(new Error(message.error ?? '音源请求失败'))
         break
       }
@@ -883,7 +877,16 @@ export class SourceRuntimeHost {
       }
 
       try {
-        this.send(state, id, state.sources[0]?.id ?? '', String(payload.capability ?? ''), payload)
+        const lxSource = payload.source
+        const lxAction = payload.action
+        if (typeof lxSource === 'string' && typeof lxAction === 'string' && 'info' in payload) {
+          // LX v2 sends one action request as `{ source, action, info }`. Keep
+          // that wire shape intact; the JJ capability protocol below uses the
+          // whole request object as its `info` payload.
+          this.send(state, id, lxSource, lxAction, payload.info)
+        } else {
+          this.send(state, id, state.sources[0]?.id ?? '', String(payload.capability ?? ''), payload)
+        }
       } catch (error) {
         // A dispatch failure is this request's failure, not an uncaught throw:
         // the caller awaits a result either way.

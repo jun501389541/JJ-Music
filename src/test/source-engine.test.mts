@@ -185,6 +185,67 @@ const engine = new SourceEngine(store, workerPath)
 
 section('5b. Restricted-token launch (file handoff)')
 
+const lxLifecycleScript = [
+  '/*! * @name LX 生命周期夹具 * @version 2.0.0 */',
+  'lx.on(lx.EVENT_NAMES.request, ({ source, action }) => {',
+  '  console.log("LX request", source, action)',
+  '  if (action !== "musicUrl") throw new Error("unexpected action: " + action)',
+  '  return "https://cdn.test/" + source + ".flac"',
+  '})',
+  'lx.send(lx.EVENT_NAMES.updateAlert, { version: "2.0.1", message: "update available" })',
+  'lx.send(lx.EVENT_NAMES.inited, { status: true, sources: {',
+  '  wy: { type: "music", actions: ["musicUrl"], qualitys: ["128k"] },',
+  '  tx: { type: "music", actions: ["musicUrl"], qualitys: ["128k"] }',
+  '} })'
+].join('\n')
+
+async function verifyLxLifecycle(label, transport) {
+  const dir = mkdtempSync(join(tmpdir(), `jjmusic-${transport}-lx-`))
+  const transportStore = new SourceStore(dir)
+  transportStore.load()
+  const meta = transportStore.import(lxLifecycleScript, `${label} LX 音源`)
+  transportStore.setEnabled(meta.id, true)
+  const transportEngine = new SourceEngine(transportStore, workerPath, transport)
+  let startupError = ''
+  try {
+    await transportEngine.reload(meta.id)
+  } catch (error) {
+    startupError = error instanceof Error ? error.message : String(error)
+  }
+
+  const sources = transportEngine.getSources().map((item) => item.id).sort()
+  const storeMeta = transportStore.metas().find((item) => item.id === meta.id)
+  check(`${label} LX v2 initialises`, !startupError && sources.includes('wy'), startupError || `sources=${sources.join(',')}; lastError=${storeMeta?.lastError ?? ''}`)
+  check(`${label} LX v2 advertises both platforms`, sources.includes('wy') && sources.includes('tx'), sources.join(','))
+  check(`${label} receives updateAlert`, transportEngine.getLogs(meta.id).some((line) => line.includes('update available')), transportEngine.getLogs(meta.id).join(' | '))
+
+  for (const source of ['wy', 'tx']) {
+    const track = {
+      id: `${source}_lifecycle`, name: '夹具歌曲', singer: '夹具歌手', source,
+      interval: '03:00', albumName: '', picUrl: '', meta: {}
+    }
+    const outcome = await Promise.race([
+      transportEngine.getMusicUrl(source, track, '128k').then(
+        (result) => ({ result }),
+        (error) => ({ error: error instanceof Error ? error.message : String(error) })
+      ),
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 5000))
+    ])
+    const logs = transportEngine.getLogs(meta.id).join(' | ')
+    check(
+      `${label} requests ${source} through LX`,
+      outcome?.result?.url === `https://cdn.test/${source}.flac`,
+      JSON.stringify({ outcome, dead: transportEngine.runtimes.get(meta.id)?.host.dead, pending: transportEngine.runtimes.get(meta.id)?.host.pending.size, logs })
+    )
+  }
+
+  await transportEngine.stopAll()
+  rmSync(dir, { recursive: true, force: true })
+}
+
+await verifyLxLifecycle('IPC', 'ipc')
+if (process.platform === 'win32') await verifyLxLifecycle('Windows file transport', 'file')
+
 check('Windows enables restricted source launch', process.platform !== 'win32' || supportsRestrictedLaunch())
 
 if (!supportsRestrictedLaunch()) {
@@ -209,7 +270,7 @@ if (!supportsRestrictedLaunch()) {
   const started = Date.now()
   let bootFailed = null
   try {
-    await rEngine.startAll()
+    await rEngine.reload(rMeta.id)
   } catch (error) {
     bootFailed = error instanceof Error ? error.message.slice(0, 100) : String(error)
     console.log(`  restricted boot failed: ${bootFailed}`)
@@ -221,7 +282,7 @@ if (!supportsRestrictedLaunch()) {
   check(
     'restricted-mode sources are advertised',
     rSources.length > 0,
-    rSources.map((s) => s.id).join(',')
+    `sources=${rSources.map((s) => s.id).join(',') || '(none)'}; lastError=${rStore.metas()[0]?.lastError ?? ''}`
   )
   check(
     'restricted boot stays within a sane time',

@@ -107,6 +107,8 @@ export class SourceEngine {
   private readonly store: SourceStore
   /** Path to the forked host-process entry point. */
   private readonly hostPath: string
+  /** Transport override used by protocol regression tests; production stays platform-selected. */
+  private readonly transport: 'auto' | 'file' | 'ipc'
   private readonly listeners = new Set<Partial<SourceEngineEvents>>()
   /**
    * Source id -> script ids that can serve it, in priority order.
@@ -119,9 +121,10 @@ export class SourceEngine {
    */
   private sourceProviders = new Map<SourceId, string[]>()
 
-  constructor(store: SourceStore, hostPath: string) {
+  constructor(store: SourceStore, hostPath: string, transport: 'auto' | 'file' | 'ipc' = 'auto') {
     this.store = store
     this.hostPath = hostPath
+    this.transport = transport
   }
 
   /**
@@ -160,11 +163,10 @@ export class SourceEngine {
         }),
         // The host has already normalised `state.sources`; indexing them is
         // this engine's job, because ownership is a policy of the LX side.
-        onReady: (state) => {
-          this.rebuildOwners()
-          this.emit('sourcesChanged')
-          void state
-        },
+        // The host reports ready before `start()` can register the runtime.
+        // Publishing here made observers see an empty engine snapshot and left
+        // the provider index permanently empty after a successful boot.
+        onReady: () => undefined,
         onExit: (state, info) => this.handleHostExit(state, info),
         onLog: (apiId, line) => {
           const runtime = this.runtimes.get(apiId)
@@ -175,7 +177,7 @@ export class SourceEngine {
       // Derive the transport from the platform, exactly as before: the
       // restricted launcher is what win32 uses and what the file transport
       // exists for.
-      'auto'
+      this.transport
     )
     return this.host
   }
@@ -329,6 +331,8 @@ export class SourceEngine {
     }
     const runtime: ScriptRuntime = { api, host: state, sources: state.sources }
     this.runtimes.set(api.meta.id, runtime)
+    this.rebuildOwners()
+    this.emit('sourcesChanged')
 
     try {
       await state.ready

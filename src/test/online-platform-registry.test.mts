@@ -48,8 +48,24 @@ test('a sole enabled kw source opens only kw capabilities it can serve', () => {
   assert.deepEqual(registry.platforms('lyrics'), ['kw'])
   assert.deepEqual(registry.platforms('playlistImport'), ['kw'])
   assert.deepEqual(registry.platforms('artistImage'), [])
+  assert.deepEqual(registry.platforms('artistDetail'), [])
+  assert.deepEqual(registry.platforms('albumDetail'), [])
   assert.equal(registry.allows('tx', 'search'), false)
   assert.equal(registry.allows('local', 'search'), false)
+})
+
+test('precision artist and album details are enabled only for an active wy source', () => {
+  const { registry, enabled, setConsent, setRuntimes } = fixture()
+  enabled.add('wy-api')
+  setConsent(true)
+  setRuntimes([{ apiId: 'wy-api', sources: [source('wy')] }])
+
+  assert.deepEqual(registry.platforms('artistDetail'), ['wy'])
+  assert.deepEqual(registry.platforms('albumDetail'), ['wy'])
+
+  enabled.delete('wy-api')
+  assert.deepEqual(registry.platforms('artistDetail'), [])
+  assert.deepEqual(registry.platforms('albumDetail'), [])
 })
 
 test('eligibility is re-evaluated from enabled healthy scripts and musicUrl declarations', () => {

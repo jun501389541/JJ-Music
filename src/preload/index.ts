@@ -18,6 +18,10 @@ import type {
   IpcResult,
   LocalMusicInfo,
   LyricResult,
+  OnlineAlbumRef,
+  OnlineArtistRef,
+  OnlineEntityCandidates,
+  OnlineEntityPage,
   OnlineLyricSource,
   OnlineMusicInfo,
   PendingAsset,
@@ -282,7 +286,18 @@ const api = {
       invoke<LyricResult & { picUrl: string; asset: AssetRef | null; cover: AssetRef | undefined }>(
         IPC.musicEnrich,
         musicInfo, only, requestId
-      )
+    )
+  },
+
+  onlineDetails: {
+    artistPage: (source: SourceId, id: string, page = 1, requestId?: string) =>
+      invoke<OnlineEntityPage<OnlineArtistRef>>(IPC.onlineArtistPage, source, id, page, requestId),
+    albumPage: (source: SourceId, id: string, page = 1, requestId?: string) =>
+      invoke<OnlineEntityPage<OnlineAlbumRef>>(IPC.onlineAlbumPage, source, id, page, requestId),
+    artistCandidates: (source: SourceId, name: string, requestId?: string) =>
+      invoke<OnlineEntityCandidates<OnlineArtistRef>>(IPC.onlineArtistCandidates, source, name, requestId),
+    albumCandidates: (source: SourceId, name: string, requestId?: string) =>
+      invoke<OnlineEntityCandidates<OnlineAlbumRef>>(IPC.onlineAlbumCandidates, source, name, requestId)
   },
 
   artists: {

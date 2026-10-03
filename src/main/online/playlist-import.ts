@@ -41,10 +41,19 @@ export function playlistTrack(source: SourceId, item: Row): OnlineMusicInfo | nu
   }
   let id='', name='', singer='', album='', pic='', seconds=0
   let meta: OnlineMusicInfo['meta']={}
+  let artistRefs: OnlineMusicInfo['artistRefs']
+  let albumRef: OnlineMusicInfo['albumRef']
   if(source==='wy') {
-    id=String(item.id||'');name=item.name;singer=(item.ar||item.artists||[]).map((s:Row)=>s.name).join('、')
+    id=String(item.id||'');name=item.name
+    const refs: NonNullable<OnlineMusicInfo['artistRefs']>=(item.ar||item.artists||[]).flatMap((artist:Row)=> {
+      if(typeof artist.name!=='string' || !artist.name.trim())return []
+      return [{name:artist.name.trim(),...(artist.id!=null?{id:String(artist.id)}:{}),...(artist.picUrl?{pictureUrl:String(artist.picUrl)}:{})}]
+    })
+    artistRefs=refs
+    singer=refs.map(artist=>artist.name).join('、')
     const al=item.al||item.album||{};album=al.name;pic=al.picUrl;seconds=(item.dt||item.duration||0)/1000
     meta={songmid:id,albumId:al.id}
+    if(al.id!=null && typeof al.name==='string' && al.name.trim())albumRef={id:String(al.id),name:al.name.trim(),...(pic?{coverUrl:String(pic)}:{}),...(refs.length?{artistRefs:refs}:{})}
   } else if(source==='tx') {
     id=String(item.mid||item.songmid||'');name=item.title||item.songname||item.name;singer=(item.singer||[]).map((s:Row)=>s.name).join('、')
     const al=item.album||{};album=al.name||item.albumname;const mid=al.mid||item.albummid
@@ -60,7 +69,7 @@ export function playlistTrack(source: SourceId, item: Row): OnlineMusicInfo | nu
       qualitys:[['128k',id],['320k',item['320hash']||item.hash_320],['flac',item.sqhash||item.hash_flac]].filter(([,hash])=>hash).map(([type,hash])=>({type,hash}))}
   }
   if(!id || typeof name!=='string' || !name.trim())return null
-  return {id:`${source}_${id}`,name,singer:String(singer||''),source,albumName:album||'',picUrl:pic||'',interval:`${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`,meta}
+  return {id:`${source}_${id}`,name,singer:String(singer||''),source,albumName:album||'',...(artistRefs?.length?{artistRefs}:{}),...(albumRef?{albumRef}:{}),picUrl:pic||'',interval:`${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`,meta}
 }
 
 export async function importPlaylist(source: SourceId,input: string,http: typeof fetch=fetch): Promise<ImportedPlaylist> {

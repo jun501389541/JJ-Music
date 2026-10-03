@@ -7,6 +7,8 @@ export type OnlineCapability =
   | 'cover'
   | 'playlistImport'
   | 'artistImage'
+  | 'artistDetail'
+  | 'albumDetail'
 
 export interface OnlineSourceRuntime {
   apiId: string
@@ -21,7 +23,7 @@ export interface OnlinePlatformRegistryOptions {
 
 export const ONLINE_PLATFORM_CAPABILITIES: Readonly<Record<string, readonly OnlineCapability[]>> = {
   tx: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage'],
-  wy: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage'],
+  wy: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'artistDetail', 'albumDetail'],
   kw: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport'],
   kg: ['search', 'hotWords', 'cover', 'playlistImport', 'artistImage'],
   mg: ['search', 'lyrics', 'cover', 'playlistImport', 'artistImage']

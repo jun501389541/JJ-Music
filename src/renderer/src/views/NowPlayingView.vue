@@ -11,7 +11,7 @@ import AppIcon from '../components/AppIcon.vue'
 import PlayerBar from '../components/PlayerBar.vue'
 import WindowControls from '../components/WindowControls.vue'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { describeAsset, isLocalTrack, ONLINE_LYRIC_SOURCES, ONLINE_LYRIC_SOURCE_LABELS, type OnlineLyricSource } from '@shared/types'
+import { describeAsset, isLocalTrack, ONLINE_LYRIC_SOURCES, ONLINE_LYRIC_SOURCE_LABELS, type OnlineAlbumRef, type OnlineArtistRef, type OnlineLyricSource } from '@shared/types'
 import type { LyricCandidate } from '@shared/library-types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -280,6 +280,51 @@ const albumName = computed(() => {
   const track = player.currentTrack
   return track && 'albumName' in track ? track.albumName ?? '' : ''
 })
+
+/** Exact source IDs stay attached to each artist; legacy rows remain name-only candidates. */
+const onlineArtistLinks = computed<OnlineArtistRef[]>(() => {
+  const track = player.currentTrack
+  if (!track || isLocalTrack(track)) return []
+  const refs = track.artistRefs?.length
+    ? track.artistRefs
+    : track.singer.split('、').map((name) => ({ name: name.trim() }))
+  return refs.filter((artist) => artist.name.trim())
+})
+
+/** Fall back to the legacy meta.albumId without confusing it with a local album. */
+const onlineAlbumLink = computed<OnlineAlbumRef | null>(() => {
+  const track = player.currentTrack
+  if (!track || isLocalTrack(track)) return null
+  const name = track.albumRef?.name ?? track.albumName ?? ''
+  if (!name.trim()) return null
+  const rawId = track.albumRef?.id ?? track.meta.albumId
+  return {
+    name: name.trim(),
+    ...(rawId !== undefined && rawId !== null ? { id: String(rawId) } : {})
+  }
+})
+
+async function openOnlineArtist(artist: OnlineArtistRef): Promise<void> {
+  const track = player.currentTrack
+  if (!track || isLocalTrack(track)) return
+  await router.push({
+    name: 'online-artist',
+    params: { source: track.source, ...(artist.id ? { id: artist.id } : {}) },
+    ...(!artist.id ? { query: { name: artist.name } } : {})
+  })
+  ui.nowPlaying = false
+}
+
+async function openOnlineAlbum(album: OnlineAlbumRef): Promise<void> {
+  const track = player.currentTrack
+  if (!track || isLocalTrack(track)) return
+  await router.push({
+    name: 'online-album',
+    params: { source: track.source, ...(album.id ? { id: album.id } : {}) },
+    ...(!album.id ? { query: { name: album.name } } : {})
+  })
+  ui.nowPlaying = false
+}
 
 const lines = computed(() => player.lyrics?.lines ?? [])
 
@@ -622,7 +667,21 @@ defineExpose({ playArtworkFlightBack })
           exists first, so the cold-start wording survives. The album and spec
           segments below keep their own conditions untouched.
         -->
-        <span class="np__meta-text">{{ player.currentTrack ? (player.currentTrack.singer || '未知艺术家') : '选择一首歌曲，开始聆听' }}<template v-if="albumName"> · {{ albumName }}</template><template v-if="spec"> · {{ spec }}</template></span>
+        <span class="np__meta-text">
+          <template v-if="player.currentTrack">
+            <template v-if="onlineArtistLinks.length">
+              <template v-for="(artist, index) in onlineArtistLinks" :key="`${artist.id ?? artist.name}-${index}`">
+                <span v-if="index">、</span>
+                <button class="np__entity-link" type="button" :title="artist.id ? `平台 ID：${artist.id}` : '查看候选艺术家'" @click.stop="openOnlineArtist(artist)">{{ artist.name }}</button>
+              </template>
+            </template>
+            <span v-else>{{ player.currentTrack.singer || '未知艺术家' }}</span>
+            <template v-if="onlineAlbumLink"> · <button class="np__entity-link" type="button" :title="onlineAlbumLink.id ? `平台 ID：${onlineAlbumLink.id}` : '查看候选专辑'" @click.stop="openOnlineAlbum(onlineAlbumLink)">{{ onlineAlbumLink.name }}</button></template>
+            <template v-else-if="albumName"> · {{ albumName }}</template>
+            <template v-if="spec"> · {{ spec }}</template>
+          </template>
+          <template v-else>选择一首歌曲，开始聆听</template>
+        </span>
         <!--
           Provenance belongs here rather than above the lyrics: the user needs
           to know whether the line they are reading is the file's own tag, a
@@ -1108,6 +1167,7 @@ code {
 .np__picker-item{width:100%;display:flex;flex-direction:column;gap:5px;padding:13px 15px;border:1px solid #ffffff14;border-radius:8px;background:#ffffff0a;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 .np__picker-item:hover{background:#ffffff17;border-color:#ffffff2e}
 .np__picker-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500}
+.np__entity-link{appearance:none;border:0;padding:0;background:none;color:inherit;cursor:pointer;font:inherit;text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--text-secondary) 55%,transparent);text-underline-offset:2px;-webkit-app-region:no-drag}.np__entity-link:hover{color:var(--accent);text-decoration-color:currentColor}
 .np__picker-badge{font-style:normal;font-size:10px;padding:1px 6px;border-radius:4px;background:var(--accent);color:#fff}
 /* Outlined, so it stays readable next to the solid 逐行 marker on the same row. */
 .np__picker-badge.is-best{background:transparent;border:1px solid var(--accent);color:var(--accent)}

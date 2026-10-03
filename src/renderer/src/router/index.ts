@@ -65,6 +65,20 @@ export const router = createRouter({
       meta: { title: '艺术家' }
     },
     {
+      path: '/online/artist/:source/:id?',
+      name: 'online-artist',
+      component: () => import('../views/OnlineEntityDetailView.vue'),
+      props: { kind: 'artist' },
+      meta: { title: '在线艺术家' }
+    },
+    {
+      path: '/online/album/:source/:id?',
+      name: 'online-album',
+      component: () => import('../views/OnlineEntityDetailView.vue'),
+      props: { kind: 'album' },
+      meta: { title: '在线专辑' }
+    },
+    {
       path: '/playlists',
       name: 'playlists',
       component: () => import('../views/PlaylistsView.vue'),

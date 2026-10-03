@@ -121,6 +121,12 @@ export const IPC = {
   musicSearchProviders: 'music:search-providers',
   /** What each platform's users are searching right now, for the search page. */
   musicHotWords: 'music:hot-words',
+  /** Exact-ID, source-scoped online artist and album detail pages. */
+  onlineArtistPage: 'online:artist-page',
+  onlineAlbumPage: 'online:album-page',
+  /** Name-based detail lookup returns choices for the user to select explicitly. */
+  onlineArtistCandidates: 'online:artist-candidates',
+  onlineAlbumCandidates: 'online:album-candidates',
   musicUrl: 'music:url',
   musicLyric: 'music:lyric',
   musicPic: 'music:pic',

@@ -28,7 +28,7 @@ import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { guardedFetch, safeFetchBytes, safeFetchResponse } from './online/url-guard'
 import { IPC } from '@shared/ipc'
-import { assertIpcArgs } from './ipc-validation'
+import { assertIpcArgs, isCancellableRequestId } from './ipc-validation'
 import type { TaskbarState, TransportCommand } from '@shared/ipc'
 import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef, type AssetWriteChoice, type AssetWriteTarget, type LocalMusicInfo, type LyricResult, type OnlineLyricSource, type OnlineMusicInfo, type PendingAsset, type PlayableTrack, type Quality, type SourceId, type UserApiMeta } from '@shared/types'
 import { SourceStore } from './sources/source-store'
@@ -41,6 +41,7 @@ import { searchProviders, fetchNeteaseDetails } from './online/search'
 import { HotWordSource } from './online/hot-words'
 import { SearchRouter } from './online/search-router'
 import { OnlinePlatformRegistry } from './online/platform-registry'
+import { OnlineEntityDetails } from './online/entity-details'
 import { LibraryRouter } from './online/library-router'
 import { PlaybackRouter } from './sources/playback-router'
 import { fetchOnlineLyric } from './online/lyrics'
@@ -330,6 +331,8 @@ interface Services {
   onlinePlatforms: OnlinePlatformRegistry
   /** Routes catalog search and hot words through onlinePlatforms. */
   searchRouter: SearchRouter
+  /** Exact-ID artist/album details and explicit name-based candidate lists. */
+  entityDetails: OnlineEntityDetails
   /** Resolves playback through the shared LX source lifecycle. */
   playbackRouter: PlaybackRouter
   /** Routes playlist imports; leaderboard support is deferred to F1. */
@@ -465,6 +468,10 @@ async function createServices(): Promise<Services> {
     hotWords,
     registry: onlinePlatforms
   })
+  const entityDetails = new OnlineEntityDetails({
+    allows: (source, capability) => onlinePlatforms.allows(source, capability),
+    searchTracks: (source, keyword, page, signal) => searchRouter.search(source, keyword, page, signal)
+  })
   const playbackRouter = new PlaybackRouter({ sourceEngine })
   const libraryRouter = new LibraryRouter({
     registry: onlinePlatforms
@@ -575,7 +582,7 @@ async function createServices(): Promise<Services> {
     trash: (path) => shell.trashItem(path)
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, entityDetails, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -1320,8 +1327,8 @@ function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): v
 const activeRequests = new Map<string, AbortController>()
 async function cancellableRequest<T>(id: unknown, work: (signal?: AbortSignal) => Promise<T>): Promise<T> {
   if (id === undefined) return work()
-  if (typeof id !== 'string' || !/^search-\d{13}-\d{1,12}$/.test(id) || activeRequests.has(id)) {
-    throw new Error('搜索请求编号无效')
+  if (!isCancellableRequestId(id) || activeRequests.has(id)) {
+    throw new Error('请求编号无效')
   }
   const controller = new AbortController()
   activeRequests.set(id, controller)
@@ -1995,6 +2002,15 @@ function registerIpc(): void {
     const searchable = new Set(searchRouter.searchablePlatforms())
     return searchProviders().filter((item) => searchable.has(item.id))
   })
+
+  handle(IPC.onlineArtistPage, (source: SourceId, id: string, page = 1, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.artistPage(source, id, page, signal)))
+  handle(IPC.onlineAlbumPage, (source: SourceId, id: string, page = 1, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.albumPage(source, id, page, signal)))
+  handle(IPC.onlineArtistCandidates, (source: SourceId, name: string, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.artistCandidates(source, name, signal)))
+  handle(IPC.onlineAlbumCandidates, (source: SourceId, name: string, requestId?: string) =>
+    cancellableRequest(requestId, signal => requireServices().entityDetails.albumCandidates(source, name, signal)))
 
   /**
    * What each platform's users are searching right now, for the empty search page.

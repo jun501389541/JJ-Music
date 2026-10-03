@@ -83,6 +83,7 @@ await build({
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
     join(repoRoot, 'src', 'main', 'online', 'platform-registry.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'entity-details.ts'),
     join(repoRoot, 'src', 'main', 'online', 'library-router.ts'),
     join(repoRoot, 'src', 'main', 'online', 'hot-words.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'playback-router.ts'),

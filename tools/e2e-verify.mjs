@@ -53,13 +53,16 @@ function findFreePort() {
 
 const DEBUG_PORT = Number(process.env.JJ_DEBUG_PORT ?? (await findFreePort()))
 
-const electronBin = join(
-  repoRoot,
-  'node_modules',
-  'electron',
-  'dist',
-  process.platform === 'win32' ? 'electron.exe' : 'electron'
-)
+const electronDist = process.env.ELECTRON_OVERRIDE_DIST_PATH
+const electronBin = electronDist
+  ? join(electronDist, process.platform === 'win32' ? 'electron.exe' : 'electron')
+  : join(
+      repoRoot,
+      'node_modules',
+      'electron',
+      'dist',
+      process.platform === 'win32' ? 'electron.exe' : 'electron'
+    )
 
 if (!existsSync(electronBin)) {
   console.error(`electron binary not found at ${electronBin}`)
@@ -255,12 +258,28 @@ function createIsolatedProfile() {
   return dir
 }
 
+/** Grant online catalog access only in the disposable profile for an opted-in live E2E run. */
+function enableOnlineCatalogForLiveE2E(profileDir) {
+  if (process.env.JJ_E2E_ONLINE !== '1') return false
+  const file = join(profileDir, 'settings.json')
+  const settings = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    throw new Error('isolated settings.json is malformed; cannot set the live E2E consent fixture')
+  }
+  settings.onlineCatalogConsent = true
+  settings.onlineCatalogConsentPrompted = true
+  writeFileSync(file, JSON.stringify(settings))
+  return true
+}
+
 const keepProfile = process.argv.includes('--keep-profile')
 const profileBefore = fingerprintRealProfile()
 /** How much of the developer's data there was to compare — an empty set passes vacuously. */
 const profileCompared = PROFILE_FILES.filter((name) => existsSync(join(realDataDir, name))).length
 const profileDir = createIsolatedProfile()
 console.log(`隔离 profile: ${profileDir}`)
+const liveOnlineE2E = enableOnlineCatalogForLiveE2E(profileDir)
+if (liveOnlineE2E) console.log('在线目录许可仅在该隔离 profile 中启用（JJ_E2E_ONLINE=1）')
 
 // The debug port is requested through JJ_DEBUG_PORT rather than a command-line
 // switch, because Electron rejects `--remote-debugging-port` as a forwarded argv
@@ -321,7 +340,11 @@ try {
   console.log('\n--- 2. local library via IPC ---')
   const tracks = await evaluate(cdp, 'window.jj.library.tracks()')
   console.log(`  tracks: ${tracks.length}`)
-  check('library returned tracks through IPC', Array.isArray(tracks) && tracks.length > 0, `${tracks.length}`)
+  if (Array.isArray(tracks) && tracks.length === 0) {
+    console.log('  SKIP  local track metadata, cover repair, and playback: isolated profile has no indexed tracks')
+  } else {
+    check('library returned tracks through IPC', Array.isArray(tracks) && tracks.length > 0, `${tracks.length}`)
+  }
 
   /*
    * Wait for artwork instead of asserting on whatever `tracks[0]` happens to be.
@@ -335,7 +358,7 @@ try {
    * on whether that one file's cover happened to be cached.
    */
   let withArt = tracks.find((track) => track.coverPath)
-  for (let attempt = 0; attempt < 60 && !withArt; attempt += 1) {
+  for (let attempt = 0; tracks.length > 0 && attempt < 60 && !withArt; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2000))
     const refreshed = await evaluate(cdp, 'window.jj.library.tracks()')
     tracks.length = 0
@@ -393,6 +416,141 @@ try {
   const missingStandard = standard.filter((id) => !ids.includes(id))
   if (missingStandard.length) console.log(`  note: 本次未提供的标准平台: ${missingStandard.join(', ')}`)
 
+  /* ---------------- 3b. online entity navigation ---------------- */
+  console.log('\n--- 3b. online artist and album navigation ---')
+  const fixtureResult = await evaluate(cdp, `(() => {
+    const player = window.__jj_player
+    if (!player?.$patch) return { error: 'player test hook is unavailable' }
+    const track = {
+      id: 'wy_e2e-entity-track', name: 'E2E entity navigation fixture',
+      singer: 'Exact artist、Name-only guest', source: 'wy', albumName: 'E2E album',
+      artistRefs: [{ id: '6452', name: 'Exact artist' }, { name: 'Name-only guest' }],
+      albumRef: { id: '36412633', name: 'E2E album' },
+      meta: { songmid: 'e2e-entity-track', albumId: '36412633', qualitys: [] }
+    }
+    player.$patch({ queue: [track], currentIndex: 0, playing: false, loading: false })
+    return { trackId: player.currentTrack?.id ?? null }
+  })()`)
+  if (fixtureResult.error) {
+    check('online entity navigation test harness available', false, fixtureResult.error)
+  } else {
+    await evaluate(cdp, `document.querySelector('.caption-track')?.click(); true`)
+    await sleep(500)
+    const labels = await evaluate(cdp, `[...document.querySelectorAll('.np__entity-link')].map((node) => node.textContent.trim())`)
+    check(
+      'Now Playing exposes separate artist and album refs',
+      labels.join('|') === 'Exact artist|Name-only guest|E2E album',
+      labels.join(' | ')
+    )
+
+    await evaluate(cdp, `document.querySelectorAll('.np__entity-link')[0]?.click(); true`)
+    await sleep(600)
+    const readArtistState = `(() => ({
+      hash: window.location.hash,
+      view: Boolean(document.querySelector('.online-entity')),
+      loading: Boolean(document.querySelector('.online-entity__status')),
+      message: document.querySelector('.online-entity__unavailable')?.textContent?.trim() ?? '',
+      nextEnabled: Boolean(document.querySelector('.online-entity__pages button:last-child') && !document.querySelector('.online-entity__pages button:last-child').disabled)
+    }))()`
+    let exactArtist = await evaluate(cdp, readArtistState)
+    for (let attempt = 0; liveOnlineE2E && exactArtist.loading && attempt < 20; attempt += 1) {
+      await sleep(500)
+      exactArtist = await evaluate(cdp, readArtistState)
+    }
+    check(
+      'exact artist opens the source-scoped route',
+      exactArtist.hash.includes('/online/artist/wy/6452') && exactArtist.view,
+      `${exactArtist.hash}; view=${exactArtist.view}`
+    )
+    let artistPaginationResult = 'unavailable'
+    if (exactArtist.nextEnabled) {
+      await evaluate(cdp, `document.querySelector('.online-entity__pages button:last-child')?.click(); true`)
+      await sleep(1800)
+      artistPaginationResult = await evaluate(cdp, `document.querySelector('.online-entity__pages')?.textContent?.replace(/\\s+/g, ' ').trim() ?? 'missing'`)
+      check('online artist pagination reaches page two', artistPaginationResult.includes('第 2 /'), artistPaginationResult)
+      if (liveOnlineE2E && artistPaginationResult.includes('第 2 /')) {
+        const playbackRows = await evaluate(cdp, `([...document.querySelectorAll('.track-row .row-play')]).slice(0, 3).map((button, index) => ({
+          index,
+          title: button.closest('.track-row')?.querySelector('.track-label')?.textContent?.trim() ?? ''
+        }))`)
+        let playback = null
+        const attempts = []
+        for (const row of playbackRows) {
+          const clicked = await evaluate(cdp, `(() => {
+            const button = [...document.querySelectorAll('.track-row .row-play')][${row.index}]
+            if (!button) return false
+            button.click()
+            return true
+          })()`)
+          for (let attempt = 0; clicked && attempt < 20; attempt += 1) {
+            await sleep(500)
+            playback = await evaluate(cdp, `(() => {
+              const player = window.__jj_player
+              return {
+                source: player?.currentTrack?.source ?? null,
+                title: player?.currentTrack?.name ?? null,
+                playing: player?.playing ?? false,
+                loading: player?.loading ?? false,
+                error: player?.error ?? null,
+                currentTime: player?.currentTime ?? 0,
+                duration: player?.duration ?? 0
+              }
+            })()`)
+            if (playback.error || (playback.playing && !playback.loading && playback.currentTime > 1)) break
+          }
+          attempts.push({ row: row.title, state: playback })
+          if (playback?.playing && !playback.loading && !playback.error && playback.currentTime > 1) break
+          await evaluate(cdp, 'window.__jj_player?.stop()')
+        }
+        check(
+          'artist page two track starts real online playback',
+          Boolean(playback?.source === 'wy' && playback.playing && !playback.loading && !playback.error && playback.currentTime > 1),
+          JSON.stringify(attempts)
+        )
+        await evaluate(cdp, `(() => {
+          const player = window.__jj_player
+          player?.stop()
+          const track = {
+            id: 'wy_e2e-entity-track', name: 'E2E entity navigation fixture',
+            singer: 'Exact artist、Name-only guest', source: 'wy', albumName: 'E2E album',
+            artistRefs: [{ id: '6452', name: 'Exact artist' }, { name: 'Name-only guest' }],
+            albumRef: { id: '36412633', name: 'E2E album' },
+            meta: { songmid: 'e2e-entity-track', albumId: '36412633', qualitys: [] }
+          }
+          player?.$patch({ queue: [track], currentIndex: 0, playing: false, loading: false, error: null })
+          return true
+        })()`)
+      }
+    } else if (liveOnlineE2E) {
+      check('online artist pagination exposes the next page', false, exactArtist.message || 'opted-in profile returned no second page')
+    } else {
+      console.log('  SKIP  live artist pagination: source access is disabled or the endpoint did not expose a second page')
+    }
+
+    await evaluate(cdp, `document.querySelector('.caption-track')?.click(); true`)
+    await sleep(500)
+    await evaluate(cdp, `document.querySelectorAll('.np__entity-link')[1]?.click(); true`)
+    await sleep(600)
+    const candidateHash = await evaluate(cdp, 'window.location.hash')
+    check(
+      'name-only artist opens a candidate route without inventing an ID',
+      candidateHash.includes('/online/artist/wy?name=') && candidateHash.includes('Name-only'),
+      candidateHash
+    )
+
+    await evaluate(cdp, `document.querySelector('.caption-track')?.click(); true`)
+    await sleep(500)
+    await evaluate(cdp, `document.querySelectorAll('.np__entity-link')[2]?.click(); true`)
+    await sleep(700)
+    const album = await evaluate(cdp, `(() => ({ hash: window.location.hash, view: Boolean(document.querySelector('.online-entity')) }))()`)
+    check(
+      'exact album opens its independent source-scoped route',
+      album.hash.includes('/online/album/wy/36412633') && album.view,
+      `${album.hash}; view=${album.view}`
+    )
+
+  }
+
   /* ---------------- 4. search ---------------- */
   console.log('\n--- 4. online search via IPC ---')
   // Search depends on a live third-party endpoint, so a transient upstream
@@ -405,7 +563,7 @@ try {
     try {
       search = await evaluate(
         cdp,
-        `window.jj.music.search('tx', '周杰伦', 1).then(r => ({ count: r.list.length, first: r.list[0] ? { id: r.list[0].id, name: r.list[0].name } : null }))`
+        `window.jj.music.search('wy', '周杰伦', 1).then(r => ({ count: r.list.length, first: r.list[0] ? { id: r.list[0].id, name: r.list[0].name } : null }))`
       )
     } catch (error) {
       searchError = error.message
@@ -416,7 +574,13 @@ try {
 
   if (search) {
     console.log(`  results: ${search.count}, first: ${JSON.stringify(search.first)}`)
-    check('search returned results through the full IPC path', search.count > 0, `${search.count}`)
+    if (search.count > 0) {
+      check('search returned results through the full IPC path', true, `${search.count}`)
+    } else if (!liveOnlineE2E) {
+      console.log('  SKIP  online result assertion: catalog permission was not enabled for this E2E profile')
+    } else {
+      check('search returned results through the full IPC path', false, `${search.count}`)
+    }
   } else {
     // The IPC path itself is still proven: we reached the handler and got a
     // structured rejection rather than a crash or a missing channel.

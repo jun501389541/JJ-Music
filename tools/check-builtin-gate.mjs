@@ -87,6 +87,11 @@ function checkMainProcessWiring() {
   assert.match(source, /catalogConsent:\s*\(\)\s*=>\s*settings\.get\(\)\.onlineCatalogConsent/)
   assert.doesNotMatch(source, /\.settings\.get\(\)\.allowBuiltinOnlineSearch/)
   assert.match(source, /searchRouter\.search\(source, keyword, page, signal\)/)
+  assert.match(source, /allows: \(source, capability\) => onlinePlatforms\.allows\(source, capability\)/)
+  assert.match(source, /entityDetails\.artistPage\(source, id, page, signal\)/)
+  assert.match(source, /entityDetails\.albumPage\(source, id, page, signal\)/)
+  assert.match(source, /entityDetails\.artistCandidates\(source, name, signal\)/)
+  assert.match(source, /entityDetails\.albumCandidates\(source, name, signal\)/)
   assert.match(source, /onlinePlatforms\.platforms\('artistImage'\)/)
   assert.match(source, /onlinePlatforms\.platforms\('lyrics'\)/)
   assert.match(source, /onlinePlatforms\.allows\(music\.source, 'lyrics'\)/)
@@ -160,7 +165,7 @@ try {
     assert.equal(attempts.length, 0)
   })
 
-  await check('主进程搜索、歌词、头像、封面和歌单补全都接入准入表', async () => {
+  await check('主进程搜索、艺术家/专辑详情、歌词、头像、封面和歌单补全都接入准入表', async () => {
     checkMainProcessWiring()
   })
 

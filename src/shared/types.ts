@@ -26,6 +26,12 @@ export type Quality = '128k' | '320k' | 'flac' | 'flac24bit' | 'hires' | 'atmos'
  */
 export const LX_QUALITIES: Quality[] = ['128k', '320k', 'flac', 'flac24bit']
 
+/** Bounds shared by renderer-facing online entity pagination and its service. */
+export const ONLINE_ENTITY_PAGE_SIZE = 20
+export const ONLINE_ARTIST_MAX_PAGES = 500
+export const ONLINE_ALBUM_MAX_TRACKS = 500
+export const ONLINE_ALBUM_MAX_PAGES = Math.ceil(ONLINE_ALBUM_MAX_TRACKS / ONLINE_ENTITY_PAGE_SIZE)
+
 /** Source ids the LX custom-source API recognises. */
 export const LX_SOURCE_IDS = ['kw', 'kg', 'tx', 'wy', 'mg', 'local'] as const
 
@@ -418,6 +424,10 @@ export interface OnlineMusicInfo {
   interval?: string
   /** Album name, when known. */
   albumName?: string
+  /** Platform-scoped artist identities, when the source returned them. */
+  artistRefs?: OnlineArtistRef[]
+  /** Platform-scoped album identity, when the source returned it. */
+  albumRef?: OnlineAlbumRef
   /** Cover art URL, when known. LX calls this `img` in the delivered shape. */
   picUrl?: string
   /**
@@ -445,6 +455,41 @@ export interface OnlineMusicInfo {
     strMediaMid?: string
     qualitys?: Array<{ type: string; size?: string }>
   }
+}
+
+/** One source-scoped artist identity; a name without an id is only a candidate query. */
+export interface OnlineArtistRef {
+  id?: string
+  name: string
+  pictureUrl?: string
+}
+
+/** One source-scoped album identity; a name without an id is only a candidate query. */
+export interface OnlineAlbumRef {
+  id?: string
+  name: string
+  coverUrl?: string
+  artistRefs?: OnlineArtistRef[]
+}
+
+/** Result of a gated artist or album detail request. */
+export interface OnlineEntityPage<T> {
+  status: 'available' | 'unavailable'
+  entity?: T
+  tracks: OnlineMusicInfo[]
+  page: number
+  total: number
+  hasMore: boolean
+  truncated?: boolean
+  message?: string
+}
+
+/** Candidate choices are explicit; callers must not treat the first result as exact. */
+export interface OnlineEntityCandidates<T> {
+  status: 'candidates' | 'unavailable'
+  query: string
+  candidates: T[]
+  message?: string
 }
 
 /* ------------------------------------------------------------------ *

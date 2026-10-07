@@ -1,5 +1,7 @@
 # 架构说明
 
+产品与播放行为的最新开发基线见 [产品与播放开发规则](PRODUCT_RULES.md)（2026-10-07）。本文件记录现有架构；与该基线冲突的旧行为需按后续计划迁移，不代表新规则已经实现。
+
 这份文档记录**为什么**这样实现。功能清单见 `README.md`；LX 音源协议的逐条细节见
 `docs/research/lx-custom-source-api.md`；Salt Player 的界面规格见
 `docs/research/salt-player-ui-spec.md`。

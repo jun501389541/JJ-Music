@@ -1,5 +1,7 @@
 # 在线能力与音源绑定：Requirement Document
 
+> 历史方案提示（2026-10-07）：本文的完整音源路线及“全部在线能力交给音源”要求已被后续决策取代。当前产品与播放规划以 [产品与播放开发规则](../PRODUCT_RULES.md) 为准；本文保留研究和决策历史，不作为冲突事项的执行依据。
+
 日期：2026-09-28　状态：Research 完成，Plan 已评审定稿（见 [实施 Plan](source-bound-online-capabilities-plan.md)）　范围：JJ Music 在线音乐能力（非播放器自身升级）
 
 ## 1. Goal

@@ -173,6 +173,7 @@ export const useLibraryStore = defineStore('library', () => {
     window.jj.sources.onChanged(() => {
       void refreshSources(true)
     })
+    window.jj.library.onChanged?.(() => { void refreshLibrary() })
     window.jj.library.onProgress((progress) => {
       const payload = progress as { done?: boolean } & typeof scanProgress.value
       // The main process runs a background schema migration when it finds an
@@ -347,23 +348,31 @@ export const useLibraryStore = defineStore('library', () => {
     }
   }
 
-  async function importSource(payload: string, name?: string): Promise<UserApiMeta> {
-    const meta = await window.jj.sources.import(payload, name)
+  async function importAndRefresh<T>(action: () => Promise<T>): Promise<T> {
+    let result: T
+    try {
+      result = await action()
+    } catch (error) {
+      // Main may have stored the script disabled before reporting validation
+      // or startup errors. Reveal that record while preserving the real error.
+      await refreshSources().catch(() => undefined)
+      throw error
+    }
     await refreshSources()
-    return meta
+    return result
+  }
+
+  async function importSource(payload: string, name?: string): Promise<UserApiMeta> {
+    return importAndRefresh(() => window.jj.sources.import(payload, name))
   }
 
   /** Pull a script from a link; main fetches it under the same guard as lyrics. */
   async function importSourceUrl(url: string): Promise<UserApiMeta> {
-    const meta = await window.jj.sources.importUrl(url)
-    await refreshSources()
-    return meta
+    return importAndRefresh(() => window.jj.sources.importUrl(url))
   }
 
   async function importSourceFile(): Promise<UserApiMeta[] | null> {
-    const result = await window.jj.sources.importFile()
-    await refreshSources()
-    return result
+    return importAndRefresh(() => window.jj.sources.importFile())
   }
 
   async function removeSource(id: string): Promise<void> {

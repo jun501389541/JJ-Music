@@ -205,10 +205,13 @@ async function verifyLxLifecycle(label, transport, allowShowUpdateAlert = true) 
   const dir = mkdtempSync(join(tmpdir(), `jjmusic-${transport}-lx-`))
   const transportStore = new SourceStore(dir)
   transportStore.load()
-  const payload = allowShowUpdateAlert
-    ? lxLifecycleScript
-    : JSON.stringify({ userApis: [{ id: 'lx-alert-off', name: `${label} LX 音源`, script: lxLifecycleScript, allowShowUpdateAlert: false }] })
-  const meta = transportStore.import(payload, `${label} LX 音源`)
+  const meta = transportStore.import(lxLifecycleScript, `${label} LX 音源`)
+  if (!allowShowUpdateAlert) {
+    const stored = JSON.parse(readFileSync(transportStore.path, 'utf8'))
+    stored.userApis[0].allowShowUpdateAlert = false
+    writeFileSync(transportStore.path, JSON.stringify(stored))
+    transportStore.load()
+  }
   transportStore.setEnabled(meta.id, true)
   const transportEngine = new SourceEngine(transportStore, workerPath, transport)
   const updateNotices = []
@@ -836,10 +839,14 @@ check('the lyric-only source was never asked', actionGuard.calls.join(',') === '
 const stalledSource = { id: 'wy', type: 'music', actions: ['lyric', 'pic'], qualitys: [] }
 const stalledRuntime = fakeRuntime('stalled', '卡住的音源', [stalledSource])
 let dispatched = 0
+let cancelledRequests = 0
 // Discovery goes through the host now, so the fake child has to sit where the
 // transport puts it: `host.child`. `send` is the only member the engine's
 // delegation calls on it.
-stalledRuntime.host.child = { send: () => { dispatched++ } }
+stalledRuntime.host.child = { send: message => {
+  if (message.type === 'request') dispatched++
+  if (message.type === 'cancel') cancelledRequests++
+} }
 const cancellable = multiSourceEngine(
   [{ meta: { id: 'stalled', enabled: true } }],
   [stalledRuntime]
@@ -864,6 +871,7 @@ const picOutcome = await Promise.race([
 check('script cover cancellation rejects promptly', picOutcome === 'cancelled', String(picOutcome))
 check('cancelled cover request is removed from pending', stalledRuntime.host.pending.size === 0, String(stalledRuntime.host.pending.size))
 check('only the requested script actions were dispatched', dispatched === 2, String(dispatched))
+check('both cancelled script actions also notify the source child', cancelledRequests === 2, String(cancelledRequests))
 
 /* ------------------------------------------------------------------ *
  * 9. Shutdown guard and quarantine

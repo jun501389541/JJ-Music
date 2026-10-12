@@ -6,59 +6,61 @@ import { OnlinePlatformRegistry } from './online/platform-registry.js'
 const track = { id: 'kw_1', name: '测试曲目', singer: '歌手', source: 'kw', interval: '03:00' }
 const playlist = { name: '测试歌单', source: 'kw', sourceListId: '123', tracks: [track], total: 2, warnings: ['平台返回了部分结果'] }
 
-function registry(platforms = [], consent = true) {
+function registry(platforms = []) {
   return new OnlinePlatformRegistry({
     sourcesByScript: () => platforms.map(id => ({ apiId: `${id}-api`, sources: [{ id, name: id, actions: ['musicUrl'], qualitys: ['128k'] }] })),
-    isScriptEnabled: () => true,
-    catalogConsent: () => consent
+    isScriptEnabled: () => true
   })
 }
 
-test('playlist import cannot request a platform without a healthy source and catalog consent', async () => {
+test('unsupported platform cannot issue playlist requests', async () => {
   const calls = []
   const router = new LibraryRouter({
-    registry: registry(['kw'], false),
+    registry: registry(['kw']),
     importBuiltin: async (...args) => { calls.push(args); return playlist }
   })
 
-  const result = await router.importTracks('kw', 'https://example.test/playlist/123', '123')
+  const result = await router.importTracks('local', 'https://example.test/playlist/123', '123')
 
   assert.deepEqual(result.list, [])
   assert.equal(result.servedBy, 'none')
   assert.equal(result.reason, 'noProvider')
   assert.match(result.message ?? '', /不可用/)
   assert.deepEqual(calls, [])
-  assert.deepEqual(router.playablePlatforms(), [])
+  assert.deepEqual(router.playablePlatforms(), ['tx', 'wy', 'kw', 'kg', 'mg'])
 })
 
-test('a sole kw source enables only kw playlist imports and preserves metadata', async () => {
+test('app playlist adapters are available independently of LX playback sources', async () => {
   const calls = []
+  let enabled = true
   const router = new LibraryRouter({
-    registry: registry(['kw']),
+    registry: new OnlinePlatformRegistry({
+      sourcesByScript: () => [{ apiId: 'kw-api', sources: [{ id: 'kw', name: 'kw', actions: ['musicUrl'], qualitys: ['128k'] }] }],
+      isScriptEnabled: () => enabled
+    }),
     importBuiltin: async (...args) => { calls.push(args.slice(0, 2)); return { ...playlist, coverUrl: 'https://example.test/cover.jpg' } }
   })
 
   const result = await router.importTracks('kw', 'https://example.test/playlist/123', '123')
-  const denied = await router.importTracks('tx', '123', '123')
+  enabled = false
+  const otherAdapter = await router.importTracks('tx', 'https://example.test/playlist/456', '456')
 
   assert.equal(result.servedBy, 'builtin')
   assert.equal(result.name, '测试歌单')
   assert.equal(result.coverUrl, 'https://example.test/cover.jpg')
   assert.deepEqual(result.warnings, ['平台返回了部分结果'])
   assert.deepEqual(result.list, [track])
-  assert.deepEqual(calls, [['kw', 'https://example.test/playlist/123']])
-  assert.deepEqual(router.playablePlatforms(), ['kw'])
-  assert.equal(denied.servedBy, 'none')
-  assert.deepEqual(calls.length, 1)
+  assert.deepEqual(calls, [['kw', 'https://example.test/playlist/123'], ['tx', 'https://example.test/playlist/456']])
+  assert.deepEqual(router.playablePlatforms(), ['tx', 'wy', 'kw', 'kg', 'mg'])
+  assert.equal(otherAdapter.servedBy, 'builtin')
 })
 
-test('playlist importer receives a live admission check for every request', async () => {
+test('stopping a playback source does not revoke a running playlist request', async () => {
   let enabled = true
   let checks = 0
   const liveRegistry = new OnlinePlatformRegistry({
     sourcesByScript: () => [{ apiId: 'kw-api', sources: [{ id: 'kw', name: 'kw', actions: ['musicUrl'], qualitys: ['128k'] }] }],
-    isScriptEnabled: () => enabled,
-    catalogConsent: () => true
+    isScriptEnabled: () => enabled
   })
   const router = new LibraryRouter({
     registry: liveRegistry,
@@ -72,8 +74,8 @@ test('playlist importer receives a live admission check for every request', asyn
   })
 
   const result = await router.importTracks('kw', '123', '123')
-  assert.equal(result.reason, 'builtinFailed')
-  assert.match(result.message ?? '', /授权已撤销/)
+  assert.equal(result.servedBy, 'builtin')
+  assert.deepEqual(result.list, [track])
   assert.equal(checks, 1)
 })
 

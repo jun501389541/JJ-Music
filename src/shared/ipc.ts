@@ -15,6 +15,7 @@ export const IPC = {
   downloadsAdd: 'downloads:add',
   downloadsCancel: 'downloads:cancel',
   downloadsRetry: 'downloads:retry',
+  downloadsRetryImport: 'downloads:retry-import',
   /**
    * Drop one record, optionally sending the files it produced to the recycle bin.
    *
@@ -153,6 +154,7 @@ export const IPC = {
   /** Drop index entries by track id; never touches the file on disk. */
   libraryRemoveTracks: 'library:remove-tracks',
   libraryProgress: 'library:progress',
+  libraryChanged: 'library:changed',
 
   // Playlists
   playlistList: 'playlist:list',

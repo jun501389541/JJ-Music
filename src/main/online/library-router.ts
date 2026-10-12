@@ -57,7 +57,7 @@ export class LibraryRouter {
 
     try {
       const assertAllowed = () => {
-        if (!this.registry.allows(source, 'playlistImport')) throw new Error('音源已停用或在线目录请求授权已撤销')
+        if (!this.registry.allows(source, 'playlistImport')) throw new Error('该平台暂未提供歌单目录服务')
       }
       const preview = await this.importBuiltin(source, input, assertAllowed)
       assertAllowed()

@@ -4,13 +4,14 @@ import { QUALITY_LABELS, type DownloadTask } from '@shared/types'
 import { useToastStore } from '../stores/toast'
 const tasks=ref<DownloadTask[]>([]),error=ref(''),toast=useToastStore()
 const statuses={queued:'等待下载',resolving:'解析音质',downloading:'下载中',tagging:'写入歌词与封面',completed:'已完成',failed:'失败',cancelled:'已取消'}
+const libraryStates={pending:'待入库',importing:'正在入库',imported:'已入库',failed:'入库失败'}
 const active=computed(()=>tasks.value.filter(t=>!['completed','failed','cancelled'].includes(t.status)).length)
 let stopped=false,timer:ReturnType<typeof setTimeout>
 async function refresh():Promise<void>{try{tasks.value=await window.jj.downloads.list();error.value=''}catch(e){error.value=e instanceof Error?e.message:'读取失败'}}
 async function poll():Promise<void>{await refresh();if(!stopped)timer=setTimeout(()=>void poll(),1000)}
 void poll()
 onBeforeUnmount(()=>{stopped=true;clearTimeout(timer)})
-async function act(task:DownloadTask,action:'cancel'|'retry'):Promise<void>{try{await window.jj.downloads[action](task.id);await refresh()}catch(e){toast.error(e instanceof Error?e.message:'操作失败')}}
+async function act(task:DownloadTask,action:'cancel'|'retry'|'retryImport'):Promise<void>{try{await window.jj.downloads[action](task.id);await refresh()}catch(e){toast.error(e instanceof Error?e.message:'操作失败')}}
 const size=(n:number)=>`${(n/1024/1024).toFixed(1)} MB`
 /**
  * 目录路径由主进程算（它负责"没设置过就用系统下载目录 / JJ Music"这条回落，也负责
@@ -78,9 +79,10 @@ async function confirmRemove(deleteFile:boolean):Promise<void>{
     <strong class="dl-name">{{ task.track.name }}</strong>
     <span class="dl-meta">{{ task.track.singer }} · {{ QUALITY_LABELS[task.quality] }} · {{ task.track.source }}<template v-if="task.resolvedProviderName"> · {{ task.resolvedProviderName }}</template></span>
     <span class="dl-size">{{ task.received ? size(task.received) + (task.total ? ' / ' + size(task.total) : '') : '—' }}</span>
-    <span class="dl-status" :class="task.status">{{ statuses[task.status] }}</span>
-    <span class="dl-actions"><button v-if="!['completed','failed','cancelled'].includes(task.status)" class="btn" @click="act(task,'cancel')">取消</button><button v-if="['failed','cancelled'].includes(task.status)" class="btn" @click="act(task,'retry')">重试</button><button class="btn btn--danger" @click="askRemove(task)">移除记录</button></span>
+    <span class="dl-status" :class="task.status">{{ statuses[task.status] }}<template v-if="task.status==='completed'"> · {{ libraryStates[task.libraryStatus ?? 'pending'] }}</template></span>
+    <span class="dl-actions"><button v-if="!['completed','failed','cancelled'].includes(task.status)" class="btn" @click="act(task,'cancel')">取消</button><button v-if="['failed','cancelled'].includes(task.status)" class="btn" @click="act(task,'retry')">重试</button><button v-if="task.status==='completed' && task.libraryStatus!=='imported'" class="btn" :disabled="task.libraryStatus==='importing'" @click="act(task,'retryImport')">{{ task.libraryStatus==='failed' ? '重试入库' : '导入曲库' }}</button><button class="btn btn--danger" @click="askRemove(task)">移除记录</button></span>
     <!-- 失败原因与警告走第二行：它们是"这条为什么不一样"的答案，塞进任何一列都会把那列撑破。 -->
+    <p v-if="task.libraryError" class="dl-note failed" role="alert">文件已下载，入库失败：{{ task.libraryError }}</p>
     <p v-if="task.error" class="dl-note failed" role="alert">{{ task.error }}</p>
     <p v-for="warning in task.warnings" :key="warning" class="dl-note warning">{{ warning }}</p>
     <progress v-if="task.status==='downloading'" class="dl-progress" :value="task.total?task.received:undefined" :max="task.total||1" aria-label="下载进度"/>

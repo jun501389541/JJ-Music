@@ -30,7 +30,7 @@ const recentRail = computed(() => recent.value.slice(0, 12))
 /* History mixes local files, which carry an extracted cover on disk, with online
  * tracks, which only have the remote art URL. */
 function coverUrl(track: PlayableTrack): string | null {
-  return trackCoverUrl(track, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null
+  return trackCoverUrl(track) ?? null
 }
 
 async function playRecent(index: number): Promise<void> {
@@ -164,8 +164,7 @@ async function shuffleAll(): Promise<void> {
           <div>
             <strong>导入音源脚本</strong>
             <p>
-              支持 LX Music 格式的 <code>.js</code> 音源脚本，也可直接导入你现有的
-              <code>user_api.json</code>，在线播放依赖于此。
+              支持 LX Music 格式的 <code>.js</code> 音源脚本，在线播放需要可用音源。
             </p>
             <button class="btn" type="button" @click="router.push('/sources')">
               前往音源管理

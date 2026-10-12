@@ -118,7 +118,7 @@ function applyTheme(theme: string): void {
  * falls back to the static accent token.
  */
 const currentCover = computed(() => {
-  return trackCoverUrl(player.currentTrack, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null
+  return trackCoverUrl(player.currentTrack) ?? null
 })
 watch([currentCover, () => library.settings.accent, () => library.settings.theme], ([url, accent, theme], _, onCleanup) => {
   let current = true
@@ -149,6 +149,7 @@ watch(
 watch(() => library.settings.playbackRate, value => player.setRate(value))
 watch(() => library.settings.playMode, value => player.setPlayMode(value))
 watch(() => library.settings.playQuality, value => player.setQuality(value))
+watch(() => library.settings.shortAudioTransitions, value => player.setTransitionsEnabled(value !== false))
 watch(() => [library.settings.equalizerGains, library.settings.equalizerName] as const,
   ([gains, name]) => player.setEqualizer(gains, name), { deep: true })
 watch(() => [player.rate, player.playMode, player.quality, player.equalizer, player.equalizerPreset] as const, () => {
@@ -208,7 +209,7 @@ watch(
   () => player.currentTrack,
   track => {
     const wanted = track
-    const coverUrl = trackCoverUrl(track, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id))
+    const coverUrl = trackCoverUrl(track)
     void coverDataUrl(track, coverUrl).then(url => {
       // A fast track change must not let the older decode win the picture.
       if (player.currentTrack === wanted) lyricCover.value = url
@@ -275,7 +276,7 @@ watch(desktopLyricPayload, payload => {
  * draw a scrubber.
  * ---------------------------------------------------------------- */
 startMediaSession(player, track =>
-  trackCoverUrl(track, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id))
+  trackCoverUrl(track)
 )
 
 /**
@@ -455,6 +456,7 @@ onMounted(async () => {
   player.setVolume(library.settings.volume)
   player.setPlayMode(library.settings.playMode)
   player.setQuality(library.settings.playQuality)
+  player.setTransitionsEnabled(library.settings.shortAudioTransitions !== false)
 
   /*
    * The saved output device has to be re-applied here: the setting used to be
@@ -556,6 +558,8 @@ if (import.meta.env['VITE_E2E'] === '1') {
 /** Global shortcuts, mirroring the conveniences of a desktop player. */
 function onKeydown(event: KeyboardEvent): void {
   if (ui.menu || ui.dialog || ui.trackInfo || ui.matchTrack) return
+  // A focused control already handled this key (for example a slider arrow).
+  if (event.defaultPrevented) return
   if (event.key === 'F11') { event.preventDefault(); void window.jj.window.fullscreen(); return }
   const target = event.target as HTMLElement | null
   // Never hijack typing.

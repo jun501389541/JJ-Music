@@ -1,11 +1,8 @@
 /**
  * Persistent store for imported 音源 scripts.
  *
- * The on-disk format is deliberately identical to LX Music's `user_api.json`
- * so that:
- *   - a user can copy their existing `%APPDATA%\lx-music-desktop\LxDatas\user_api.json`
- *     straight into JJ Music and keep every source they had;
- *   - scripts exported from JJ Music can be imported back into LX Music.
+ * Retains the historical `user_api.json` storage shape so existing profiles
+ * continue to load. External imports accept individual source scripts only.
  *
  * LX shape:
  *   { "userApis": [ { id, name, description, version, author, homepage,
@@ -126,7 +123,21 @@ export class SourceStore {
     // Write via a temp file so a crash cannot truncate the user's sources.
     const tmp = `${this.filePath}.tmp`
     writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8')
-    renameSync(tmp, this.filePath)
+    // Windows scanners can briefly hold the destination immediately after a
+    // read. Keep atomic replacement and retry only lock-related errors; never
+    // remove the old file to make the rename succeed. This synchronous store
+    // waits at most 200ms before propagating a persistent error.
+    const pause = new Int32Array(new SharedArrayBuffer(4))
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        renameSync(tmp, this.filePath)
+        return
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (attempt === 4 || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '')) throw error
+        Atomics.wait(pause, 0, 0, 20 * (attempt + 1))
+      }
+    }
   }
 
   /** All scripts, decoded and ready to run. */
@@ -143,16 +154,13 @@ export class SourceStore {
 
   /**
    * Import a script from raw text. `payload` may be plain JavaScript or an
-   * LX-encoded `gz_...` string, and may be wrapped in the `{ userApis: [...] }`
-   * envelope of an exported file.
+   * LX-encoded `gz_...` string. JSON configuration imports are not supported.
    */
   import(payload: string, fallbackName: string, updateUrl?: string): UserApiMeta {
     const entries = parseImportPayload(payload, fallbackName)
     if (entries.length === 0) throw new Error('未在文件中找到可用的音源脚本')
 
-    // A URL belongs only to a single raw script. An exported JSON bundle or
-    // encoded script can contain several sources or hide a different payload;
-    // associating its outer URL with one extracted entry would be misleading.
+    // Keep update URLs only for raw scripts, whose bytes match the linked file.
     const isRawSingleScript = entries.length === 1 && entries[0]?.source === payload.trim()
     const metas = entries.map((entry, index) => this.upsert({
       ...entry,
@@ -456,16 +464,6 @@ export class SourceStore {
     return this.apis.map(toMeta)
   }
 
-  /**
-   * Import an LX Music `user_api.json` wholesale. Existing entries with the
-   * same name are replaced rather than duplicated.
-   */
-  importLxFile(payload: string): UserApiMeta[] {
-    const entries = parseImportPayload(payload, '导入音源')
-    const imported = entries.map((entry) => this.upsert(entry))
-    this.persist()
-    return imported
-  }
 }
 
 function toMeta(api: StoredApi): UserApiMeta {
@@ -555,11 +553,10 @@ function isStoredApi(value: unknown): value is StoredApi {
 }
 
 /**
- * Accepts every shape a user might drop on us:
+ * Accepts individual source scripts:
  *   - a bare `.js` source script
  *   - a `gz_...` encoded script
- *   - an exported `{ userApis: [...] }` file (from LX Music or JJ Music)
- *   - a JSON array of scripts
+ * JSON configurations are rejected across file, paste and URL imports.
  */
 export function parseImportPayload(
   payload: string,
@@ -572,46 +569,19 @@ export function parseImportPayload(
   // clear error instead of storing an unusable empty source.
   if (!trimmed) return out
 
-  const looksLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[')
+  const source = isEncodedScript(trimmed) ? decodeScript(trimmed).trim() : trimmed
+  const looksLikeJson = source.startsWith('{') || source.startsWith('[')
   if (looksLikeJson) {
+    let isJson = false
     try {
-      const parsed = JSON.parse(trimmed) as unknown
-      const list = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray((parsed as StoredFile).userApis)
-          ? (parsed as StoredFile).userApis
-          : null
-      if (list) {
-        for (const item of list) {
-          if (typeof item === 'string') {
-            const source = decodeScript(item).trim()
-            if (source) out.push({ source, name: fallbackName })
-          } else if (isStoredApi(item)) {
-            const source = decodeScript(item.script).trim()
-            if (source) {
-              // Carry the identity through when the file has one, so that
-              // re-importing our own export (or an LX file we previously
-              // wrote) restores the same source rather than replacing it.
-              out.push({
-                source,
-                name: item.name || fallbackName,
-                ...(item.stableId ? { stableId: item.stableId } : {}),
-                ...(typeof item.allowShowUpdateAlert === 'boolean'
-                  ? { allowShowUpdateAlert: item.allowShowUpdateAlert }
-                  : {})
-              })
-            }
-          }
-        }
-        return out
-      }
+      JSON.parse(source)
+      isJson = true
     } catch {
-      // Not actually JSON — fall through and treat it as a raw script.
+      // JavaScript may start with a block or array expression.
     }
+    if (isJson) throw new Error('不支持导入 JSON 音源配置，请选择音源脚本文件')
   }
 
-  // A single script, encoded or plain.
-  const source = isEncodedScript(trimmed) ? decodeScript(trimmed).trim() : trimmed
   if (source) out.push({ source, name: fallbackName })
   return out
 }

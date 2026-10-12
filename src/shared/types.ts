@@ -376,6 +376,19 @@ export interface SourceUpdateCheck {
  * `musicInfo.id` get `undefined`. The correct per-platform id is:
  *   kw -> songmid | kg -> hash | tx -> songmid | wy -> songmid | mg -> copyrightId
  */
+/** Resource for this play only; playlists and collection keep the original row. */
+export interface OnlinePlaybackResource {
+  original: { id: string; source: SourceId }
+  actual: { id: string; source: SourceId; name: string; singer: string }
+  targetQuality: Quality
+  resolvedQuality: Quality
+  providerId?: string
+  providerName?: string
+  providerVersion?: string
+  switched: boolean
+  specification: { state: 'unverified'; codec?: string; bitrate?: number; sampleRate?: number; bitDepth?: number }
+}
+
 export interface OnlineMusicInfo {
   /**
    * `${source}_${songmid}` — our app-wide unique key.
@@ -931,6 +944,8 @@ export interface LastSession {
   queue: PlayableTrack[]
   /** Index of `track` within `queue`. */
   index: number
+  /** Preserve one-track search audition behavior across restart; absent in legacy sessions. */
+  singleTrackAudition?: boolean
   /** When this was written, so a very old session can be ignored. */
   at: number
 }
@@ -952,8 +967,14 @@ export interface QueueSnapshot {
   /** What this list was, e.g. 「歌单 · 忆」 or 「搜索 · 陈奕迅」. */
   label: string
   queue: PlayableTrack[]
-  /** When it started playing, so the panel can order and age them. */
+  /** When the snapshot was created, so the panel can order and age it. */
   at: number
+  /** Current row when this queue was replaced; playback position is not stored here. */
+  currentIndex: number
+  /** Queue mode when it was replaced. */
+  playMode: PlayMode
+  /** Search single-track auditions stop at the end even when a repeat mode is selected. */
+  singleTrackAudition: boolean
 }
 
 export interface AppSettings extends UiPreferences {
@@ -1005,6 +1026,7 @@ export interface AppSettings extends UiPreferences {
   theme: 'dark' | 'light' | 'system'
   volume: number
   playMode: PlayMode
+  shortAudioTransitions: boolean
   /** Prefer local files over online sources when both match. */
   preferLocal: boolean
   /**
@@ -1020,10 +1042,6 @@ export interface AppSettings extends UiPreferences {
   onlineLyricFallback: boolean
   /** Legacy preference retained when reading older settings; it never grants platform access. */
   allowBuiltinOnlineSearch: boolean
-  /** Explicit permission for JJ-owned platform catalog requests when a matching LX source is active. */
-  onlineCatalogConsent: boolean
-  /** Internal one-time disclosure marker for existing installations. */
-  onlineCatalogConsentPrompted: boolean
   /** Download folder for online tracks. */
   downloadFolder: string
   downloadLyric: boolean
@@ -1151,6 +1169,10 @@ export interface DownloadTask {
    */
   remoteSize?: number
   path?: string
+  /** Download publication and local library import are separate outcomes. */
+  libraryStatus?: 'pending' | 'importing' | 'imported' | 'failed'
+  libraryError?: string
+  localTrackId?: string
   /**
    * The `.lrc` this download wrote next to `path`, and only that one.
    *

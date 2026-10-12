@@ -5,6 +5,7 @@
  * so swapping in a native engine changes nothing in this file.
  */
 import { useLibraryStore } from './library'
+import { useToastStore } from './toast'
 import { toMediaUrl } from '@shared/media-url'
 import { stripScriptCoverData, stripScriptCoverDataFromTracks } from '@shared/persisted-track'
 import { defineStore } from 'pinia'
@@ -17,17 +18,18 @@ import type {
   LyricSource,
   OnlineLyricSource,
   OnlineMusicInfo,
+  OnlinePlaybackResource,
   PlayableTrack,
   PlayMode,
   Quality,
-  QueueSnapshot,
-  SourceId
+  QueueSnapshot
 } from '@shared/types'
 import { isLocalTrack, ONLINE_SOURCE_IDS } from '@shared/types'
 import type { ResolvedLyric } from '@shared/library-types'
 import { WebAudioEngine } from '../audio/web-audio-engine'
 import { activeLineIndex, parseLyrics, type ParsedLyrics } from '../audio/lyrics'
 import { cancellableMusic } from '../utils/cancellable-music'
+import { resolveOnlinePlayback, resolutionCacheKey, ResolutionError, RESOLUTION_BUDGET_MS } from '../utils/online-resolver'
 
 /** How to reach a queued track's audio. */
 interface ResolvedSource {
@@ -35,6 +37,8 @@ interface ResolvedSource {
   quality?: Quality
   providerId?: string
   providerName?: string
+  providerVersion?: string
+  resource?: OnlinePlaybackResource
   /** True when the URL came from a 音源 script and may expire. */
   ephemeral: boolean
 }
@@ -43,26 +47,13 @@ const URL_CACHE_TTL_MS = 5 * 60_000
 const URL_CACHE_LIMIT = 128
 
 function urlKey(track: OnlineMusicInfo, preferred: Quality): string {
-  return `${track.source}::${track.id}::${track.providerId ?? ''}::${preferred}`
-}
-
-function sameRecording(a: OnlineMusicInfo, b: OnlineMusicInfo): boolean {
-  const normalize = (text: string): string => text.normalize('NFKC').replace(/\s+/g, '').toLowerCase()
-  // Keep version suffixes (Live/remix/伴奏): they identify different recordings.
-  if (!normalize(a.name) || normalize(a.name) !== normalize(b.name)) return false
-  if (!normalize(a.singer) || normalize(a.singer) !== normalize(b.singer)) return false
-  const seconds = (interval?: string): number | undefined => {
-    if (!interval || !/^\d+:\d{2}$/.test(interval)) return undefined
-    const [minutes, seconds] = interval.split(':').map(Number)
-    return seconds < 60 ? minutes * 60 + seconds : undefined
-  }
-  const left = seconds(a.interval)
-  const right = seconds(b.interval)
-  return left !== undefined && right !== undefined && Math.abs(left - right) <= 5
+  return resolutionCacheKey(track, preferred)
 }
 
 /** Stored snapshots beside the live queue: three pages in the panel, two on disk. */
 const QUEUE_HISTORY_LIMIT = 2
+const PAUSE_FADE_MS = 150
+const SWITCH_FADE_MS = 300
 
 export const usePlayerStore = defineStore('player', () => {
   const engine = shallowRef<AudioEngine | null>(null)
@@ -78,6 +69,8 @@ export const usePlayerStore = defineStore('player', () => {
   const queueHistory = ref<QueueSnapshot[]>([])
   /** The name the live queue was started under, so it can be filed correctly later. */
   const queueLabel = ref('')
+  /** Search double-click is a one-track audition, independent of the global loop mode. */
+  const singleTrackAudition = ref(false)
   const currentIndex = ref(-1)
   const playing = ref(false)
   const loading = ref(false)
@@ -85,6 +78,9 @@ export const usePlayerStore = defineStore('player', () => {
   const currentTime = ref(0)
   const duration = ref(0)
   const volume = ref(0.8)
+  const transitionsEnabled = ref(true)
+  let pausePending = false
+  let toggleGeneration = 0
   const muted = ref(false)
   const playMode = ref<PlayMode>('list')
   const rate = ref(1)
@@ -129,17 +125,20 @@ export const usePlayerStore = defineStore('player', () => {
   const resolvedQuality = ref<Quality | null>(null)
   /** Actual LX script that returned the current playback URL. */
   const resolvedSourceName = ref<string | null>(null)
+  const resolvedResource = shallowRef<OnlinePlaybackResource | null>(null)
   const equalizer = ref<number[]>([...EQUALIZER_PRESETS['平坦']])
   const equalizerPreset = ref('平坦')
 
   /** Cache of resolved URLs, keyed by track id + quality. */
+  let resolutionAbort: AbortController | null = null
+  let sourceEpoch = 0
   const urlCache = new Map<string, { source: ResolvedSource; expiresAt: number }>()
 
   const unsubscribeSourcesChanged = typeof window !== 'undefined' &&
     typeof window.jj?.sources?.onChanged === 'function'
-    ? window.jj.sources.onChanged(() => urlCache.clear())
+    ? window.jj.sources.onChanged(() => { sourceEpoch++; urlCache.clear(); resolutionAbort?.abort() })
     : undefined
-  onScopeDispose(() => unsubscribeSourcesChanged?.())
+  onScopeDispose(() => { unsubscribeSourcesChanged?.(); resolutionAbort?.abort() })
 
   function cacheUrl(key: string, source: ResolvedSource): void {
     urlCache.delete(key)
@@ -172,19 +171,30 @@ export const usePlayerStore = defineStore('player', () => {
 
     const instance = new WebAudioEngine()
     instance.on('progress', (time, total) => {
+      if (loadedTrackId !== currentTrack.value?.id) return
       currentTime.value = time
       duration.value = total
       // Throttled inside `snapshotSession`; the call itself is cheap.
       snapshotSession()
     })
     instance.on('ready', (total) => {
+      if (loadedTrackId !== currentTrack.value?.id) return
       duration.value = total
       loading.value = false
     })
     instance.on('playing', () => {
-      if (currentTrack.value && loadedTrackId === currentTrack.value.id && recordedGeneration !== playGeneration) {
+      const confirmedTrack = currentTrack.value
+      if (!confirmedTrack || loadedTrackId !== confirmedTrack.id) return
+      if (confirmedTrack && loadedTrackId === confirmedTrack.id && recordedGeneration !== playGeneration) {
         recordedGeneration = playGeneration
-        useLibraryStore().recordPlayed(currentTrack.value)
+        const library = useLibraryStore()
+        library.recordPlayed(confirmedTrack)
+        if (!isLocalTrack(confirmedTrack)) {
+          void library.addToPlaylist('default', [confirmedTrack]).catch(error => {
+            const detail = error instanceof Error ? error.message : String(error)
+            useToastStore().error(`播放已开始，但加入默认列表失败：${detail}`)
+          })
+        }
       }
       playing.value = true
       loading.value = false
@@ -197,16 +207,22 @@ export const usePlayerStore = defineStore('player', () => {
       clearStallTimer()
     })
     instance.on('waiting', (isWaiting) => {
+      if (!currentTrack.value || loadedTrackId !== currentTrack.value.id) return
       waiting.value = isWaiting
       if (isWaiting) armStallTimer(playGeneration)
       else clearStallTimer()
     })
     instance.on('ended', () => {
+      if (!currentTrack.value || loadedTrackId !== currentTrack.value.id) return
+      if (pausePending) { playing.value = false; return }
       void handleEnded()
     })
-    instance.on('error', handlePlaybackError)
+    instance.on('error', error => {
+      if (currentTrack.value && loadedTrackId === currentTrack.value.id) handlePlaybackError(error)
+    })
 
     instance.setVolume(volume.value)
+    instance.setTransitionsEnabled?.(transitionsEnabled.value)
     instance.setEqualizer(equalizer.value)
     instance.setMuted(muted.value)
     instance.setRate(rate.value)
@@ -239,95 +255,25 @@ export const usePlayerStore = defineStore('player', () => {
    * The cache is keyed by track id + quality, as before; a failed attempt is
    * deliberately not cached, because availability changes over time.
    */
-  async function resolve(track: PlayableTrack, preferred: Quality): Promise<ResolvedSource> {
-    if (isLocalTrack(track)) {
-      // Encode each path segment but keep the separators intact.
-      const encoded = toMediaUrl(track.path)
-      return { url: encoded, ephemeral: false }
-    }
-
-    const online = track as OnlineMusicInfo
-    const library = useLibraryStore()
-    if (library.settings.preferLocal) {
-      const local = library.tracks.find(item => sameRecording(online, { ...online, name: item.name, singer: item.singer, interval: (item.duration ? `${Math.floor(Math.round(item.duration) / 60)}:${(Math.round(item.duration) % 60).toString().padStart(2, '0')}` : '') }))
-      if (local) return { url: toMediaUrl(local.path), ephemeral: false }
-    }
+  async function resolve(track: PlayableTrack, preferred: Quality, signal: AbortSignal, budgetMs: number): Promise<ResolvedSource> {
+    if (isLocalTrack(track)) return { url: toMediaUrl(track.path), ephemeral: false }
+    const online = toIpcPayload(track)
     const key = urlKey(online, preferred)
     const cached = urlCache.get(key)
-    if (cached && cached.expiresAt > Date.now()) return cached.source
+    if (signal.aborted) throw new ResolutionError('cancelled', '播放解析已取消')
+    if (cached && cached.expiresAt > Date.now() && cached.source.quality === preferred) return cached.source
     urlCache.delete(key)
-
-    const payload = toIpcPayload(online)
-
-    // 1. The platform the track came from.
-    try {
-      const result = await window.jj.music.url(online.source as SourceId, payload, preferred)
-      const resolved: ResolvedSource = {
-        url: result.url,
-        quality: result.quality,
-        providerId: result.providerId,
-        providerName: result.providerName,
-        ephemeral: true
-      }
-      cacheUrl(key, resolved)
-      return resolved
-    } catch (primaryError) {
-      // 2. Every other live platform, matched by song rather than by id.
-      const fallback = await resolveFromAlternateSource(online, preferred)
-      if (fallback) return fallback
-
-      throw primaryError
-    }
-  }
-
-  /**
-   * Try the remaining live platforms for the same recording.
-   *
-   * A match must be close: resolving the wrong song's audio would be far worse
-   * than failing loudly, so the title and artist must both score well and the
-   * duration must agree within a few seconds.
-   */
-  async function resolveFromAlternateSource(
-    track: OnlineMusicInfo,
-    preferred: Quality
-  ): Promise<ResolvedSource | null> {
-    const platforms = await window.jj.sources.available().catch(() => [])
-    const others = platforms
-      .filter(
-        (p) =>
-          p.id !== track.source &&
-          p.actions.includes('musicUrl') &&
-          // Only the known platforms: an unknown id is not a song source.
-          ONLINE_SOURCE_IDS.includes(p.id)
-      )
-      .map((p) => p.id)
-
-    if (others.length === 0) return null
-
-    for (const platform of others) {
-      try {
-        // Find the same recording on this platform.
-        const found = await window.jj.music.search(platform, track.name, 1)
-        const candidate = found.list.find((item) => sameRecording(track, item))
-
-        if (!candidate) continue
-
-        const result = await window.jj.music.url(platform, toIpcPayload(candidate), preferred)
-        const resolved: ResolvedSource = {
-          url: result.url,
-          quality: result.quality,
-          providerId: result.providerId,
-          providerName: result.providerName,
-          ephemeral: true
-        }
-        cacheUrl(urlKey(track, preferred), resolved)
-        return resolved
-      } catch {
-        /* this platform failed too; try the next one */
-      }
-    }
-
-    return null
+    const epoch = sourceEpoch
+    const result = await resolveOnlinePlayback({
+      track: online, preferred, signal, budgetMs,
+      platforms: async () => (await window.jj.sources.available()).filter(item => item.actions.includes('musicUrl') && ONLINE_SOURCE_IDS.includes(item.id)).map(item => item.id),
+      search: async (source, keyword, requestSignal) => (await cancellableMusic(requestSignal, id => window.jj.music.search(source, keyword, 1, id))).list,
+      url: (candidate, requested, requestSignal) => cancellableMusic(requestSignal, id => window.jj.music.url(candidate.source, toIpcPayload(candidate), requested, true, id))
+    })
+    if (signal.aborted || epoch !== sourceEpoch) throw new ResolutionError('cancelled', '音源状态已变化，请重试')
+    // A cached downgrade must never skip the next play's target-tier attempts.
+    if (result.quality === preferred) cacheUrl(key, result)
+    return result
   }
 
   /* ------------------------------------------------------------ *
@@ -348,21 +294,8 @@ export const usePlayerStore = defineStore('player', () => {
   let lyricAbort: AbortController | null = null
   let failureGeneration = -1
   let mayRetryUrl = true
+  let startupDeadline: number | undefined
   let loadedTrackId: string | null = null
-
-  /**
-   * A source that never answers must not hold the player hostage.
-   *
-   * The engine falls through to the next capable 音源 on an outright failure,
-   * but a *hung* request (dead relay, silently dropped connection) just sits in
-   * `pending` until the engine's own 20 s ceiling. Meanwhile the UI shows a
-   * spinner and the user has no way to know whether it is working. Racing the
-   * resolve against a shorter timer lets us report the failure and move on.
-   *
-   * Kept just under the engine's per-request ceiling so this fires first and
-   * the message the user sees comes from here, with the track named.
-   */
-  const URL_RESOLVE_TIMEOUT_MS = 15_000
 
   /** How long audio may stall before we treat it as a failed source. */
   const STALL_TIMEOUT_MS = 20_000
@@ -392,25 +325,10 @@ export const usePlayerStore = defineStore('player', () => {
     }, STALL_TIMEOUT_MS)
   }
 
-  /** Resolve a playable URL, giving up (and failing over) if the source hangs. */
-  async function resolveWithTimeout(
-    track: PlayableTrack,
-    quality_: Quality
-  ): Promise<ResolvedSource> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        resolve(track, quality_),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('音源响应超时，正在尝试其他音源')),
-            URL_RESOLVE_TIMEOUT_MS
-          )
-        })
-      ])
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
+  async function resolveWithTimeout(track: PlayableTrack, preferred: Quality, signal: AbortSignal, deadline: number): Promise<ResolvedSource> {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new ResolutionError('timeout', '播放解析等待预算已耗尽')
+    return resolve(track, preferred, signal, remaining)
   }
 
   function handlePlaybackError(err: Error): void {
@@ -423,7 +341,10 @@ export const usePlayerStore = defineStore('player', () => {
       if (mayRetryUrl) {
         // Clearing the cached URL makes the retry ask the engine again, which
         // is what walks the source list to the next capable 音源.
-        void playTrackAt(currentIndex.value, { retryUrl: false })
+        void playTrackAt(currentIndex.value, {
+          retryUrl: false,
+          resolutionDeadline: recordedGeneration === playGeneration ? undefined : startupDeadline
+        })
         return
       }
     }
@@ -465,8 +386,8 @@ export const usePlayerStore = defineStore('player', () => {
   /**
    * Stop playback immediately, without clearing the queue.
    *
-   * Called the moment a new track is requested, before any network work, so the
-   * outgoing track stops at once rather than playing on through the load.
+   * Called after the optional bounded fade, before any network work, so the
+   * outgoing track cannot play on through the new track's URL resolution.
    */
   function haltEngine(): void {
     loadedTrackId = null
@@ -480,15 +401,25 @@ export const usePlayerStore = defineStore('player', () => {
 
   async function playTrackAt(
     index: number,
-    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number } = {}
+    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; transition?: boolean } = {}
   ): Promise<void> {
     if (index < 0 || index >= queue.value.length) return
     const generation = ++playGeneration
+    toggleGeneration++
+    pausePending = false
+    loadedTrackId = null
+    clearStallTimer()
+    resolutionAbort?.abort()
+    const resolving = new AbortController()
+    resolutionAbort = resolving
+    const deadline = options.resolutionDeadline ?? Date.now() + RESOLUTION_BUDGET_MS
+    startupDeadline = deadline
     lyricGeneration += 1
     lyricAbort?.abort()
     mayRetryUrl = options.retryUrl !== false
     const track = queue.value[index]
     currentIndex.value = index
+    currentTime.value = 0
     if (playMode.value === 'random') rememberRandomDraw(track.id)
     error.value = null
     loading.value = true
@@ -505,19 +436,24 @@ export const usePlayerStore = defineStore('player', () => {
      */
     resolvedQuality.value = null
     resolvedSourceName.value = null
+    resolvedResource.value = null
 
-    // Silence the outgoing track straight away. Resolving a URL can take
-    // seconds; leaving the old audio running until then is the reported bug.
-    haltEngine()
-
+    // Finish the optional short fade before starting URL resolution.
     const isStale = (): boolean => generation !== playGeneration
 
     try {
-      const source = await resolveWithTimeout(track, quality.value)
+      const previous = engine.value
+      if (transitionsEnabled.value && options.transition !== false && previous?.isPlaying()) {
+        await previous.fadeOut?.(SWITCH_FADE_MS)
+      }
+      if (isStale()) return
+      haltEngine()
+      const source = await resolveWithTimeout(track, quality.value, resolving.signal, deadline)
       // A newer selection superseded this one while we were resolving.
       if (isStale()) return
       // Recorded only once this attempt survived the generation check, so a
       // superseded resolve cannot leave the previous track labelled with it.
+      resolvedResource.value = source.resource ?? null
       resolvedQuality.value = source.quality ?? null
       resolvedSourceName.value = isLocalTrack(track) ? null : source.providerName ?? null
 
@@ -546,7 +482,7 @@ export const usePlayerStore = defineStore('player', () => {
 
       loadedTrackId = track.id
       if (options.autoplay !== false) {
-        await instance.play()
+        await instance.play(transitionsEnabled.value && options.transition !== false ? SWITCH_FADE_MS : 0)
       }
       if (isStale()) return
       loading.value = false
@@ -558,12 +494,20 @@ export const usePlayerStore = defineStore('player', () => {
       // hand it to the same failover path the engine uses so the next capable
       // 音源 gets a chance instead of stopping playback outright.
       const message = err instanceof Error ? err.message : String(err)
-      if (!isLocalTrack(track) && message.includes('超时')) {
-        handlePlaybackError(new Error(`${message}（${track.name}）`))
+      if (!isLocalTrack(track)) {
+        const terminal = err instanceof ResolutionError && ['cancelled', 'timeout', 'providerMissing', 'matchFailed'].includes(err.reason)
+        if (options.retryUrl !== false && !terminal) {
+          await playTrackAt(index, { ...options, retryUrl: false, resolutionDeadline: deadline })
+          return
+        }
+        error.value = `${message}（${track.name}）`
+        loading.value = false
         return
       }
       error.value = message
       loading.value = false
+    } finally {
+      if (resolutionAbort === resolving) resolutionAbort = null
     }
   }
 
@@ -645,14 +589,32 @@ export const usePlayerStore = defineStore('player', () => {
     return -1
   }
 
-  async function playQueue(tracks: PlayableTrack[], startIndex = 0, label = ''): Promise<void> {
+  async function playQueue(
+    tracks: PlayableTrack[],
+    startIndex = 0,
+    label = '',
+    options: { playMode?: PlayMode; singleTrackAudition?: boolean } = {}
+  ): Promise<void> {
     rememberQueue(tracks)
-    stop()
+    // Capture the outgoing session before replacing its rows. playTrackAt owns
+    // cancellation and the bounded fade, including queue-changing entrypoints.
+    flushSession()
+    if (startIndex < 0 || startIndex >= tracks.length) stop()
     queue.value = [...tracks]
     currentIndex.value = -1
     queueLabel.value = label
+    singleTrackAudition.value = options.singleTrackAudition === true
+    if (options.playMode) setPlayMode(options.playMode)
     resetRandomPass()
     await playTrackAt(startIndex)
+  }
+
+  /** Restore a saved queue using its stored row and mode, without a playback offset. */
+  async function playQueueSnapshot(snapshot: QueueSnapshot, startIndex = snapshot.currentIndex): Promise<void> {
+    await playQueue(snapshot.queue, startIndex, snapshot.label, {
+      playMode: snapshot.playMode,
+      singleTrackAudition: snapshot.singleTrackAudition
+    })
   }
 
   /**
@@ -673,7 +635,14 @@ export const usePlayerStore = defineStore('player', () => {
     const outgoing = queue.value
     const next = queueHistory.value.filter(entry => signature(entry.queue) !== signature(incoming))
     if (outgoing.length > 0 && !next.some(entry => signature(entry.queue) === signature(outgoing))) {
-      next.unshift({ label: queueLabel.value, queue: JSON.parse(JSON.stringify(outgoing)) as PlayableTrack[], at: Date.now() })
+      next.unshift({
+        label: queueLabel.value,
+        queue: JSON.parse(JSON.stringify(outgoing)) as PlayableTrack[],
+        at: Date.now(),
+        currentIndex: currentIndex.value,
+        playMode: playMode.value,
+        singleTrackAudition: singleTrackAudition.value
+      })
     }
     queueHistory.value = next.slice(0, QUEUE_HISTORY_LIMIT)
     // Written on this action alone, never on a timer: the list changes once per
@@ -711,6 +680,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function toggle(): Promise<void> {
+    const intent = ++toggleGeneration
     if (loading.value) {
       stop()
       return
@@ -721,8 +691,14 @@ export const usePlayerStore = defineStore('player', () => {
       await playTrackAt(Math.max(0, currentIndex.value))
       return
     }
-    if (playing.value) instance.pause()
-    else await instance.play().catch(() => undefined)
+    if (playing.value && !pausePending) {
+      pausePending = true
+      try { await instance.pause(transitionsEnabled.value ? PAUSE_FADE_MS : 0) }
+      finally { if (intent === toggleGeneration) pausePending = false }
+    } else {
+      pausePending = false
+      await instance.play(transitionsEnabled.value ? PAUSE_FADE_MS : 0).catch(() => undefined)
+    }
   }
 
   async function next(): Promise<void> {
@@ -754,6 +730,10 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function handleEnded(): Promise<void> {
+    if (singleTrackAudition.value && queue.value.length === 1) {
+      playing.value = false
+      return
+    }
     if (playMode.value === 'single') {
       seek(0)
       await engine.value?.play().catch(() => undefined)
@@ -766,7 +746,7 @@ export const usePlayerStore = defineStore('player', () => {
       playing.value = false
       return
     }
-    await next()
+    await playTrackAt(pickNextIndex(1), { transition: false })
   }
 
   function seek(time: number): void {
@@ -788,6 +768,11 @@ export const usePlayerStore = defineStore('player', () => {
     // fader while muted is the user's way of asking for sound back. Without the
     // un-mute the handle springs back to zero and the control looks broken.
     if (volume.value > 0 && muted.value) setMuted(false)
+  }
+
+  function setTransitionsEnabled(enabled: boolean): void {
+    transitionsEnabled.value = enabled
+    engine.value?.setTransitionsEnabled?.(enabled)
   }
 
   function toggleMute(): void {
@@ -981,6 +966,7 @@ export const usePlayerStore = defineStore('player', () => {
         position: currentTime.value,
         queue: storedQueue,
         index: currentIndex.value >= 0 ? currentIndex.value : 0,
+        singleTrackAudition: singleTrackAudition.value,
         at: Date.now()
       }))
     }).catch(() => undefined)
@@ -1028,13 +1014,14 @@ export const usePlayerStore = defineStore('player', () => {
     const index = Math.min(Math.max(0, session.index ?? 0), list.length - 1)
     queue.value = list
     currentIndex.value = index
+    singleTrackAudition.value = session.singleTrackAudition === true && list.length === 1
 
     try {
       // `autoplay: false` loads without producing sound; `startAt` positions
       // the track once metadata is available (see the comment inside
       // `playTrackAt` for why this must not be a post-return `seek()`).
       await playTrackAt(index, { autoplay: false, startAt: session.position })
-      return true
+      return loadedTrackId === list[index]?.id && !error.value
     } catch (error) {
       // A local file may have been moved or a source may be disabled; a failed
       // resume is not worth interrupting the user, but the reason should be
@@ -1060,18 +1047,33 @@ export const usePlayerStore = defineStore('player', () => {
     queueHistory.value = list
       .filter((entry): entry is QueueSnapshot => !!entry && typeof entry === 'object' && Array.isArray(entry.queue) && entry.queue.length > 0)
       .slice(0, QUEUE_HISTORY_LIMIT)
-      .map(entry => ({
-        label: typeof entry.label === 'string' ? entry.label : '',
-        queue: entry.queue,
-        at: Number.isFinite(entry.at) ? entry.at : 0
-      }))
+      .map(entry => {
+        const maxIndex = entry.queue.length - 1
+        const currentIndex = Number.isInteger(entry.currentIndex)
+          ? Math.min(maxIndex, Math.max(0, entry.currentIndex))
+          : 0
+        const validModes: PlayMode[] = ['list', 'repeat', 'single', 'random']
+        const mode = validModes.includes(entry.playMode) ? entry.playMode : playMode.value
+        return {
+          label: typeof entry.label === 'string' ? entry.label : '',
+          queue: entry.queue,
+          at: Number.isFinite(entry.at) ? entry.at : 0,
+          currentIndex,
+          playMode: mode,
+          singleTrackAudition: entry.singleTrackAudition === true
+        }
+      })
   }
 
   function stop(): void {
+    toggleGeneration++
+    pausePending = false
     // Capture the position before clearing state, or the resume point would
     // always be at zero.
     flushSession()
     playGeneration += 1
+    resolutionAbort?.abort()
+    resolutionAbort = null
     lyricGeneration += 1
     lyricAbort?.abort()
     clearStallTimer()
@@ -1087,6 +1089,7 @@ export const usePlayerStore = defineStore('player', () => {
     lyricSource.value = 'none'
     lyricError.value = null
     resolvedSourceName.value = null
+    resolvedResource.value = null
   }
 
   /* ------------------------------------------------------------ *
@@ -1314,6 +1317,8 @@ export const usePlayerStore = defineStore('player', () => {
     // state
     queue,
     queueHistory,
+    queueLabel,
+    singleTrackAudition,
     currentIndex,
     playing,
     loading,
@@ -1334,6 +1339,7 @@ export const usePlayerStore = defineStore('player', () => {
     quality,
     resolvedQuality,
     resolvedSourceName,
+    resolvedResource,
     equalizer,
     equalizerPreset,
     outputDeviceId,
@@ -1348,12 +1354,14 @@ export const usePlayerStore = defineStore('player', () => {
     playTrack,
     playTrackAt,
     playQueue,
+    playQueueSnapshot,
     toggle,
     next,
     previous,
     seek,
     seekRatio,
     setVolume,
+    setTransitionsEnabled,
     toggleMute,
     setPlayMode,
     setRate,

@@ -18,7 +18,6 @@ export interface OnlineSourceRuntime {
 export interface OnlinePlatformRegistryOptions {
   sourcesByScript: () => OnlineSourceRuntime[]
   isScriptEnabled: (apiId: string) => boolean
-  catalogConsent: () => boolean
 }
 
 export const ONLINE_PLATFORM_CAPABILITIES: Readonly<Record<string, readonly OnlineCapability[]>> = {
@@ -35,15 +34,13 @@ const PLATFORM_ORDER: SourceId[] = ['tx', 'wy', 'kw', 'kg', 'mg']
 export class OnlinePlatformRegistry {
   private readonly sourcesByScript: () => OnlineSourceRuntime[]
   private readonly isScriptEnabled: (apiId: string) => boolean
-  private readonly catalogConsent: () => boolean
 
   constructor(options: OnlinePlatformRegistryOptions) {
     this.sourcesByScript = options.sourcesByScript
     this.isScriptEnabled = options.isScriptEnabled
-    this.catalogConsent = options.catalogConsent
   }
 
-  /** Declared platforms backed by a live, enabled LX script, without consent filtering. */
+  /** Playback platforms declared by a live, enabled LX script. */
   eligiblePlatforms(): SourceId[] {
     const eligible = new Set<string>()
     for (const runtime of this.sourcesByScript()) {
@@ -57,10 +54,8 @@ export class OnlinePlatformRegistry {
   }
 
   platforms(capability: OnlineCapability): SourceId[] {
-    if (!this.catalogConsent()) return []
-    const eligible = new Set(this.eligiblePlatforms())
     return PLATFORM_ORDER.filter((platform) =>
-      eligible.has(platform) && ONLINE_PLATFORM_CAPABILITIES[platform]?.includes(capability)
+      ONLINE_PLATFORM_CAPABILITIES[platform]?.includes(capability)
     )
   }
 

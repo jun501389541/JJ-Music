@@ -233,6 +233,25 @@ export class MusicLibrary {
     return added
   }
 
+  /** A completed download needs a durable success or an explicit failure. */
+  async importDownloadedFile(path: string): Promise<LocalMusicInfo> {
+    await this.load()
+    const track = await this.readTrack(path)
+    // The same path-based identity is used by scanning and ordinary imports.
+    const existing = this.get(track.id)
+    if (existing && existing.path !== path) this.tracks.delete(existing.path)
+    this.tracks.set(path, track)
+    await this.persist()
+    return track
+  }
+
+  /** Reconcile a download-owned path only after its audio was removed. */
+  async removeDownloadedFile(path: string): Promise<void> {
+    await this.load()
+    const ids = this.getAll().filter(track => track.path.toLowerCase() === path.toLowerCase()).map(track => track.id)
+    if (ids.length) await this.removeTracks(ids)
+  }
+
   /** Add a folder to the library and scan it. */
   async addFolder(folder: string, options: ScanOptions = {}): Promise<ScanProgress> {
     return this.addFolders([folder], options)

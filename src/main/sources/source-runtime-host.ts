@@ -32,7 +32,7 @@
  */
 
 import { fork } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -883,9 +883,22 @@ export class SourceRuntimeHost {
         else resolve(value as T)
       }
 
-      const onAbort = (): void => settle(new Error('音源请求已取消'))
+      const cancelChild = (): void => {
+        if (!state.pending.has(id) || state.dead) return
+        try {
+          if (state.fileMode) {
+            const final = join(state.scratchDir, `cancel-${id}.json`)
+            writeFileSync(`${final}.tmp`, JSON.stringify({ type: 'cancel', id }), 'utf8')
+            renameSync(`${final}.tmp`, final)
+          } else {
+            state.child?.send({ type: 'cancel', id }, () => {})
+          }
+        } catch { /* The runtime may already be shutting down. */ }
+      }
+      const onAbort = (): void => { cancelChild(); settle(new Error('音源请求已取消')) }
 
       const timer = setTimeout(() => {
+        cancelChild()
         settle(new Error(`音源请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`))
       }, REQUEST_TIMEOUT_MS)
 

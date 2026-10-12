@@ -55,6 +55,23 @@ test('concurrent settings and playlist operations survive reload', () => fixture
   assert.equal((await new PlaylistStore(dir).list()).length, 17)
 }))
 
+test('retired catalog consent flags are ignored and removed when settings are saved', () => fixture(async dir => {
+  const path = join(dir, 'settings.json')
+  for (const consent of [false, true]) {
+    await writeFile(path, JSON.stringify({ onlineCatalogConsent: consent, onlineCatalogConsentPrompted: true, volume: 0.4 }))
+    const store = new SettingsStore(dir)
+    const loaded = await store.load()
+    assert.equal(loaded.volume, 0.4)
+    assert.equal('onlineCatalogConsent' in loaded, false)
+    assert.equal('onlineCatalogConsentPrompted' in loaded, false)
+    await store.update({ volume: 0.5, onlineCatalogConsent: false })
+    const saved = JSON.parse(await readFile(path, 'utf8'))
+    assert.equal(saved.volume, 0.5)
+    assert.equal('onlineCatalogConsent' in saved, false)
+    assert.equal('onlineCatalogConsentPrompted' in saved, false)
+  }
+}))
+
 /**
  * 损坏的配置文件必须留下证据，而不是被空状态盖掉。
  *

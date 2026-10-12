@@ -259,7 +259,7 @@ async function onImportLyric(): Promise<void> {
 }
 
 const cover = computed<string | null>(() => {
-  return trackCoverUrl(player.currentTrack, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null
+  return trackCoverUrl(player.currentTrack) ?? null
 })
 
 const spec = computed(() => {
@@ -272,7 +272,10 @@ const spec = computed(() => {
    * and reading the request back made the page assert a quality the audio may
    * not have. The fallback covers the moment before a resolve lands.
    */
-  return `${track.source.toUpperCase()} · ${player.resolvedQuality ?? player.quality}`
+  const resource = player.resolvedResource
+  if (!resource) return `${track.source.toUpperCase()} · 目标 ${player.quality}`
+  const platform = resource.actual.source.toUpperCase()
+  return `${platform}${resource.switched ? '（换源）' : ''} · 按 ${resource.resolvedQuality} 档位解析 · 规格未检测${resource.resolvedQuality !== resource.targetQuality ? ` · 目标 ${resource.targetQuality}` : ''}`
 })
 
 /** The bar's info line reads "艺术家 · 专辑 · 规格", so the album is optional. */

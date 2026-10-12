@@ -10,10 +10,9 @@ const online = {
   picUrl: 'https://img.kuwo.cn/cover.jpg'
 }
 
-test('在线封面需要同意目录请求并启用同平台音源', () => {
-  assert.equal(trackCoverUrl(online, false, ['kw']), undefined)
-  assert.equal(trackCoverUrl(online, true, ['tx']), undefined)
-  assert.equal(trackCoverUrl(online, true, ['kw']), online.picUrl)
+test('在线目录封面不要求播放音源', () => {
+  assert.equal(trackCoverUrl(online), online.picUrl)
+  assert.equal(trackCoverUrl({ ...online, source: 'unsupported' }), undefined)
 })
 
 test('持久化的脚本封面 URL 不会绕过主进程图片代理', () => {
@@ -22,20 +21,20 @@ test('持久化的脚本封面 URL 不会绕过主进程图片代理', () => {
     picUrl: 'http://127.0.0.1:7890/private',
     assets: { cover: [{ origin: 'remote', provider: '音源脚本', at: 1 }] }
   }
-  assert.equal(trackCoverUrl(persistedScriptCover, true, ['kw']), undefined)
+  assert.equal(trackCoverUrl(persistedScriptCover), undefined)
   assert.equal(
     trackCoverUrl({
       ...persistedScriptCover,
       picUrl: 'data:image/png;base64,YQ=='
-    }, true, ['kw']),
+    }),
     'data:image/png;base64,YQ=='
   )
 })
 
-test('本地封面不受在线目录同意状态影响', () => {
+test('本地封面仍通过本地媒体协议读取', () => {
   const local = { id: 'local_1', path: 'C:\\Music\\song.mp3', name: '本地歌曲', coverPath: 'C:\\Music\\cover.jpg' }
-  assert.equal(trackCoverUrl(local, false, []), trackCoverUrl(local, true, []))
-  assert.ok(trackCoverUrl(local, false, []))
+  assert.equal(trackCoverUrl(local), trackCoverUrl(local))
+  assert.ok(trackCoverUrl(local))
 })
 
 test('音源关闭后保留在线记录并报告当前不可用', () => {

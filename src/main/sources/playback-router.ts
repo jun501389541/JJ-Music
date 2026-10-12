@@ -38,13 +38,16 @@ export class PlaybackRouter {
   async musicUrl(
     track: OnlineMusicInfo,
     preferred: Quality,
-    strict = false
+    strict = false,
+    signal?: AbortSignal
   ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string }> {
     const providerId = this.ownerOf(track)
     if (providerId && !this.options.sourceEngine.supportsProvider(track.source, providerId, 'musicUrl')) {
       throw legacyProviderUnavailable(providerId)
     }
-    return this.options.sourceEngine.getMusicUrl(track.source, track, preferred, strict)
+    return signal
+      ? this.options.sourceEngine.getMusicUrl(track.source, track, preferred, strict, signal)
+      : this.options.sourceEngine.getMusicUrl(track.source, track, preferred, strict)
   }
 
   async lyric(

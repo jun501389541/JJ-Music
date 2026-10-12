@@ -136,7 +136,7 @@ watch(endSentinel, el => {
 }, { flush: 'post' })
 onBeforeUnmount(() => { observer?.disconnect(); endObserver?.disconnect() })
 function cover(track: PlayableTrack): string | undefined {
-  return trackCoverUrl(track, library.settings.onlineCatalogConsent, playableSourceIds.value)
+  return trackCoverUrl(track)
 }
 function choose(event: MouseEvent, index: number): void {
   const track = props.tracks[index]

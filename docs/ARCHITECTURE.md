@@ -264,7 +264,7 @@ return Object.assign(cancel, promise)
 
 LX Music 用 better-sqlite3。我们选 JSON，考虑的是：
 
-- **可用性优先。** 本项目要能导入 LX 的 `user_api.json`，用同构的 JSON 最直接。
+- **便于持久化。** 音源脚本、设置与曲库记录使用 JSON 存储，已有音源存储格式继续兼容历史资料；外部导入只接收单个音源脚本。
 - **规模足够。** 1112 首的索引是秒级读写；几万首也在可接受范围。
 - **可检查、可手改。** 出问题用户能直接打开看。
 
@@ -345,6 +345,7 @@ MusicLibrary.scan() → index.json → 渲染进程曲库
 | `src/main/sources/browser-shims.ts` | 补齐脚本会用到的浏览器全局 |
 | `src/main/library/music-library.ts` | 扫描与索引；**不关心播放** |
 | `src/renderer/src/audio/web-audio-engine.ts` | 唯一接触 Web Audio 的地方 |
+| `src/renderer/src/audio/gain-transition.ts` | 可取消的短过渡增益调度，与用户音量独立 |
 | `src/renderer/src/stores/player.ts` | 队列与传输控制；只依赖 `AudioEngine` 接口 |
 
 `AudioEngine` 接口是后续替换原生引擎的关键边界：播放状态、队列、界面都不直接接触

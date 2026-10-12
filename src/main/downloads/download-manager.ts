@@ -90,6 +90,8 @@ interface Dependencies {
    * anything actually leaving the disk.
    */
   trash: (path: string) => Promise<void>
+  importFile?: (path: string) => Promise<string>
+  removeLibraryFile?: (path: string) => Promise<void>
 }
 
 /**
@@ -111,13 +113,15 @@ export class DownloadManager {
   private active = 0
   private closing = false
   private running = new Set<Promise<void>>()
+  private importing = new Map<string, Promise<void>>()
+  private removing = new Set<string>()
   private saving = Promise.resolve()
   private file: string
   constructor(dataDir: string, private deps: Dependencies) { this.file = join(dataDir, 'downloads.json') }
   async load(): Promise<void> {
     try {
       const saved = parseJsonLoose<DownloadTask[]>(await readFile(this.file, 'utf8'))
-      if (Array.isArray(saved)) this.tasks = saved.filter(t => t?.id && t?.track?.meta && LX_QUALITIES.includes(t.quality)).slice(-1000).map(t => ({ ...t, warnings: Array.isArray(t.warnings) ? t.warnings : [], ...(!['completed','failed','cancelled'].includes(t.status) ? {status:'failed',error:'上次退出时下载中断，重试会从断点继续'} : {}) }))
+      if (Array.isArray(saved)) this.tasks = saved.filter(t => t?.id && t?.track?.meta && LX_QUALITIES.includes(t.quality)).slice(-1000).map(t => ({ ...t, warnings: Array.isArray(t.warnings) ? t.warnings : [], ...(t.status === 'completed' && t.path ? { libraryStatus: t.libraryStatus === 'importing' ? 'failed' as const : t.libraryStatus ?? 'pending' as const, ...(t.libraryStatus === 'importing' ? { libraryError: '上次退出时入库中断，请重试入库' } : {}) } : {}), ...(!['completed','failed','cancelled'].includes(t.status) ? {status:'failed',error:'上次退出时下载中断，重试会从断点继续'} : {}) }))
     } catch { /* first launch */ }
   }
   list(): DownloadTask[] { return structuredClone(this.tasks) }
@@ -154,12 +158,48 @@ export class DownloadManager {
   }
   retry(id: string): void {
     if (this.closing) throw Error('播放器正在退出')
+    if (this.removing.has(id)) throw Error('下载记录正在移除，请稍后重试')
     const task = this.tasks.find(t => t.id === id)
     if (!task || !['failed','cancelled'].includes(task.status) || this.controllers.has(id)) throw Error('任务尚未停止或无需重试')
     // Keep the previous resolution identity until the retry resolves. It tells
     // run() whether an existing partial file belongs to the same script version.
     task.status='queued'; task.received=0; task.total=undefined; task.path=undefined; task.lyricPath=undefined; task.error=undefined; task.warnings=[]
     this.save(); this.pump()
+  }
+  async retryImport(id: string): Promise<void> {
+    if (this.closing) throw Error('播放器正在退出')
+    if (this.removing.has(id)) throw Error('下载记录正在移除，请稍后重试入库')
+    const task = this.tasks.find(item => item.id === id)
+    if (!task || task.status !== 'completed' || !task.path) throw Error('只有已完成的下载文件可以入库')
+    if (!this.deps.importFile) throw Error('曲库入库服务暂不可用')
+    await this.importCompleted(task)
+    if (task.libraryStatus === 'failed') throw Error(task.libraryError || '曲库入库失败')
+  }
+  private importCompleted(task: DownloadTask): Promise<void> {
+    const pending = this.importing.get(task.id)
+    if (pending) return pending
+    if (this.removing.has(task.id)) return Promise.resolve()
+    if (task.libraryStatus === 'imported' || !this.deps.importFile) return Promise.resolve()
+    task.libraryStatus = 'importing'
+    task.libraryError = undefined
+    this.save()
+    const operation = (async () => {
+      try {
+        if (!task.path || !isAbsolute(task.path) || !(await stat(task.path)).isFile()) throw Error('下载文件不存在或不是有效文件')
+        const id = await this.deps.importFile!(task.path)
+        if (!id) throw Error('曲库未确认文件入库')
+        task.localTrackId = id
+        task.libraryStatus = 'imported'
+      } catch (error) {
+        task.libraryStatus = 'failed'
+        task.libraryError = error instanceof Error ? error.message : String(error)
+      } finally {
+        this.importing.delete(task.id)
+        this.save()
+      }
+    })()
+    this.importing.set(task.id, operation)
+    return operation
   }
   private pump(): void {
     while (!this.closing && this.active < 2) {
@@ -187,37 +227,61 @@ export class DownloadManager {
   async remove(id: string, deleteFile: boolean): Promise<void> {
     if (typeof id !== 'string' || !id) throw Error('下载记录无效')
     if (typeof deleteFile !== 'boolean') throw Error('删除参数无效')
+    if (this.removing.has(id)) throw Error('下载记录正在移除')
     const index = this.tasks.findIndex(t => t.id === id)
     if (index < 0) throw Error('这条下载记录已经不存在了')
     const task = this.tasks[index]
-    this.controllers.get(id)?.abort()
-    // Give the download a moment to actually stop before its record goes: while it is
-    // still running, `.jj-<id>.part` has an open file handle and the cleanup below
-    // would fail on it. Bounded, because a stream that ignores its abort signal must
-    // not be able to hang the button the user pressed — worst case the scratch file
-    // outlives the record by one `finally`.
-    await Promise.race([this.settled.get(id)?.catch(() => undefined), new Promise(r => setTimeout(r, 5000).unref?.())])
-    if (deleteFile) {
-      // 只删这一次下载产出的东西：音频本体，外加当时确实由我们写出去的那个 sidecar
-      // `.lrc`。sidecar 是不覆盖语义，旁边完全可能放着用户自己写的同名文件。
-      const targets = [task.path, this.ownSidecar(task)].filter((p): p is string => !!p)
-      for (const target of targets) {
-        if (!isAbsolute(target)) throw Error('下载记录里的文件路径无效，已停止移除')
-        try { if (!(await stat(target)).isFile()) throw Error('那不是文件') }
-        catch (error) {
-          // 文件已经不在了不是失败：记录指向的东西早已被删，移除记录即可。
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-          throw Error(`无法移到回收站：${target}（${error instanceof Error ? error.message : '原因未知'}），记录未移除`)
+    this.removing.add(id)
+    try {
+      this.controllers.get(id)?.abort()
+      // Give the download a moment to actually stop before its record goes: while it is
+      // still running, `.jj-<id>.part` has an open file handle and the cleanup below
+      // would fail on it. Bounded, because a stream that ignores its abort signal must
+      // not be able to hang the button. A timeout retains both the record and files;
+      // no independent import can begin while this removal is in progress.
+      let settleTimer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const settled = await Promise.race([
+          Promise.allSettled([this.settled.get(id), this.importing.get(id)]).then(() => true),
+          new Promise<boolean>(resolve => { settleTimer = setTimeout(() => resolve(false), 5000) })
+        ])
+        if (!settled) throw Error('下载或入库尚未停止，请稍后移除，记录和文件已保留')
+      } finally { if (settleTimer) clearTimeout(settleTimer) }
+      if (deleteFile) {
+        // 只删这一次下载产出的东西：音频本体，外加当时确实由我们写出去的那个 sidecar
+        // `.lrc`。sidecar 是不覆盖语义，旁边完全可能放着用户自己写的同名文件。
+        const targets = [task.path, this.ownSidecar(task)].filter((p): p is string => !!p)
+        for (const target of targets) {
+          if (!isAbsolute(target)) throw Error('下载记录里的文件路径无效，已停止移除')
+          try { if (!(await stat(target)).isFile()) throw Error('那不是文件') }
+          catch (error) {
+            // 文件已经不在了不是失败：记录指向的东西早已被删，移除记录即可。
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              if (target === task.path) await this.deps.removeLibraryFile?.(target)
+              continue
+            }
+            throw Error(`无法移到回收站：${target}（${error instanceof Error ? error.message : '原因未知'}），记录未移除`)
+          }
+          try { await this.deps.trash(target) }
+          catch (error) { throw Error(`移到回收站失败：${target}（${error instanceof Error ? error.message : '原因未知'}），记录未移除`) }
+          if (target === task.path) {
+            await this.deps.removeLibraryFile?.(target)
+            task.localTrackId = undefined
+            task.libraryStatus = 'failed'
+            task.libraryError = '下载文件已移除'
+            this.save()
+          }
         }
-        try { await this.deps.trash(target) }
-        catch (error) { throw Error(`移到回收站失败：${target}（${error instanceof Error ? error.message : '原因未知'}），记录未移除`) }
       }
-    }
-    const removed = this.tasks.splice(index, 1)[0]
-    this.save()
-    // 应用自己的临时件（`.jj-<id>.part` / 暂存 / `-tagged`）无论如何都清掉：
-    // 记录已经不在了，没有人会再来续传或重试它，留着就是纯粹的残留。
-    await this.cleanScratch(removed.id)
+      // Other removals can change positions while we await this task's settle.
+      const currentIndex = this.tasks.findIndex(item => item.id === id)
+      if (currentIndex < 0) throw Error('这条下载记录已经不存在了')
+      const removed = this.tasks.splice(currentIndex, 1)[0]
+      this.save()
+      // 应用自己的临时件（`.jj-<id>.part` / 暂存 / `-tagged`）无论如何都清掉：
+      // 记录已经不在了，没有人会再来续传或重试它，留着就是纯粹的残留。
+      await this.cleanScratch(removed.id)
+    } finally { this.removing.delete(id) }
   }
   /** The sidecar `.lrc` this task wrote, but only if it is still shaped like one. */
   private ownSidecar(task: DownloadTask): string | undefined {
@@ -239,6 +303,7 @@ export class DownloadManager {
     for(const task of this.tasks) if(task.status==='queued') {task.status='failed';task.error='退出时下载未开始，请重试'}
     for(const controller of this.controllers.values()) controller.abort(new Error('退出时下载未完成，请重试'))
     await Promise.allSettled([...this.running])
+    await Promise.allSettled([...this.importing.values()])
     this.save();await this.saving
   }
   private async run(task: DownloadTask): Promise<void> {
@@ -422,6 +487,7 @@ export class DownloadManager {
       task.path=target
       // Publication is the commit point: cancellation must not label a saved file as cancelled.
       task.status='completed'
+      task.libraryStatus = 'pending'
       if (lyricText && (settings.downloadLyric || (settings.downloadEmbedLyric && !canWriteTags(target, settings.tagWritableFormats)))) {
         // The same writer every other lyric uses, with 不覆盖 on: this pass is
         // automatic, so a `.lrc` the user wrote by hand is left alone.
@@ -434,6 +500,7 @@ export class DownloadManager {
           else task.warnings.push(saved.notes.join('；') || 'LRC 保存失败')
         } catch { task.warnings.push('LRC 保存失败') }
       }
+      await this.importCompleted(task)
     } catch(error) {
       if (task.status !== 'cancelled') { task.status='failed'; task.error=error instanceof Error ? error.message : String(error) }
     } finally {

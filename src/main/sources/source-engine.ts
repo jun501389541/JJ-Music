@@ -42,6 +42,7 @@
  * about processes, and they stay in the engine.
  */
 import { existsSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
 import type {
   OnlineMusicInfo,
   Quality,
@@ -834,8 +835,10 @@ export class SourceEngine {
     source: SourceId,
     musicInfo: OnlineMusicInfo,
     preferred: Quality,
-    strict = false
+    strict = false,
+    signal?: AbortSignal
   ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string }> {
+    if (signal?.aborted) throw new Error('请求已取消')
     const requestedProviderId = musicInfo.providerId
     const candidates = this.providersFor(source).filter((apiId) => {
       const runtime = this.runtimes.get(apiId)
@@ -855,6 +858,7 @@ export class SourceEngine {
     const errors: string[] = []
 
     for (const apiId of candidates) {
+      if (signal?.aborted) throw new Error('请求已取消')
       const runtime = this.runtimes.get(apiId)
       const declared = runtime?.sources.find((item) => item.id === source)
       if (declared && !declared.actions.includes('musicUrl')) continue
@@ -872,11 +876,22 @@ export class SourceEngine {
 
       for (const quality of ladder) {
         try {
-          const url = await this.requestFrom<unknown>(apiId, source, 'musicUrl', {
-            type: quality,
-            // Scripts read a flattened legacy object, not our internal model.
-            musicInfo: toLegacyOnline(musicInfo)
-          })
+          let url: unknown
+          for (let retry = 0; ; retry++) {
+            try {
+              url = await this.requestFrom<unknown>(apiId, source, 'musicUrl', {
+                type: quality,
+                musicInfo: toLegacyOnline(musicInfo)
+              }, signal)
+              break
+            } catch (error) {
+              if (signal?.aborted) throw error
+              // Only explicitly identified rate limits get one bounded retry.
+              if (!signal || retry > 0 || !(error instanceof Error) || !/\bHTTP\s*429\b/i.test(error.message)) throw error
+              await delay(500, undefined, { signal })
+            }
+          }
+          if (signal?.aborted) throw new Error('请求已取消')
           if (isValidMusicUrl(url)) {
             return {
               url: url.trim(),
@@ -889,6 +904,7 @@ export class SourceEngine {
           }
           scriptErrors.push(`${quality}: 未返回有效播放地址`)
         } catch (error) {
+          if (signal?.aborted) throw error
           scriptErrors.push(`${quality}: ${error instanceof Error ? error.message : String(error)}`)
         }
       }

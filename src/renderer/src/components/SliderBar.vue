@@ -21,7 +21,7 @@
  * path (click, drag, wheel, keyboard) maps onto the vertical axis. Pointer
  * maths reads the bounding rect each move, so no separate geometry is needed.
  */
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = withDefaults(
   defineProps<{
@@ -49,6 +49,7 @@ const emit = defineEmits<{ 'update:value': [value: number]; preview: [value: num
 
 const track = ref<HTMLElement | null>(null)
 const dragging = ref(false)
+const activePointerId = ref<number | null>(null)
 /** Set only while a `release` drag is in progress; null means "show the owner's value". */
 const previewValue = ref<number | null>(null)
 
@@ -72,6 +73,7 @@ function ratioFromEvent(event: PointerEvent): number {
 function onPointerDown(event: PointerEvent): void {
   if (props.disabled) return
   dragging.value = true
+  activePointerId.value = event.pointerId
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   apply(ratioFromEvent(event))
 }
@@ -94,19 +96,39 @@ function apply(ratio: number): void {
   emit('update:value', ratio)
 }
 
-function onPointerUp(event: PointerEvent, cancelled = false): void {
+function finishDrag(cancelled: boolean, target = track.value, pointerId = activePointerId.value): void {
   if (!dragging.value) return
   dragging.value = false
-  const target = event.currentTarget as HTMLElement
-  if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
+  activePointerId.value = null
+  if (target && pointerId !== null && target.hasPointerCapture(pointerId)) {
+    target.releasePointerCapture(pointerId)
+  }
+  // Pointer interaction should not leave :focus-visible latched on the thumb
+  // after the cursor leaves the window. Keyboard focus remains untouched.
+  target?.blur()
   if (previewValue.value === null) return
   const ratio = previewValue.value
   previewValue.value = null
-  // A cancelled gesture (the pointer taken over by another window) is not a
-  // request to move; the bar snaps back to where the owner says it is.
+  // A cancelled gesture is not a request to seek; snap back to the owner value.
   if (!cancelled) emit('update:value', ratio)
   emit('preview', null)
 }
+
+function onPointerUp(event: PointerEvent, cancelled = false): void {
+  finishDrag(cancelled, event.currentTarget as HTMLElement, event.pointerId)
+}
+
+function onLostPointerCapture(event: PointerEvent): void {
+  // Another slider or window may take over capture during this gesture.
+  finishDrag(true, event.currentTarget as HTMLElement, event.pointerId)
+}
+
+function onWindowBlur(): void {
+  finishDrag(true)
+}
+
+onMounted(() => window.addEventListener('blur', onWindowBlur))
+onBeforeUnmount(() => window.removeEventListener('blur', onWindowBlur))
 
 /**
  * Wheel support.
@@ -129,7 +151,8 @@ function onWheel(event: WheelEvent): void {
  * which is only half a gesture until the button comes up.
  */
 function onKeydown(event: KeyboardEvent): void {
-  if (props.disabled) return
+  // Modified arrows belong to the player's volume/track shortcuts.
+  if (props.disabled || event.ctrlKey || event.metaKey || event.altKey) return
   const step = event.shiftKey ? 0.1 : 0.02
   if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
     event.preventDefault()
@@ -162,6 +185,7 @@ function onKeydown(event: KeyboardEvent): void {
     @pointermove="onPointerMove"
     @pointerup="onPointerUp($event, false)"
     @pointercancel="onPointerUp($event, true)"
+    @lostpointercapture="onLostPointerCapture"
     @wheel="onWheel"
     @keydown="onKeydown"
   >
@@ -198,6 +222,17 @@ function onKeydown(event: KeyboardEvent): void {
 .slider.is-disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+/* Indicate keyboard focus at the handle instead of outlining the full-width
+   progress hit area. Pointer dragging retains normal keyboard access. */
+.slider:focus-visible {
+  outline: none;
+}
+
+.slider:focus-visible .slider__thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .slider__rail {

@@ -67,6 +67,7 @@ const api = {
     add: (tracks: OnlineMusicInfo[], quality: Quality) => invoke<string[]>(IPC.downloadsAdd, tracks, quality),
     cancel: (id: string) => invoke<void>(IPC.downloadsCancel, id),
     retry: (id: string) => invoke<void>(IPC.downloadsRetry, id),
+    retryImport: (id: string) => invoke<void>(IPC.downloadsRetryImport, id),
     remove: (id: string, deleteFile: boolean) => invoke<void>(IPC.downloadsRemove, id, deleteFile),
     folder: () => invoke<string>(IPC.downloadsFolder),
     openFolder: () => invoke<void>(IPC.downloadsOpenFolder),
@@ -193,7 +194,7 @@ const api = {
     /** Import from pasted text or a script body. */
     import: (payload: string, name?: string) =>
       invoke<UserApiMeta>(IPC.sourcesImport, payload, name),
-    /** Import by picking a file, or by reading LX's own user_api.json. */
+    /** Import source scripts selected in the native file picker. */
     importFile: () => invoke<UserApiMeta[] | null>(IPC.sourcesImportFile),
     /** Fetch a script over a guarded, size-capped request; it still starts disabled. */
     importUrl: (url: string) => invoke<UserApiMeta>(IPC.sourcesImportUrl, url),
@@ -273,7 +274,7 @@ const api = {
      * showing a placeholder, so the absence is honest.
      */
     hotWords: (scope: SourceId | 'all') => invoke<HotWord[]>(IPC.musicHotWords, scope),
-    url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) =>
+    url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality, strict = false, requestId?: string) =>
       invoke<{
         url: string
         quality: Quality
@@ -281,7 +282,7 @@ const api = {
         providerId?: string
         providerName?: string
         providerVersion?: string
-      }>(IPC.musicUrl, source, musicInfo, quality),
+      }>(IPC.musicUrl, source, musicInfo, quality, strict, requestId),
     lyric: (source: SourceId, musicInfo: OnlineMusicInfo) =>
       invoke<LyricResult>(IPC.musicLyric, source, musicInfo),
     pic: (source: SourceId, musicInfo: OnlineMusicInfo) =>
@@ -346,6 +347,12 @@ const api = {
     removeTracks: (ids: string[]) => invoke<number>(IPC.libraryRemoveTracks, ids),
     scan: () => invoke<void>(IPC.libraryScan),
     tracks: () => invoke<LocalMusicInfo[]>(IPC.libraryTracks),
+    /** Subscribe to index changes independent of scan progress. */
+    onChanged: (handler: () => void) => {
+      const listener = (): void => handler()
+      ipcRenderer.on(IPC.libraryChanged, listener)
+      return () => ipcRenderer.removeListener(IPC.libraryChanged, listener)
+    },
     /** Subscribe to scan progress; returns an unsubscribe function. */
     onProgress: (handler: (progress: unknown) => void) => {
       const listener = (_event: unknown, progress: unknown): void => handler(progress)

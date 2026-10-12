@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync, inflateSync } from 'node:zlib'
@@ -567,12 +567,15 @@ test('daily startup checks skip enabled sources without a direct URL and disable
   }
 })
 
-test('LX import preserves allowShowUpdateAlert false', () => {
+test('reloading and reimporting a script preserves allowShowUpdateAlert false', () => {
   const { store, cleanup } = storeWith(CURRENT, '无更新提示音源')
   try {
-    const imported = store.import(JSON.stringify({
-      userApis: [{ id: 'lx-alert-off', name: '无更新提示音源', script: CURRENT, allowShowUpdateAlert: false }]
-    }), 'LX 音源')
+    const saved = JSON.parse(readFileSync(store.path, 'utf8'))
+    saved.userApis[0].allowShowUpdateAlert = false
+    writeFileSync(store.path, JSON.stringify(saved))
+    store.load()
+    assert.equal(store.metas()[0].allowShowUpdateAlert, false)
+    const imported = store.import(CURRENT, '无更新提示音源')
     assert.equal(imported.allowShowUpdateAlert, false)
     assert.equal(JSON.parse(readFileSync(store.path, 'utf8')).userApis[0].allowShowUpdateAlert, false)
   } finally {

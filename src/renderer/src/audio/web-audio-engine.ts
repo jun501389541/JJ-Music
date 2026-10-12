@@ -25,6 +25,7 @@ import {
   type AudioOutputDevice,
   type LoadOptions
 } from '@shared/audio-engine'
+import { GainTransition } from './gain-transition'
 
 /** How often the position loop samples the element. See `startProgressLoop`. */
 const PROGRESS_INTERVAL_MS = 200
@@ -45,6 +46,10 @@ export class WebAudioEngine implements AudioEngine {
   private source: MediaElementAudioSourceNode | null = null
   private filters: BiquadFilterNode[] = []
   private gain: GainNode | null = null
+  private transitionGain: GainNode | null = null
+  private transition: GainTransition | null = null
+  private transitionsEnabled = true
+  private transportGeneration = 0
   private analyser: AnalyserNode | null = null
   private spectrum: Uint8Array | null = null
 
@@ -149,7 +154,12 @@ export class WebAudioEngine implements AudioEngine {
     const analyser = context.createAnalyser()
     analyser.fftSize = 2048
     analyser.smoothingTimeConstant = 0.82
-    gain.connect(analyser)
+    const transitionGain = context.createGain()
+    transitionGain.gain.value = 1
+    gain.connect(transitionGain)
+    transitionGain.connect(analyser)
+    this.transitionGain = transitionGain
+    this.transition = new GainTransition(transitionGain.gain, () => context.currentTime)
     this.analyser = analyser
     this.spectrum = new Uint8Array(analyser.frequencyBinCount)
 
@@ -194,6 +204,8 @@ export class WebAudioEngine implements AudioEngine {
     this.ensureGraph()
 
     const generation = ++this.loadGeneration
+    this.transportGeneration++
+    this.transition?.reset(1)
     this.suppressEnded = true
     this.element.src = options.url
     this.element.load()
@@ -218,19 +230,26 @@ export class WebAudioEngine implements AudioEngine {
     }
   }
 
-  async play(): Promise<void> {
+  async play(fadeInMs = 0): Promise<void> {
     const generation = this.loadGeneration
+    const intent = ++this.transportGeneration
     this.ensureGraph()
+    this.transition?.cancel()
+    if (!this.transitionsEnabled || fadeInMs <= 0) this.transition?.reset(1)
+    else if (this.element.paused) this.transition?.reset(0)
     if (this.context?.state === 'suspended') {
       await this.context.resume().catch(() => undefined)
     }
-    if (generation !== this.loadGeneration) return
+    if (generation !== this.loadGeneration || intent !== this.transportGeneration) return
     try {
       await this.element.play()
+      if (generation === this.loadGeneration && intent === this.transportGeneration) {
+        void this.transition?.to(1, this.transitionsEnabled ? fadeInMs : 0)
+      }
     } catch (error) {
       // Switching/stopping aborts the outgoing play promise; it is not a
       // failure of the newly selected track.
-      if (generation !== this.loadGeneration || (error as Error)?.name === 'AbortError') return
+      if (generation !== this.loadGeneration || intent !== this.transportGeneration || (error as Error)?.name === 'AbortError') return
       const message = error instanceof Error ? error.message : String(error)
       // Autoplay rejection is expected before any user gesture; surface
       // anything else.
@@ -241,11 +260,30 @@ export class WebAudioEngine implements AudioEngine {
     }
   }
 
-  pause(): void {
-    this.element.pause()
+  async pause(fadeOutMs = 0): Promise<void> {
+    const intent = ++this.transportGeneration
+    if (!this.transitionsEnabled || fadeOutMs <= 0 || this.element.paused || !this.transition) {
+      this.transition?.cancel()
+      this.element.pause()
+      return
+    }
+    const completed = await this.transition.to(0, fadeOutMs)
+    if (completed && intent === this.transportGeneration) this.element.pause()
+  }
+
+  fadeOut(durationMs: number): Promise<boolean> {
+    this.transportGeneration++
+    return this.transition?.to(0, this.transitionsEnabled && !this.element.paused ? durationMs : 0) ?? Promise.resolve(true)
+  }
+
+  setTransitionsEnabled(enabled: boolean): void {
+    this.transitionsEnabled = enabled
+    if (!enabled) this.transition?.finish()
   }
 
   stop(): void {
+    this.transportGeneration++
+    this.transition?.reset(0)
     this.loadGeneration += 1
     this.suppressEnded = true
     this.element.pause()
@@ -456,6 +494,7 @@ export class WebAudioEngine implements AudioEngine {
     this.source?.disconnect()
     this.filters.forEach((filter) => filter.disconnect())
     this.gain?.disconnect()
+    this.transitionGain?.disconnect()
     this.analyser?.disconnect()
     void this.context?.close().catch(() => undefined)
     this.context = null

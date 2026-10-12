@@ -43,6 +43,7 @@ const loadingMore = ref(false)
 /** 某一页追加后一行都没多（全是重复，或平台给空页）—— 别再自动请求了。 */
 const exhausted = ref(false)
 let generation = 0
+let platformGeneration = 0
 let activeSearch: AbortController | null = null
 onUnmounted(() => { generation++; activeSearch?.abort() })
 const localResults = computed(() => library.searchTracks(submittedQuery.value))
@@ -271,16 +272,8 @@ function syncUrl(query: string): void {
 /**
  * 双击搜索结果。
  *
- * **同一页上两行队列来源不同，这是产品决定，不是疏漏**：
- *   - 双击**在线**曲 → 先记进内置的「默认列表」，然后队列 = 默认列表的全部曲目、
- *     从刚点的这首开始播。在线歌的搜索结果一次就翻页没了，用它当队列等于听完这一
- *     页就断；默认列表是跨搜索累积的，所以"在线听的东西有个地方收着"这件事由它承担。
- *   - 双击**本地**曲 → 维持原样，队列 = 当前页 results。本地曲本来就整库常驻，
- *     没有"记下来才听得完"的问题，把它塞进默认列表只会让那个列表变成曲库的副本。
- *   - 「播放全部」→ 队列 = 当前页 results（本地+在线混排），**不写默认列表**：
- *     那是"把这一屏都听一遍"，不是"把这些歌收藏起来"。
- * 判据是"被点的这一首是不是在线的"，不是"当前页签是什么"——`全部` 页签两样混排，
- * 按页签判会让本地曲走在线那条路，或反过来。
+ * 本地和在线结果都只提交被点中的这一条；音频路径由条目本身决定。点击搜索“播放全部”
+ * 时才把当前已加载的混合结果作为列表队列，且不隐式收集尚未开始播放的歌曲。
  */
 /** What the panel's history page should call a list started from this page. */
 function searchLabel(list: string): string {
@@ -292,62 +285,32 @@ async function playAt(index: number): Promise<void> {
   const track = results.value[index]
   if (!track) return
   if (!isLocalTrack(track) && !hasSources.value) { toast.error('在线播放需要可用音源，可在音源管理中导入'); return }
-  if (isLocalTrack(track)) { await player.playQueue(results.value, index, searchLabel('搜索')); return }
-  await playOnlineFromDefaultList(track)
+  await player.playQueue([track], 0, searchLabel('单曲'), { singleTrackAudition: true })
 }
 
-/**
- * 在线曲：记进默认列表，再把整个默认列表当队列，从这一首开始。
- *
- * 写入时机选在**开始播之前**。理由不是"用户表达了意图"这一条那么软，硬的在于失败
- * 信号不可靠：在线播放的失败经常是**延后**的（解析降级、逐家重试、`waiting` 挂起），
- * `playQueue` 返回时并不等于没播成。要是"播成才记"，回滚就会把最终真的播出来的歌
- * 从列表里删掉，比留下几首没播成的更糟。
- *
- * 所以这里的语义是"我点过要听的在线歌"，不是"我听完成的歌"。同一首重复双击由
- * `addTracks` 按 id 去重兜住，不会灌爆。
- */
-async function playOnlineFromDefaultList(track: OnlineMusicInfo): Promise<void> {
-  await library.addToPlaylist('default', [track]).catch(() => undefined)
-  const queue = await window.jj.playlists.items('default').catch(() => [])
-  const start = queue.findIndex(item => item.id === track.id)
-  /*
-   * 找不到就不要播默认列表 —— 那会从列表第一首开始，用户点的是另一首，
-   * 听起来像"双击放错了歌"。写入失败就老老实实只播这一首并说明。
-   */
-  if (start < 0) {
-    toast.error('没能记进默认列表，这次只播这一首')
-    await player.playQueue([track], 0, '单曲')
-    return
-  }
-  await player.playQueue(queue, start, '默认列表')
-}
-
-/** 「播放全部」= 当前页这一屏，混合，不写默认列表。 */
+/** 「播放全部」只使用当前页已加载的结果，不暗中追加未加载的分页。 */
 async function playAll(): Promise<void> {
   if (results.value.length === 0) return
   await player.playQueue(results.value, 0, searchLabel('搜索'))
 }
+async function refreshPlatforms(): Promise<void> {
+  const request = ++platformGeneration
+  try {
+    const providers = await window.jj.music.providers()
+    if (request !== platformGeneration) return
+    platforms.value = [...VIEW_SCOPES, ...providers]
+  } catch {
+    if (request !== platformGeneration) return
+    platforms.value = [...VIEW_SCOPES]
+  }
+  if (!platforms.value.some(platform => platform.id === activeSource.value)) {
+    activeSource.value = 'all'
+    saveView({ source: 'all' })
+  }
+}
 onMounted(() => {
-  // `全部` and `本地音乐` remain available even if the main process cannot
-  // enumerate admitted platforms. A remembered tab that is no longer admitted
-  // returns to `全部` instead of leaving the search view on an invisible scope.
-  void window.jj.music.providers()
-    .then((providers) => {
-      platforms.value = [...VIEW_SCOPES, ...providers]
-      if (!platforms.value.some(platform => platform.id === activeSource.value)) {
-        activeSource.value = 'all'
-        saveView({ source: 'all' })
-      }
-    })
-    .catch(() => {
-      platforms.value = [...VIEW_SCOPES]
-      if (!VIEW_SCOPES.some(platform => platform.id === activeSource.value)) {
-        activeSource.value = 'all'
-        saveView({ source: 'all' })
-      }
-    })
-    .finally(() => { if (keyword.value) void runSearch() })
+  // Keep local scopes available if directory adapters cannot be enumerated.
+  void refreshPlatforms().finally(() => { if (keyword.value) void runSearch() })
 })
 watch(() => route.query.q, value => {
   keyword.value = typeof value === 'string' ? value : ''
@@ -484,7 +447,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
     <header class="view__header">
       <div><h1 class="view__title">全局搜索</h1><p class="view__subtitle">搜索本地曲库与在线音乐，切换平台可只看该来源的结果</p></div>
       <!-- 与曲库页/流派页同一个位置、同一个按钮；没有结果时整块不出现，不给一个点不动的按钮。 -->
-      <div v-if="results.length" class="header-actions"><button class="btn btn--primary" type="button" @click="playAll">播放全部</button></div>
+      <div v-if="results.length" class="header-actions"><button class="btn btn--primary" type="button" @click="playAll">播放全部（已加载 {{ results.length }} 首）</button></div>
     </header>
     <form class="searchbar" @submit.prevent="runSearch()">
       <div class="searchbar__field">
@@ -514,7 +477,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
       </div>
     </div>
     <div v-if="searchError" class="search-status">{{ searchError }} · 本地曲库不受影响</div>
-    <div v-if="!hasOnlineSearchPlatforms && searched && activeSource !== 'local'" class="notice"><span>当前只显示本地匹配。在线目录请求需要你同意，并启用且验证声明了对应平台的 LX 音源。</span><button class="btn btn--ghost" @click="router.push('/sources')">音源管理</button></div>
+    <div v-if="!hasOnlineSearchPlatforms && searched && activeSource !== 'local'" class="notice"><span>在线搜索服务暂不可用，当前只显示本地匹配。</span></div>
     <TrackList v-if="results.length" ref="searchList" :tracks="results" :show-source="true" observe-end @end-reached="loadMore()" @play="(_, index) => playAt(index)"/>
     <div v-else-if="searched && !searching" class="empty"><span class="empty__title">没有找到「{{ submittedQuery }}」</span><span class="empty__hint">换个关键词试试。</span></div>
     <div v-else-if="!searched" class="empty"><span class="empty__title">发现本地收藏，也搜索在线音乐</span><span class="empty__hint">输入歌名、艺术家或专辑，搜索所有来源。</span></div>

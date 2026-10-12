@@ -120,10 +120,10 @@ test('艺人头像：注入解析器返回 null 时，就是「没有头像」�
   assert.equal(result, null)
 })
 
-test('main process gates every online catalog request with live source state and consent', () => {
+test('main process uses adapter capabilities without consent controls', () => {
   assert.match(indexSource, /sourcesByScript:\s*\(\)\s*=>\s*sourceEngine\.getSourcesByScript\(\)/)
   assert.match(indexSource, /isScriptEnabled:\s*\(apiId\)\s*=>\s*sourceStore\.metas\(\)\.some/)
-  assert.match(indexSource, /catalogConsent:\s*\(\)\s*=>\s*settings\.get\(\)\.onlineCatalogConsent/)
+  assert.doesNotMatch(indexSource, /onlineCatalogConsent|maybePromptOnlineCatalogConsent/)
 
   // This switch is retained only so settings files from older versions still load.
   assert.doesNotMatch(indexSource, /\.settings\.get\(\)\.allowBuiltinOnlineSearch/)
@@ -141,7 +141,7 @@ test('online catalog UI follows admitted sources and keeps saved offline records
   assert.doesNotMatch(playlistImportView, /:src="preview\.coverUrl"/)
   assert.match(searchView, /hasOnlineSearchPlatforms/)
   assert.match(trackList, /不可用/)
-  assert.match(sourcesView, /在线目录请求/)
+  assert.match(sourcesView, /在线资料默认可用/)
   assert.match(trackList, /trackCoverUrl\(/)
   assert.match(playerBar, /trackCoverUrl\(/)
   assert.match(nowPlayingView, /trackCoverUrl\(/)

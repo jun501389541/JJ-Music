@@ -10,7 +10,6 @@ const source = (id, actions = ['musicUrl']) => ({
 })
 
 function fixture() {
-  let consent = false
   const enabled = new Set(['kw-api', 'tx-no-music-url'])
   let runtimes = [
     { apiId: 'kw-api', sources: [source('kw')] },
@@ -20,68 +19,56 @@ function fixture() {
   ]
   const registry = new OnlinePlatformRegistry({
     sourcesByScript: () => runtimes,
-    isScriptEnabled: apiId => enabled.has(apiId),
-    catalogConsent: () => consent
+    isScriptEnabled: apiId => enabled.has(apiId)
   })
   return {
     registry,
     enabled,
-    setConsent(value) { consent = value },
     setRuntimes(value) { runtimes = value }
   }
 }
 
-test('unconfirmed catalog consent keeps every platform capability closed', () => {
+test('catalog capabilities are available by default', () => {
   const { registry } = fixture()
 
   assert.deepEqual(registry.eligiblePlatforms(), ['kw'])
-  assert.deepEqual(registry.platforms('search'), [])
-  assert.equal(registry.allows('kw', 'search'), false)
+  assert.deepEqual(registry.platforms('search'), ['tx', 'wy', 'kw', 'kg', 'mg'])
+  assert.equal(registry.allows('kw', 'search'), true)
 })
 
-test('a sole enabled kw source opens only kw capabilities it can serve', () => {
-  const { registry, setConsent } = fixture()
-  setConsent(true)
+test('app adapter capabilities are available without an LX source', () => {
+  const { registry, setRuntimes } = fixture()
+  setRuntimes([])
 
-  assert.deepEqual(registry.platforms('search'), ['kw'])
-  assert.deepEqual(registry.platforms('hotWords'), ['kw'])
-  assert.deepEqual(registry.platforms('lyrics'), ['kw'])
-  assert.deepEqual(registry.platforms('playlistImport'), ['kw'])
-  assert.deepEqual(registry.platforms('artistImage'), [])
-  assert.deepEqual(registry.platforms('artistDetail'), [])
-  assert.deepEqual(registry.platforms('albumDetail'), [])
-  assert.equal(registry.allows('tx', 'search'), false)
+  assert.deepEqual(registry.platforms('search'), ['tx', 'wy', 'kw', 'kg', 'mg'])
+  assert.deepEqual(registry.platforms('hotWords'), ['tx', 'wy', 'kw', 'kg'])
+  assert.deepEqual(registry.platforms('lyrics'), ['tx', 'wy', 'kw', 'mg'])
+  assert.deepEqual(registry.platforms('playlistImport'), ['tx', 'wy', 'kw', 'kg', 'mg'])
+  assert.deepEqual(registry.platforms('artistImage'), ['tx', 'wy', 'kg', 'mg'])
+  assert.deepEqual(registry.platforms('artistDetail'), ['wy'])
+  assert.deepEqual(registry.platforms('albumDetail'), ['wy'])
+  assert.equal(registry.allows('tx', 'search'), true)
   assert.equal(registry.allows('local', 'search'), false)
 })
 
-test('precision artist and album details are enabled only for an active wy source', () => {
-  const { registry, enabled, setConsent, setRuntimes } = fixture()
-  enabled.add('wy-api')
-  setConsent(true)
-  setRuntimes([{ apiId: 'wy-api', sources: [source('wy')] }])
+test('source eligibility remains independent from default directory capability', () => {
+  const { registry, enabled, setRuntimes } = fixture()
 
-  assert.deepEqual(registry.platforms('artistDetail'), ['wy'])
-  assert.deepEqual(registry.platforms('albumDetail'), ['wy'])
-
-  enabled.delete('wy-api')
-  assert.deepEqual(registry.platforms('artistDetail'), [])
-  assert.deepEqual(registry.platforms('albumDetail'), [])
-})
-
-test('eligibility is re-evaluated from enabled healthy scripts and musicUrl declarations', () => {
-  const { registry, enabled, setConsent, setRuntimes } = fixture()
-  setConsent(true)
-
+  assert.deepEqual(registry.eligiblePlatforms(), ['kw'])
   enabled.delete('kw-api')
-  assert.deepEqual(registry.platforms('search'), [])
+  assert.deepEqual(registry.eligiblePlatforms(), [])
+  assert.deepEqual(registry.platforms('search'), ['tx', 'wy', 'kw', 'kg', 'mg'])
 
   enabled.add('kw-api')
   setRuntimes([{ apiId: 'kw-api', sources: [source('kw', ['lyric'])] }])
-  assert.deepEqual(registry.platforms('search'), [])
+  assert.deepEqual(registry.eligiblePlatforms(), [])
+  assert.deepEqual(registry.platforms('search'), ['tx', 'wy', 'kw', 'kg', 'mg'])
 
   setRuntimes([{ apiId: 'kw-api', sources: [source('kw')] }])
-  assert.deepEqual(registry.platforms('search'), ['kw'])
+  assert.deepEqual(registry.eligiblePlatforms(), ['kw'])
+  assert.deepEqual(registry.platforms('search'), ['tx', 'wy', 'kw', 'kg', 'mg'])
 
   setRuntimes([])
-  assert.deepEqual(registry.platforms('search'), [])
+  assert.deepEqual(registry.eligiblePlatforms(), [])
+  assert.deepEqual(registry.platforms('search'), ['tx', 'wy', 'kw', 'kg', 'mg'])
 })

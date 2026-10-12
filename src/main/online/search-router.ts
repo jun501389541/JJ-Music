@@ -72,7 +72,7 @@ export class SearchRouter {
     if (selected.length === 0) {
       return {
         list: [], total: 0, allPage: 0, servedBy: 'none', reason: 'noProvider',
-        message: '没有已启用且可用的音源支持在线目录请求。'
+        message: '该平台暂未提供在线搜索服务。'
       }
     }
 
@@ -129,7 +129,7 @@ export class SearchRouter {
         words: [],
         servedBy: 'none',
         reason: 'noProvider',
-        message: '该平台当前没有可用的热词来源。'
+        message: '该平台暂未提供在线热词服务。'
       }
     }
 

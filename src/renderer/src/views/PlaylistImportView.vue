@@ -46,9 +46,9 @@ async function save():Promise<void>{if(!preview.value||!rows.value.length)return
   }catch(e){error.value=e instanceof Error?e.message:'导入失败'}finally{busy.value=false}}
 </script>
 <template><div class="view import-view">
-  <header class="view__header"><div><h1 class="view__title">导入其他平台歌单</h1><p class="view__subtitle">复制公开歌单的网页版链接或歌单 ID，读取后保存到本地歌单。目录数据由 JJ Music 请求，需要同平台的已启用音源和你的同意。</p></div></header>
+  <header class="view__header"><div><h1 class="view__title">导入其他平台歌单</h1><p class="view__subtitle">复制公开歌单的网页版链接或歌单 ID，读取后保存到本地歌单。目录数据由 JJ Music 请求；在线播放仍需要可用 LX 音源。</p></div></header>
   <p v-if="providersLoading" class="note" role="status">正在读取可用平台…</p>
-  <div v-else-if="providers.length===0" class="notice"><span>当前没有已授权且可用的歌单平台。请在音源管理中启用并验证对应平台的 LX 音源；首次在线目录请求前需要同意。</span><button class="btn btn--ghost" type="button" @click="router.push('/sources')">音源管理</button></div>
+  <div v-else-if="providers.length===0" class="notice"><span>当前没有可用的歌单目录服务，请稍后重试。</span></div>
   <p v-if="providersError" class="error" role="alert">无法读取可用平台：{{ providersError }}</p>
   <form v-if="providers.length" class="import-form" @submit.prevent="read"><label>音乐平台<select v-model="source" class="input" :disabled="busy"><option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option></select></label><label>歌单链接或 ID<input v-model="input" class="input" :disabled="busy" placeholder="粘贴公开歌单链接或数字 ID"/></label><button class="btn btn--primary" :disabled="busy||!input.trim()">{{ busy?'处理中…':'读取歌单' }}</button></form>
   <p v-if="error" class="error" role="alert">{{ error }}</p>

@@ -20,14 +20,14 @@
  * See `devNodeModulesAncestor` below: without that step this check can pass for a
  * reason that has nothing to do with what ships.
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SYNTHETIC_PLAY_URL, SYNTHETIC_SOURCE_NAME, syntheticSource } from './synthetic-source.mjs'
+import { SYNTHETIC_SOURCE_NAME, syntheticSource } from './synthetic-source.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
@@ -133,6 +133,8 @@ const payloadOf = (entry) => String(entry.script ?? '')
  * ------------------------------------------------------------------ */
 
 const profile = mkdtempSync(join(tmpdir(), 'jj-clean-profile-'))
+// Online catalog access no longer has a consent prompt or setting. Keep this a
+// clean profile so the packaged smoke covers the actual first-launch defaults.
 const port = await new Promise((ok, no) => {
   const s = createServer()
   s.on('error', no)
@@ -276,7 +278,6 @@ try {
     // Ask for a tier above the floor on purpose: a ladder that quietly falls
     // back to 128k would still play, and would hide a source that cannot
     // actually serve what it declared.
-    const expected = `${SYNTHETIC_PLAY_URL}320k.mp3`
     const result = await evaluate(`(async () => {
       const track = { id: 'kw_selfcheck', name: '自检', singer: '自检', source: 'kw',
         meta: { songmid: 'selfcheck', qualitys: [{ type: '128k' }, { type: '320k' }] } }
@@ -284,7 +285,10 @@ try {
       catch (error) { return { ok: false, message: String(error?.message ?? error) } }
     })()`)
 
-    report(result.ok && result.url === expected ? 'ok' : 'x', '自检音源解析出播放地址',
+    // Script URLs are intentionally kept in the main process. The renderer gets
+    // an opaque jjstream token, not the upstream URL returned by the script.
+    const appStreamUrl = /^jjstream:\/\/audio\/[A-Za-z0-9_-]{16,128}$/.test(result.url ?? '')
+    report(result.ok && appStreamUrl ? 'ok' : 'x', '自检音源解析到应用内受控播放地址',
       result.ok ? `${result.quality} ${result.url}` : (result.message ?? '').slice(0, 220))
     report(result.quality === '320k' ? 'ok' : 'x', '音质阶梯未擅自降档', String(result.quality ?? '(无)'))
     // The strongest signal here: the forked child really issued a request, so
@@ -334,7 +338,33 @@ try {
     }
   }
 } finally {
-  child.kill()
+  if (process.platform === 'win32' && copiedDir) {
+    // The Windows app launcher can exit after handing off to a separate
+    // JJ Music.exe, so child.pid alone does not reliably identify the process
+    // that keeps this copied executable locked. Match the exact disposable EXE
+    // path, then stop only those matching process trees.
+    const stopByPath = [
+      '$exe = $env:JJ_PROBE_EXE',
+      '$matches = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $exe }',
+      'foreach ($p in $matches) { & taskkill.exe /PID $p.Id /T /F | Out-Null }',
+      '$remaining = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $exe }',
+      'if ($remaining) { exit 1 }'
+    ].join('; ')
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', stopByPath], {
+      env: { ...process.env, JJ_PROBE_EXE: exe },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15_000
+    })
+    if (result.error || result.status !== 0) {
+      console.log(`结束隔离应用进程失败（${result.error?.code ?? `exit ${result.status}`}）`)
+      if (child.pid && child.exitCode === null && child.signalCode === null) child.kill()
+    } else {
+      console.log('已结束隔离应用进程树')
+    }
+  } else {
+    if (child.pid && child.exitCode === null && child.signalCode === null) child.kill()
+  }
   markerServer?.close()
   await sleep(500)
   if (keep) console.log(`\n保留配置目录: ${profile}`)
@@ -345,6 +375,7 @@ try {
       try {
         rmSync(copiedDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 300 })
       } catch (error) {
+        failures += 1
         console.log(`清理应用副本失败（${error.code ?? error.message}），可手动删除: ${copiedDir}`)
       }
     }

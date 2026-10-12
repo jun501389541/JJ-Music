@@ -30,9 +30,9 @@ const player = usePlayerStore(), library = useLibraryStore(), ui = useUiStore()
 function openMore(event: MouseEvent): void {
   ui.openMenu(event, props.extraMenu ? [...playbackActions(), ...props.extraMenu()] : playbackActions())
 }
-const cover = computed(() => trackCoverUrl(player.currentTrack, library.settings.onlineCatalogConsent, library.playableSources.map(source => source.id)) ?? null)
+const cover = computed(() => trackCoverUrl(player.currentTrack) ?? null)
 const lyric = computed(() => player.lyrics?.lines[player.activeLyricIndex]?.text)
-const spec = computed(() => { const t = player.currentTrack; return t && isLocalTrack(t) && t.sampleRate ? `${t.sampleRate / 1000} kHz` : t && !isLocalTrack(t) ? t.source.toUpperCase() : '—' })
+const spec = computed(() => { const t = player.currentTrack; return t && isLocalTrack(t) && t.sampleRate ? `${t.sampleRate / 1000} kHz` : t && !isLocalTrack(t) ? (player.resolvedResource?.actual.source ?? t.source).toUpperCase() : '—' })
 
 /**
  * Toolbar volume.
@@ -145,7 +145,7 @@ const timeLabel = computed(() => {
       volume it opens onto. Both bars share this markup, so the order is the
       same here and in the now-playing view.
     -->
-    <div class="mini-right"><div class="output-spec"><AppIcon name="audio" :size="17"/><small>{{ spec }}</small></div><button class="icon-btn" title="更多" aria-label="播放更多选项" @click="openMore($event)"><AppIcon name="more" :size="19"/></button>
+    <div class="mini-right"><div class="output-spec"><AppIcon name="audio" :size="17"/><small :title="player.resolvedResource ? `按 ${player.resolvedResource.resolvedQuality} 档位解析，规格未检测` : undefined">{{ spec }}</small></div><button class="icon-btn" title="更多" aria-label="播放更多选项" @click="openMore($event)"><AppIcon name="more" :size="19"/></button>
       <!--
         Toolbar volume stays an always-visible horizontal slider with the
         percentage beside it. A popover was tried here and rejected: in the

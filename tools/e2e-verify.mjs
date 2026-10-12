@@ -258,28 +258,14 @@ function createIsolatedProfile() {
   return dir
 }
 
-/** Grant online catalog access only in the disposable profile for an opted-in live E2E run. */
-function enableOnlineCatalogForLiveE2E(profileDir) {
-  if (process.env.JJ_E2E_ONLINE !== '1') return false
-  const file = join(profileDir, 'settings.json')
-  const settings = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
-  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-    throw new Error('isolated settings.json is malformed; cannot set the live E2E consent fixture')
-  }
-  settings.onlineCatalogConsent = true
-  settings.onlineCatalogConsentPrompted = true
-  writeFileSync(file, JSON.stringify(settings))
-  return true
-}
-
 const keepProfile = process.argv.includes('--keep-profile')
 const profileBefore = fingerprintRealProfile()
 /** How much of the developer's data there was to compare — an empty set passes vacuously. */
 const profileCompared = PROFILE_FILES.filter((name) => existsSync(join(realDataDir, name))).length
 const profileDir = createIsolatedProfile()
 console.log(`隔离 profile: ${profileDir}`)
-const liveOnlineE2E = enableOnlineCatalogForLiveE2E(profileDir)
-if (liveOnlineE2E) console.log('在线目录许可仅在该隔离 profile 中启用（JJ_E2E_ONLINE=1）')
+const assertLiveOnlineResults = process.env.JJ_E2E_ONLINE === '1'
+if (assertLiveOnlineResults) console.log('本次会检查在线目录实际返回结果（JJ_E2E_ONLINE=1）')
 
 // The debug port is requested through JJ_DEBUG_PORT rather than a command-line
 // switch, because Electron rejects `--remote-debugging-port` as a forwarded argv
@@ -453,7 +439,7 @@ try {
       nextEnabled: Boolean(document.querySelector('.online-entity__pages button:last-child') && !document.querySelector('.online-entity__pages button:last-child').disabled)
     }))()`
     let exactArtist = await evaluate(cdp, readArtistState)
-    for (let attempt = 0; liveOnlineE2E && exactArtist.loading && attempt < 20; attempt += 1) {
+    for (let attempt = 0; assertLiveOnlineResults && exactArtist.loading && attempt < 20; attempt += 1) {
       await sleep(500)
       exactArtist = await evaluate(cdp, readArtistState)
     }
@@ -468,7 +454,7 @@ try {
       await sleep(1800)
       artistPaginationResult = await evaluate(cdp, `document.querySelector('.online-entity__pages')?.textContent?.replace(/\\s+/g, ' ').trim() ?? 'missing'`)
       check('online artist pagination reaches page two', artistPaginationResult.includes('第 2 /'), artistPaginationResult)
-      if (liveOnlineE2E && artistPaginationResult.includes('第 2 /')) {
+      if (assertLiveOnlineResults && artistPaginationResult.includes('第 2 /')) {
         const playbackRows = await evaluate(cdp, `([...document.querySelectorAll('.track-row .row-play')]).slice(0, 3).map((button, index) => ({
           index,
           title: button.closest('.track-row')?.querySelector('.track-label')?.textContent?.trim() ?? ''
@@ -521,8 +507,8 @@ try {
           return true
         })()`)
       }
-    } else if (liveOnlineE2E) {
-      check('online artist pagination exposes the next page', false, exactArtist.message || 'opted-in profile returned no second page')
+    } else if (assertLiveOnlineResults) {
+      check('online artist pagination exposes the next page', false, exactArtist.message || 'online profile returned no second page')
     } else {
       console.log('  SKIP  live artist pagination: source access is disabled or the endpoint did not expose a second page')
     }
@@ -576,8 +562,8 @@ try {
     console.log(`  results: ${search.count}, first: ${JSON.stringify(search.first)}`)
     if (search.count > 0) {
       check('search returned results through the full IPC path', true, `${search.count}`)
-    } else if (!liveOnlineE2E) {
-      console.log('  SKIP  online result assertion: catalog permission was not enabled for this E2E profile')
+    } else if (!assertLiveOnlineResults) {
+      console.log('  SKIP  online result assertion: live catalog result checks require JJ_E2E_ONLINE=1')
     } else {
       check('search returned results through the full IPC path', false, `${search.count}`)
     }

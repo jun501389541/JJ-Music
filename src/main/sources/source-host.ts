@@ -30,6 +30,7 @@
 import { installBrowserShims } from './browser-shims'
 import { describeScript } from './script-header'
 import { readFileSync } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 /* ------------------------------------------------------------------ *
  * Worker payload
@@ -342,7 +343,10 @@ function lxRequest(
   callback?: (err: Error | null, response?: unknown, body?: unknown) => void
 ): (() => void) & Promise<unknown> {
   const controller = new AbortController()
-  const promise = performRequest(url, options, controller)
+  const scope = requestScope.getStore()
+  scope?.controllers.add(controller)
+  if (scope?.cancelled) controller.abort()
+  const promise = performRequest(url, options, controller).finally(() => scope?.controllers.delete(controller))
 
   if (typeof callback === 'function') {
     promise.then(
@@ -791,7 +795,32 @@ process.on('unhandledRejection', (reason: unknown) => {
   else failInit(message)
 })
 
+interface RequestScope { cancelled: boolean; controllers: Set<AbortController> }
+const requestScope = new AsyncLocalStorage<RequestScope>()
+const activeRequestScopes = new Map<number, RequestScope>()
+// Cover script fetch/XHR calls as well as lx.request without changing LX payloads.
+const nativeFetch = globalThis.fetch
+globalThis.fetch = (input, options) => {
+  const scope = requestScope.getStore()
+  if (!scope) return nativeFetch(input, options)
+  const controller = new AbortController()
+  scope.controllers.add(controller)
+  if (scope.cancelled) controller.abort()
+  const inputSignal = options?.signal ?? (input instanceof Request ? input.signal : undefined)
+  const signal = inputSignal ? AbortSignal.any([inputSignal, controller.signal]) : controller.signal
+  return nativeFetch(input, { ...options, signal })
+}
+
 function handleRequest(message: { type: string; id?: number; payload?: unknown }): void {
+  if (message.type === 'cancel' && message.id !== undefined) {
+    const scope = activeRequestScopes.get(message.id)
+    if (scope) {
+      scope.cancelled = true
+      for (const controller of scope.controllers) controller.abort()
+      activeRequestScopes.delete(message.id)
+    }
+    return
+  }
   if (message.type !== 'request' || message.id === undefined) return
   const id = message.id
 
@@ -818,12 +847,18 @@ function handleRequest(message: { type: string; id?: number; payload?: unknown }
     return
   }
 
+  const scope: RequestScope = { cancelled: false, controllers: new Set() }
+  activeRequestScopes.set(id, scope)
   Promise.resolve()
-    .then(() => handler(message.payload))
+    .then(() => requestScope.run(scope, () => {
+      if (scope.cancelled) throw new Error('音源请求已取消')
+      return handler(message.payload)
+    }))
     .then(
-      (data) => send({ type: 'response', id, data }),
-      (error: unknown) => send({ type: 'response-error', id, error: describeError(error) })
+      (data) => { if (!scope.cancelled) send({ type: 'response', id, data }) },
+      (error: unknown) => { if (!scope.cancelled) send({ type: 'response-error', id, error: describeError(error) }) }
     )
+    .finally(() => activeRequestScopes.delete(id))
 }
 
 if (scratchDir) {
@@ -838,15 +873,19 @@ if (scratchDir) {
   // fire. The poll is the safety net; watch is only the latency optimisation.
   import('node:fs').then(({ watch, readdirSync }) => {
     const dispatched = new Set<number>()
+    const cancellations = new Set<number>()
     const dispatchPending = (): void => {
       try {
-        for (const name of readdirSync(scratchDir)) {
-          if (!name.startsWith('req-') || !name.endsWith('.json')) continue
-          const id = Number(name.slice(4, -5))
-          if (!Number.isFinite(id) || dispatched.has(id)) continue
+        // Register request scopes before processing cancellations in the same poll.
+        for (const name of readdirSync(scratchDir).sort((a, b) => Number(a.startsWith('cancel-')) - Number(b.startsWith('cancel-')))) {
+          const cancel = name.startsWith('cancel-')
+          if ((!name.startsWith('req-') && !cancel) || !name.endsWith('.json')) continue
+          const id = Number(name.slice(cancel ? 7 : 4, -5))
+          const seen = cancel ? cancellations : dispatched
+          if (!Number.isFinite(id) || seen.has(id)) continue
           try {
             const payload = JSON.parse(readFileSync(join(scratchDir, name), 'utf8'))
-            dispatched.add(id)
+            seen.add(id)
             handleRequest(payload)
           } catch {
             /* partial read racing the parent's rename; the next poll retries */

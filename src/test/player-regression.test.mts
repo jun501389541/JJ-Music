@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { WebAudioEngine } from './renderer/audio/web-audio-engine.js'
 import { useLibraryStore } from './renderer/stores/library.js'
 import { usePlayerStore } from './renderer/stores/player.js'
+import { useToastStore } from './renderer/stores/toast.js'
 
 function deferred() {
   let resolve, reject
@@ -73,7 +74,7 @@ function setup() {
     setInterval: () => 1,
     clearInterval: () => {},
     jj: {
-      music: { url: async () => ({ url: 'https://test/audio', quality: '320k' }), enrich: async track => track },
+      music: { cancel: () => {}, url: async () => ({ url: 'https://test/audio', quality: '320k' }), enrich: async track => track },
       lyric: { resolve: async () => emptyLyric, searchOnline: async () => emptyLyric, importFile: async () => null },
       sources: {
         available: async () => [],
@@ -85,7 +86,24 @@ function setup() {
     }
   }
   store = usePlayerStore()
+  store.setQuality('320k')
   return store
+}
+function setupPlaylistStorage({ fail = false } = {}) {
+  const lists = { default: [], favorites: [] }
+  window.jj.playlists = {
+    addTracks: async (id, tracks) => {
+      if (fail) throw new Error('存储不可用')
+      const current = lists[id] ?? (lists[id] = [])
+      for (const track of tracks) {
+        if (!current.some(item => item.id === track.id)) current.push(structuredClone(track))
+      }
+      return tracks.length
+    },
+    list: async () => [],
+    items: async id => lists[id] ?? []
+  }
+  return lists
 }
 afterEach(() => { store?.stop(); store?.$dispose() })
 
@@ -105,6 +123,44 @@ test('natural completion advances the queue, single repeat restarts, explicit ne
   assert.equal(player.currentTrack.id, 'b')
   await player.next()
   assert.equal(player.currentTrack.id, 'a')
+})
+
+test('a single-track search audition stops without changing the global repeat mode', async () => {
+  const player = setup()
+  player.setPlayMode('single')
+  await player.playQueue([local('audition')], 0, '单曲试听', { singleTrackAudition: true })
+
+  FakeAudio.instances[0].finish()
+  await flush()
+
+  assert.equal(player.currentTrack.id, 'audition')
+  assert.equal(player.playing, false)
+  assert.equal(player.playMode, 'single')
+})
+
+test('session snapshots preserve audition behavior and legacy sessions reset it', async () => {
+  const player = setup(), library = useLibraryStore()
+  const writes = []
+  window.jj.settings = { update: async patch => { writes.push(structuredClone(patch)); return patch } }
+  library.ready = true
+  player.setPlayMode('single')
+  await player.playQueue([local('resume-audition')], 0, '单曲试听', { singleTrackAudition: true })
+  player.flushSession()
+  await flush()
+  const saved = writes.find(patch => patch.lastSession)?.lastSession
+  assert.ok(saved)
+  assert.equal(saved.singleTrackAudition, true)
+
+  await player.playQueue([local('other')])
+  assert.equal(await player.restoreSession(saved), true)
+  await player.toggle()
+  FakeAudio.instances[0].finish()
+  await flush()
+  assert.equal(player.playing, false)
+  assert.equal(player.playMode, 'single')
+
+  await player.restoreSession({ ...saved, singleTrackAudition: undefined })
+  assert.equal(player.singleTrackAudition, false, 'legacy normal sessions must not inherit the previous audition context')
 })
 
 test('explicit stop never emits ended, including repeated stale ended events', async () => {
@@ -127,7 +183,7 @@ test('clearing a queue while URL resolution is pending never restarts audio', as
   window.jj.music.url = () => pending.promise
   const playing = player.playTrack(online('a'))
   player.clearQueue()
-  pending.resolve({ url: 'https://test/a' })
+  pending.resolve({ url: 'https://test/a', quality: '320k' })
   await playing
   assert.equal(FakeAudio.instances.length, 0)
   assert.equal(player.loading, false)
@@ -213,7 +269,7 @@ test('URL expires and a failed URL is refreshed only once', async () => {
   let time = realNow()
   let calls = 0
   Date.now = () => time
-  window.jj.music.url = async () => ({ url: `https://test/${++calls}` })
+  window.jj.music.url = async () => ({ url: `https://test/${++calls}`, quality: '320k' })
   try {
     await player.playTrack(online('a'))
     await player.playTrack(online('a'))
@@ -232,6 +288,245 @@ test('URL expires and a failed URL is refreshed only once', async () => {
   } finally { Date.now = realNow }
 })
 
+test('URL resolution failure retries once, then stays on the failed queue row', async () => {
+  const player = setup()
+  player.setQuality('128k')
+  let calls = 0
+  window.jj.music.url = async () => { calls++; throw new Error('source unavailable') }
+  const failed = online('url-failure')
+  const next = online('must-not-skip-to')
+
+  await player.playQueue([failed, next])
+  await flush()
+
+  assert.equal(calls, 2)
+  assert.deepEqual(player.queue.map(track => track.id), [failed.id, next.id])
+  assert.equal(player.currentTrack.id, failed.id)
+  assert.equal(player.currentIndex, 0)
+  assert.equal(player.playing, false)
+  assert.match(player.error, /source unavailable/)
+})
+
+test('strict same-tier switching exposes a resource while collection keeps the original song', async () => {
+  const player = setup()
+  player.setQuality('flac')
+  const lists = setupPlaylistStorage()
+  const original = online('original')
+  const calls = []
+  window.jj.sources.available = async () => [{ id: 'wy', actions: ['musicUrl'] }]
+  window.jj.music.search = async (_source, keyword) => {
+    assert.ok(keyword.includes('Song') && keyword.includes('Artist'))
+    return { list: [{ ...original, source: 'wy', id: 'wy_candidate' }] }
+  }
+  window.jj.music.url = async (source, _track, quality, strict, id) => {
+    assert.equal(strict, true)
+    assert.equal(typeof id, 'string')
+    calls.push(`${source}:${quality}`)
+    if (source === 'tx') throw new Error('original target tier unavailable')
+    return { url: 'https://test/switched', quality, providerId: 'stable', providerVersion: 'v2' }
+  }
+  await player.playTrack(original)
+  await flush()
+  assert.deepEqual(calls, ['tx:flac', 'wy:flac'])
+  assert.equal(player.currentTrack.id, original.id)
+  assert.equal(player.currentTrack.source, 'tx')
+  assert.equal(player.resolvedResource.actual.id, 'wy_candidate')
+  assert.equal(player.resolvedResource.actual.source, 'wy')
+  assert.equal(player.resolvedResource.providerVersion, 'v2')
+  assert.deepEqual(lists.default.map(track => track.id), [original.id])
+})
+
+test('degraded URLs never suppress the next playback target-tier attempt', async () => {
+  const player = setup()
+  player.setQuality('flac')
+  const calls = []
+  window.jj.music.url = async (_source, _track, requested) => {
+    calls.push(requested)
+    if (requested === 'flac') throw new Error('flac unavailable')
+    return { url: 'https://test/degraded', quality: requested }
+  }
+  await player.playTrack(online('downgrade'))
+  await player.playTrack(online('downgrade'))
+  assert.deepEqual(calls, ['flac', '320k', 'flac', '320k'])
+  assert.equal(player.resolvedResource.targetQuality, 'flac')
+  assert.equal(player.resolvedResource.resolvedQuality, '320k')
+})
+
+test('stop cancels a pending URL request without waiting for its late answer', async () => {
+  const player = setup(), pending = deferred(), cancelled = []
+  window.jj.music.cancel = id => cancelled.push(id)
+  window.jj.music.url = () => pending.promise
+  const starting = player.playTrack(online('cancel-pending'))
+  await flush()
+  player.stop()
+  await starting
+  assert.equal(cancelled.length, 1)
+  pending.resolve({ url: 'https://test/late-after-stop', quality: '320k' })
+  await flush()
+  assert.equal(player.playing, false)
+  assert.equal(player.resolvedResource, null)
+  assert.equal(FakeAudio.instances.length, 0)
+})
+test('startup media failure reuses the original wait budget instead of granting another minute', async () => {
+  const player = setup(), realNow = Date.now, realPlay = FakeAudio.prototype.play
+  let now = realNow(), calls = 0
+  Date.now = () => now
+  FakeAudio.prototype.play = function () {
+    now += 60_001
+    return Promise.reject(new Error('startup media failure'))
+  }
+  window.jj.music.url = async () => { calls++; return { url: 'https://test/startup', quality: '320k' } }
+  try {
+    await player.playTrack(online('startup-deadline'))
+    await flush()
+    assert.equal(calls, 1, 'the expired startup budget cannot start another URL request')
+    assert.equal(player.playing, false)
+    assert.equal(player.currentTrack.id, 'startup-deadline')
+    assert.match(player.error, /预算/)
+  } finally { Date.now = realNow; FakeAudio.prototype.play = realPlay }
+})
+
+function enableRealRampParameters() {
+  let current
+  window.AudioContext = class extends FakeAudioContext {
+    constructor() { super(); current = this }
+    gains = []
+    createGain() {
+      const gain = { value: 1, cancelScheduledValues() {}, setValueAtTime(value) { this.value = value }, linearRampToValueAtTime() {}, setTargetAtTime(value) { this.value = value } }
+      const item = { connect() {}, disconnect() {}, gain }
+      this.gains.push(item)
+      return item
+    }
+  }
+  return seconds => { current.currentTime = seconds; return current }
+}
+test('rapid manual selections cancel old fades before loading the latest song', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const player = setup(), advanceAudio = enableRealRampParameters()
+  player.setTransitionsEnabled?.(true)
+  await player.playTrack(local('fade-a'))
+  const b = player.playTrack(local('fade-b'))
+  await flush()
+  assert.match(FakeAudio.instances[0].src, /fade-a/)
+  const c = player.playTrack(local('fade-c'))
+  await flush()
+  await b
+  advanceAudio(0.3); context.mock.timers.tick(300)
+  await c
+  advanceAudio(2); context.mock.timers.tick(2000)
+  assert.match(FakeAudio.instances[0].src, /fade-c/)
+  assert.equal(player.currentTrack.id, 'fade-c')
+})
+test('pause during a pending switch cancels its fade and prevents a delayed load', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const player = setup(), advanceAudio = enableRealRampParameters()
+  player.setTransitionsEnabled?.(true)
+  await player.playTrack(local('pause-old'))
+  const switching = player.playTrack(local('pause-new'))
+  await flush()
+  await player.toggle()
+  await switching
+  advanceAudio(1); context.mock.timers.tick(1000)
+  assert.equal(FakeAudio.instances[0].src, '')
+  assert.equal(player.playing, false)
+  assert.equal(player.loading, false)
+})
+test('natural queue advance adds no manual-switch fade to the next song', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const player = setup(), advanceAudio = enableRealRampParameters()
+  player.setTransitionsEnabled?.(true)
+  await player.playQueue([local('natural-a'), local('natural-b')])
+  FakeAudio.instances[0].finish()
+  await flush()
+  assert.equal(player.currentTrack.id, 'natural-b')
+  assert.match(FakeAudio.instances[0].src, /natural-b/)
+  assert.equal(advanceAudio(0).gains[1].gain.value, 1)
+})
+
+test('outgoing events cannot override a selected song during its fade', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const player = setup(), advanceAudio = enableRealRampParameters()
+  await player.playQueue([local('event-a'), local('event-b'), local('event-c')])
+  const audio = FakeAudio.instances[0]
+  const switching = player.next()
+  audio.dispatchEvent(new Event('playing'))
+  audio.dispatchEvent(new Event('waiting'))
+  audio.fail()
+  audio.finish()
+  await flush()
+  assert.equal(player.currentTrack.id, 'event-b')
+  assert.equal(player.loading, true)
+  assert.equal(player.waiting, false)
+  assert.equal(player.error, null)
+  advanceAudio(0.3); context.mock.timers.tick(300)
+  await switching
+  assert.match(audio.src, /event-b/)
+  assert.equal(player.playing, true)
+})
+
+test('natural end during a requested pause does not advance or repeat', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const player = setup(), advanceAudio = enableRealRampParameters()
+  await player.playQueue([local('pause-end-a'), local('pause-end-b')])
+  const audio = FakeAudio.instances[0], calls = audio.playCalls
+  const pausing = player.toggle()
+  audio.finish()
+  await flush()
+  advanceAudio(0.15); context.mock.timers.tick(150)
+  await pausing
+  assert.equal(player.currentTrack.id, 'pause-end-a')
+  assert.equal(audio.playCalls, calls)
+  assert.equal(player.playing, false)
+})
+
+test('replacing a playing queue fades the outgoing song before loading', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const player = setup(), advanceAudio = enableRealRampParameters()
+  await player.playQueue([local('queue-fade-a')])
+  const audio = FakeAudio.instances[0]
+  const switching = player.playQueue([local('queue-fade-b')])
+  await flush()
+  assert.match(audio.src, /queue-fade-a/)
+  assert.equal(audio.paused, false)
+  advanceAudio(0.3); context.mock.timers.tick(300)
+  await switching
+  assert.match(audio.src, /queue-fade-b/)
+  assert.equal(player.queueHistory[0].queue[0].id, 'queue-fade-a')
+})
+
+test('source invalidation aborts pending work and a late answer cannot refill the cache', async () => {
+  const player = setup(), pending = deferred(), cancelled = []
+  let calls = 0
+  window.jj.music.cancel = id => cancelled.push(id)
+  window.jj.music.url = async () => {
+    calls++
+    return calls === 1 ? pending.promise : { url: 'https://test/new-source', quality: '320k' }
+  }
+  const first = player.playTrack(online('source-version'))
+  await flush()
+  sourceChangeHandlers.forEach(handler => handler())
+  await first
+  pending.resolve({ url: 'https://test/old-source', quality: '320k' })
+  await flush()
+  await player.playTrack(online('source-version'))
+  assert.equal(calls, 2)
+  assert.equal(cancelled.length, 1)
+  assert.equal(FakeAudio.instances[0].src, 'https://test/new-source')
+})
+
+test('failed session restore is not reported as a successful restoration', async () => {
+  const player = setup()
+  window.jj.music.url = async () => { throw new Error('source unavailable') }
+  const track = online('restore-failure')
+
+  const restored = await player.restoreSession({ track, queue: [track], index: 0, position: 42 })
+
+  assert.equal(restored, false)
+  assert.equal(player.currentTrack.id, track.id)
+  assert.equal(player.playing, false)
+  assert.match(player.error, /source unavailable/)
+})
+
 test('alternate source skips live versions and duration mismatches', async () => {
   const player = setup()
   let chosen
@@ -244,7 +539,7 @@ test('alternate source skips live versions and duration mismatches', async () =>
   window.jj.music.url = async (source, track) => {
     if (source === 'tx') throw new Error('offline')
     chosen = track.id
-    return { url: 'https://test/fallback' }
+    return { url: 'https://test/fallback', quality: '320k' }
   }
   await player.playTrack(online('a'))
   assert.equal(chosen, 'correct')
@@ -290,7 +585,7 @@ test('toggle cancels a pending selection and can restart the stopped track', asy
   window.jj.music.url = () => pending.promise
   const selecting = player.playTrack(online('a'))
   await player.toggle()
-  pending.resolve({ url: 'https://test/a' })
+  pending.resolve({ url: 'https://test/a', quality: '320k' })
   await selecting
   assert.equal(player.playing, false)
   assert.equal(player.loading, false)
@@ -322,21 +617,20 @@ test('insert next moves an existing queued song without replacing current playba
  assert.equal(player.currentTrack.id, 'a')
 })
 
-test('online local preference uses only a matching recording and can be disabled', async () => {
+test('online playback never substitutes a matching local file, regardless of the legacy preference', async () => {
  const player = setup(), library = useLibraryStore()
  library.tracks = [{...local('local'),name:'Song',duration:180}]
  let resolutions = 0
- window.jj.music.url = async () => { resolutions++; return {url:'https://test/preference'} }
- await player.playTrack(online('online'))
- assert.equal(resolutions,0)
- assert.match(FakeAudio.instances[0].src, /jjmedia:/)
- library.settings.preferLocal=false
+ window.jj.music.url = async () => { resolutions++; return {url:'https://test/preference', quality: '320k'} }
+ library.settings.preferLocal=true
  await player.playTrack(online('online'))
  assert.equal(resolutions,1)
- library.settings.preferLocal=true
- library.tracks[0].name='Song (Live)'
- await player.playTrack(online('different'))
- assert.equal(resolutions,2)
+ assert.match(FakeAudio.instances[0].src, /https:\/\/test\/preference/)
+ assert.equal(player.currentTrack.source, 'tx')
+ library.settings.preferLocal=false
+ await player.playTrack(online('online'))
+ assert.equal(resolutions,1, 'changing the retired preference does not replace or re-resolve the online resource')
+ assert.match(FakeAudio.instances.at(-1).src, /https:\/\/test\/preference/)
 })
 
 test('recent playback records successful starts, deduplicates, and ignores failed or paused loads', async () => {
@@ -354,7 +648,67 @@ test('recent playback records successful starts, deduplicates, and ignores faile
  assert.deepEqual(library.recentPlayed.map(t=>t.id), ['a','b'])
  for(let i=0;i<110;i++) library.recordPlayed(local('history-'+i))
  assert.equal(library.recentPlayed.length,100)
- assert.equal(library.recentPlayed[0].id,'history-109')
+  assert.equal(library.recentPlayed[0].id,'history-109')
+})
+
+test('online collection waits for the current playing event and runs once per generation', async () => {
+  const player = setup(), library = useLibraryStore()
+  const lists = setupPlaylistStorage()
+  const pending = deferred()
+  window.jj.music.url = () => pending.promise
+  const track = online('collect-after-playing')
+  const selecting = player.playQueue([track])
+  await flush()
+  assert.equal(lists.default.length, 0, 'a pending URL is not a successful play')
+
+  pending.resolve({ url: 'https://test/collect-after-playing', quality: '320k' })
+  await selecting
+  await flush()
+  FakeAudio.instances[0].dispatchEvent(new Event('playing'))
+  await flush()
+
+  assert.deepEqual(lists.default.map(item => item.id), [track.id])
+  assert.deepEqual(library.recentPlayed.map(item => item.id), [track.id])
+})
+
+test('local playback and failed online resolution never enter the online collection', async () => {
+  const player = setup()
+  const lists = setupPlaylistStorage()
+  await player.playQueue([local('local-only')])
+  window.jj.music.url = async () => { throw new Error('source unavailable') }
+  await player.playQueue([online('failed-online')])
+  assert.deepEqual(lists.default, [])
+})
+
+test('late playback from a superseded generation cannot collect the old online track', async () => {
+  const player = setup()
+  const lists = setupPlaylistStorage()
+  const a = deferred(), b = deferred()
+  window.jj.music.url = (_source, track) => track.id === 'late-a' ? a.promise : b.promise
+
+  const first = player.playQueue([online('late-a')])
+  await flush()
+  const second = player.playQueue([online('current-b')])
+  await flush()
+  b.resolve({ url: 'https://test/current-b', quality: '320k' })
+  await second
+  a.resolve({ url: 'https://test/late-a', quality: '320k' })
+  await first
+  await flush()
+
+  assert.deepEqual(lists.default.map(item => item.id), ['current-b'])
+})
+
+test('collection persistence failure reports an error without stopping audio', async () => {
+  const player = setup()
+  setupPlaylistStorage({ fail: true })
+  const toast = useToastStore()
+  await player.playQueue([online('collection-write-failure')])
+  await flush()
+
+  assert.equal(player.playing, true)
+  assert.ok(toast.toasts.some(item => item.kind === 'error' && item.message.includes('加入默认列表失败')))
+  toast.toasts.forEach(item => toast.dismiss(item.id))
 })
 
 test('queue append deduplicates a batch and playNow starts an already queued track', async () => {
@@ -373,7 +727,7 @@ test('queue append deduplicates a batch and playNow starts an already queued tra
 test('unchanged quality retains resolved URLs; seek and numeric settings stay bounded', async () => {
  const player = setup()
  let calls=0
- window.jj.music.url = async () => { calls++;return {url:'https://test/cache'} }
+ window.jj.music.url = async () => { calls++;return {url:'https://test/cache', quality: '320k'} }
  await player.playTrack(online('a'))
  player.setQuality(player.quality)
  await player.playTrack(online('a'))
@@ -412,6 +766,23 @@ test('concurrent library initialization shares reads and installs listeners only
  assert.equal(reads,1)
  assert.equal(listeners,2)
  assert.equal(library.ready,true)
+})
+
+test('download library changes refresh tracks without ending an ongoing scan', async () => {
+  setup()
+  const library = useLibraryStore(), defaults = JSON.parse(JSON.stringify(library.settings))
+  let changed, tracks = []
+  window.jj.settings = { get: async () => defaults }
+  window.jj.library = { folders: async () => [], tracks: async () => tracks, onProgress: () => {}, onChanged: handler => { changed = handler } }
+  window.jj.playlists = { list: async () => [], items: async () => [] }
+  window.jj.sources = { available: async () => [], list: async () => [], onChanged: () => {} }
+  await library.init()
+  library.scanning = true
+  tracks = [local('new-download')]
+  changed()
+  await flush()
+  assert.equal(library.tracks[0].id, 'new-download')
+  assert.equal(library.scanning, true)
 })
 
 test('raising the volume is the way out of mute, which the fader cannot show', () => {
@@ -557,6 +928,27 @@ test('starting a whole list pages back to the one it replaced, two deep', async 
   const labels = player.queueHistory.map(entry => entry.label)
   assert.deepEqual(labels, ['专辑 · 三', '专辑 · 二'], 'newest first, and only two pages behind the live one')
   assert.deepEqual(player.queueHistory[0].queue.map(t => t.id), ['d'])
+})
+
+test('queue history saves its current index and play mode, then restores both', async () => {
+  const player = setup()
+  const original = [local('a'), local('b'), local('c')]
+  player.setPlayMode('random')
+  await player.playQueue(original, 2, '专辑 · 原列表')
+  await player.playQueue([local('replacement')], 0, '替换')
+
+  const snapshot = player.queueHistory[0]
+  assert.equal(snapshot.currentIndex, 2)
+  assert.equal(snapshot.playMode, 'random')
+  assert.equal(snapshot.singleTrackAudition, false)
+  original[0].name = 'later edit'
+  assert.equal(snapshot.queue[0].name, 'a', 'the snapshot is independent of its source list')
+
+  assert.equal(typeof player.playQueueSnapshot, 'function')
+  await player.playQueueSnapshot(snapshot)
+  assert.deepEqual(player.queue.map(track => track.id), ['a', 'b', 'c'])
+  assert.equal(player.currentIndex, 2)
+  assert.equal(player.playMode, 'random')
 })
 
 test('script cover bytes remain live but are omitted from recent, history and resume persistence', async () => {

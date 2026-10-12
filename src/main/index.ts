@@ -425,42 +425,6 @@ function requireServices(): Services {
   return services
 }
 
-let catalogConsentPrompt: Promise<void> | undefined
-
-/** Disclose the migrated platform path once, before an active LX source can open it. */
-function maybePromptOnlineCatalogConsent(svc: Services = requireServices()): Promise<void> {
-  if (catalogConsentPrompt) return catalogConsentPrompt
-  const current = svc.settings.get()
-  if (current.onlineCatalogConsent || current.onlineCatalogConsentPrompted || svc.onlinePlatforms.eligiblePlatforms().length === 0) {
-    return Promise.resolve()
-  }
-
-  catalogConsentPrompt = (async () => {
-    const options = {
-      type: 'question' as const,
-      title: '允许在线目录请求？',
-      message: 'JJ Music 的目录适配器会向对应音乐平台请求搜索、热词、歌词、封面、歌单和艺人图片资料。LX 音源脚本负责解析播放地址；只有启用且健康的音源声明了对应平台，JJ Music 才会请求该平台。',
-      buttons: ['暂不', '同意并开启'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true
-    }
-    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
-    const result = parent
-      ? await dialog.showMessageBox(parent, options)
-      : await dialog.showMessageBox(options)
-    await svc.settings.update({
-      onlineCatalogConsentPrompted: true,
-      onlineCatalogConsent: result.response === 1
-    })
-  })().catch((error) => {
-    console.error('在线目录说明未能显示:', error)
-  }).finally(() => {
-    catalogConsentPrompt = undefined
-  })
-  return catalogConsentPrompt
-}
-
 async function createServices(): Promise<Services> {
   await migrateLegacyData()
   const dataDir = app.getPath('userData')
@@ -478,8 +442,7 @@ async function createServices(): Promise<Services> {
   const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'))
   const onlinePlatforms = new OnlinePlatformRegistry({
     sourcesByScript: () => sourceEngine.getSourcesByScript(),
-    isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled),
-    catalogConsent: () => settings.get().onlineCatalogConsent
+    isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled)
   })
   const artistImages = new ArtistImageStore(dataDir, {
     saveCover: (data, format) => library.saveCover(data, format),
@@ -606,7 +569,16 @@ async function createServices(): Promise<Services> {
       : Promise.reject(new Error('下载不接受非字符串地址')),
     // 回收站，不是永久删除。回收站不收这个路径时（网络盘、某些可移动盘）
     // `trashItem` 会 reject，remove() 把它原样报给界面并且保留记录。
-    trash: (path) => shell.trashItem(path)
+    trash: (path) => shell.trashItem(path),
+    importFile: async path => {
+      const imported = await library.importDownloadedFile(path)
+      mainWindow?.webContents.send(IPC.libraryChanged)
+      return imported.id
+    },
+    removeLibraryFile: async path => {
+      await library.removeDownloadedFile(path)
+      mainWindow?.webContents.send(IPC.libraryChanged)
+    }
   })
   await downloads.load()
   const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, entityDetails, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
@@ -1510,7 +1482,7 @@ function registerIpc(): void {
     const { library, settings } = requireServices()
     const audioExts = ['mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wav']
     const lyricExts = ['lrc']
-    const scriptExts = ['js', 'json', 'txt']
+    const scriptExts = ['js', 'txt']
 
     const result = { audio: 0, lyric: 0, source: 0, folders: 0, skipped: 0, cancelled: false }
     const audioPaths: string[] = []
@@ -1662,8 +1634,6 @@ function registerIpc(): void {
      * so the renderer's copy is corrected by the same call.
      */
     const { libraryFolders: _libraryFolders, downloadFolder: _downloadFolder, ...writable } = patch
-    // Editing the explicit consent setting is itself the one-time disclosure decision.
-    if (patch.onlineCatalogConsent !== undefined) writable.onlineCatalogConsentPrompted = true
     // 关掉「记录搜索历史」就把已存的也清掉，而且此后任何补丁想写历史都写不进去。
     // 只看这一次补丁不够：渲染层手里那份设置可能比主进程旧，而这个开关的意思就是
     // "别留"。同一份补丁里把它打开（快照恢复、重置）仍然允许带着列表进来。
@@ -1799,7 +1769,7 @@ function registerIpc(): void {
     const { sourceEngine } = requireServices()
     const result = await dialog.showOpenDialog({
       title: '选择音源脚本',
-      filters: [{ name: '音源脚本', extensions: ['js', 'json', 'txt'] }],
+      filters: [{ name: '音源脚本', extensions: ['js', 'txt'] }],
       properties: ['openFile', 'multiSelections']
     })
     if (result.canceled || result.filePaths.length === 0) return null
@@ -1905,7 +1875,6 @@ function registerIpc(): void {
 
     sourceStore.setEnabled(id, true)
     await sourceEngine.reload(id)
-    await maybePromptOnlineCatalogConsent()
     return { started: true, report }
   })
 
@@ -2161,19 +2130,20 @@ function registerIpc(): void {
 
   handle(
     IPC.musicUrl,
-    async (_source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality) => {
+    async (_source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality, strict = false, requestId?: string) => cancellableRequest(requestId, async signal => {
       const { playbackRouter } = requireServices()
-      const result = await playbackRouter.musicUrl(musicInfo, quality)
+      const result = await playbackRouter.musicUrl(musicInfo, quality, strict === true, signal)
+      if (signal?.aborted) throw new Error('请求已取消')
       if (!result.providerId || !result.providerVersion) throw new Error('音源没有可验证的身份，无法安全播放')
       return {
         ...result,
         url: sourceMediaProxy.audioUrl(result.url, {
-          sourceId: _source,
+          sourceId: musicInfo.source,
           providerId: result.providerId,
           providerVersion: result.providerVersion
         })
       }
-    }
+    })
   )
 
   handle(IPC.musicLyric, async (_source: SourceId, musicInfo: OnlineMusicInfo) => {
@@ -2267,6 +2237,7 @@ function registerIpc(): void {
   handle(IPC.downloadsAdd, (tracks: OnlineMusicInfo[], quality: Quality) => requireServices().downloads.add(tracks, quality))
   handle(IPC.downloadsCancel, (id: string) => requireServices().downloads.cancel(id))
   handle(IPC.downloadsRetry, (id: string) => requireServices().downloads.retry(id))
+  handle(IPC.downloadsRetryImport, (id: string) => requireServices().downloads.retryImport(id))
   handle(IPC.downloadsRemove, (id: string, deleteFile: boolean) => requireServices().downloads.remove(id, deleteFile))
   // One resolution of "where downloads go", shared by the label in settings and the
   // button that opens the folder — if they ever disagreed, the button would open a
@@ -2845,9 +2816,8 @@ if (!app.requestSingleInstanceLock()) {
         void checkDailySourceUpdates(services!.sourceStore, {
           onChange: () => mainWindow?.webContents.send(IPC.sourcesChanged)
         }).catch(error => console.error('音源每日更新检查失败:', error))
-        return maybePromptOnlineCatalogConsent(services!)
       })
-      .catch((error) => console.error('启用音源时未能显示在线目录说明:', error))
+      .catch((error) => console.error('启动音源失败:', error))
 
     app.on('activate', () => {
       // Not `getAllWindows().length === 0`: the lyric overlay is a window too,

@@ -25,7 +25,7 @@
  * control that silently retargets playback is the mistake this shape avoids.
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import type { PlayableTrack } from '@shared/types'
+import type { PlayableTrack, QueueSnapshot } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useUiStore } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
@@ -46,9 +46,14 @@ function nameOf(label: string, tracks: PlayableTrack[]): string {
   return first ? `${first.singer ? `${first.singer} - ` : ''}${first.name} 等` : '空列表'
 }
 
-const pages = computed(() => [
+const pages = computed<Array<{ label: string; tracks: PlayableTrack[]; live: boolean; snapshot?: QueueSnapshot }>>(() => [
   { label: '当前队列', tracks: player.queue as PlayableTrack[], live: true },
-  ...player.queueHistory.map(entry => ({ label: nameOf(entry.label, entry.queue), tracks: entry.queue as PlayableTrack[], live: false }))
+  ...player.queueHistory.map(entry => ({
+    label: nameOf(entry.label, entry.queue),
+    tracks: entry.queue as PlayableTrack[],
+    live: false,
+    snapshot: entry as QueueSnapshot
+  }))
 ])
 
 /** Clamped so a history that just shrank cannot leave the panel on a blank page. */
@@ -115,12 +120,17 @@ async function clearQueue(): Promise<void> {
  * thing with a different starting row.
  */
 function playFromHistory(index: number): void {
-  void player.playQueue(shown.value.tracks, index, shown.value.label)
+  const snapshot = shown.value.live ? undefined : shown.value.snapshot
+  if (!snapshot) return
+  void player.playQueueSnapshot(snapshot, index)
   page.value = 0
 }
 
 function playThisList(): void {
-  playFromHistory(0)
+  const snapshot = shown.value.live ? undefined : shown.value.snapshot
+  if (!snapshot) return
+  void player.playQueueSnapshot(snapshot)
+  page.value = 0
 }
 </script>
 

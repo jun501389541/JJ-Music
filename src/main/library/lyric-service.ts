@@ -142,15 +142,17 @@ export async function lyricFromOtherPlatforms(
 }
 
 /** LRU-ish cache keyed by source version + track id, so re-opening a track is instant. */
-const cache = new Map<string, ResolvedLyric>()
+interface CachedLyric { value: ResolvedLyric; localVersion?: string }
+const cache = new Map<string, CachedLyric>()
 const CACHE_LIMIT = 64
 
-function cacheSet(key: string, value: ResolvedLyric): void {
+function cacheSet(key: string, value: ResolvedLyric, localVersion?: string): void {
+  cache.delete(key)
   if (cache.size >= CACHE_LIMIT) {
     const oldest = cache.keys().next().value
     if (oldest !== undefined) cache.delete(oldest)
   }
-  cache.set(key, value)
+  cache.set(key, { value, localVersion })
 }
 
 /**
@@ -213,7 +215,14 @@ export function clearLyricCache(trackId?: string): void {
  * once-true-then-lying badge this function exists to prevent.
  */
 export function primeLyricCache(trackId: string, resolved: ResolvedLyric, provider?: string): void {
-  cacheSet(cacheKeyFor(trackId, provider), resolved)
+  const key = cacheKeyFor(trackId, provider)
+  const previous = cache.get(key)
+  // Decorating the same result keeps its probe stamp; a different source or
+  // text must probe local sources again on the next read.
+  const sameContent = previous && previous.value.source === resolved.source &&
+    previous.value.lyric === resolved.lyric && previous.value.tlyric === resolved.tlyric &&
+    previous.value.rlyric === resolved.rlyric
+  cacheSet(key, resolved, sameContent ? previous.localVersion : undefined)
 }
 
 /**
@@ -259,10 +268,9 @@ export { sidecarPathFor }
  * Never throws: a track with no lyrics anywhere is a normal result, reported as
  * an empty lyric plus an explanatory note.
  *
- * The order is the index's own `assets.lyrics.main` list — the resolution chain as
- * data rather than a ladder of `if`s — with each candidate actually read before it
- * is accepted. See the chain construction below for the one case where the record
- * is deliberately not believed.
+ * Read the current sidecar first, then embedded tags, an effective cache entry,
+ * and finally the network. File stamps invalidate embedded/cache probes without
+ * requiring a library rescan; the sidecar is read on every request.
  *
  * `track` must be a record this process produced — an index entry, not an object
  * assembled from IPC. Step 1 reads a sidecar path derived from `track.path`, and
@@ -288,73 +296,49 @@ export async function resolveLocalLyric(
 ): Promise<ResolvedLyric> {
   const allowOnline = options.allowOnline !== false
   const key = cacheKeyFor(track.id, deps.provider)
-  if (!options.force) {
-    const cached = cache.get(key)
-    if (cached) return cached
+  let localVersion: string
+  try {
+    const info = await stat(track.path, { bigint: true })
+    localVersion = JSON.stringify([track.path, String(info.size), String(info.mtimeNs), String(info.ctimeNs)])
+  } catch { localVersion = `${track.path}:missing` }
+
+  // Sidecars are independent of the audio's metadata and may arrive between
+  // scans. Always read them before a previously cached online or local answer.
+  const sidecar = await readSidecar(sidecarPathFor(track.path))
+  if (sidecar?.trim()) {
+    const resolved: ResolvedLyric = { lyric: sidecar, source: 'sidecar', synchronized: looksSynchronized(sidecar), asset: { origin: 'sidecar' } }
+    cacheSet(key, resolved, localVersion)
+    return resolved
   }
+  const cached = options.force ? undefined : cache.get(key)
+  if (cached?.localVersion === localVersion && cached.value.source !== 'sidecar') return cached.value
 
-  // The chain is the recorded sources plus one always-probed exception.
-  //
-  // A sidecar is a *separate* file: dropping one next to the audio changes neither
-  // the audio's size nor its mtime, so an incremental scan can never notice it and
-  // the record cannot be trusted to mention it. An embedded tag is the opposite —
-  // writing one rewrites the audio file, which the scan does see — so when the
-  // record says there is no lyric tag we can skip a full `parseFile` of the track.
-  // A track indexed before records existed probes both, as before.
-  const recorded = track.assets?.lyrics?.main
-  const chain: AssetRef[] = [{ origin: 'sidecar' },
-    ...(recorded ?? [{ origin: 'embedded' } as AssetRef]).filter((source) => source.origin !== 'sidecar')]
-
-  for (const source of chain) {
-    // 1. a sidecar `.lrc` next to the audio (an explicit user choice, or a previous edit)
-    if (source.origin === 'sidecar') {
-      const sidecar = await readSidecar(sidecarPathFor(track.path))
-      if (sidecar?.trim()) {
-        const resolved: ResolvedLyric = { lyric: sidecar, source: 'sidecar', synchronized: looksSynchronized(sidecar), asset: source }
-        cacheSet(key, resolved)
-        return resolved
-      }
-      continue
+  // A rescan is not required to notice freshly written embedded tags. A cache
+  // primed by the picker has no file stamp, so probe local sources first too.
+  const embedded = await readEmbeddedLyric(track.path)
+  if (embedded?.lyric.trim()) {
+    const resolved: ResolvedLyric = {
+      lyric: embedded.lyric, source: 'embedded', synchronized: embedded.synchronized,
+      asset: { origin: 'embedded', synced: embedded.synchronized }
     }
-
-    // 2. the file's own lyric tag
-    if (source.origin === 'embedded') {
-      const embedded = await readEmbeddedLyric(track.path)
-      if (embedded?.lyric.trim()) {
-        const resolved: ResolvedLyric = {
-          lyric: embedded.lyric,
-          source: 'embedded',
-          synchronized: embedded.synchronized,
-          asset: { ...source, synced: embedded.synchronized }
-        }
-        cacheSet(key, resolved)
-        return resolved
-      }
-    }
-    // Anything else recorded (a cached or user-supplied lyric) has no on-disk
-    // reader yet, so it falls through to the network rather than being trusted.
+    cacheSet(key, resolved, localVersion)
+    return resolved
   }
-
-  // 3. online, matched by the track's own tags
+  if (cached && cached.localVersion === undefined && cached.value.source !== 'sidecar' && cached.value.source !== 'embedded') {
+    cacheSet(key, cached.value, localVersion)
+    return cached.value
+  }
   if (allowOnline) {
     const online = await searchLyricOnline(track, deps)
     if (online.lyric.trim()) {
-      cacheSet(key, online)
+      cacheSet(key, online, localVersion)
       return online
     }
   }
-
-  const empty: ResolvedLyric = {
-    lyric: '',
-    source: 'none',
-    synchronized: false,
-    note: allowOnline
-      ? '文件内没有内嵌歌词，同目录没有 .lrc，在线也没有匹配到歌词'
-      : '文件内没有内嵌歌词，同目录没有 .lrc'
+  return {
+    lyric: '', source: 'none', synchronized: false,
+    note: allowOnline ? '文件内没有内嵌歌词，同目录没有 .lrc，在线也没有匹配到歌词' : '文件内没有内嵌歌词，同目录没有 .lrc'
   }
-  // Deliberately not cached: availability may change once a network hiccup
-  // clears, and a negative result is cheap to recompute.
-  return empty
 }
 
 /**

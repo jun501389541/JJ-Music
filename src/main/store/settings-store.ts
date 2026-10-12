@@ -24,12 +24,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   volume: 0.8,
   playMode: 'list',
+  shortAudioTransitions: true,
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
   allowBuiltinOnlineSearch: false,
-  onlineCatalogConsent: false,
-  onlineCatalogConsentPrompted: false,
   downloadFolder: '',
   downloadLyric: true,
   downloadEmbedLyric: true,
@@ -62,7 +61,10 @@ export class SettingsStore {
     const parsed = await readJsonFile<Partial<AppSettings>>(this.filePath)
     if (parsed) {
       // Merge so new settings added in later versions get their defaults.
-      this.settings = { ...DEFAULT_SETTINGS, ...parsed }
+      const current = { ...parsed } as Partial<AppSettings> & Record<string, unknown>
+      delete current.onlineCatalogConsent
+      delete current.onlineCatalogConsentPrompted
+      this.settings = { ...DEFAULT_SETTINGS, ...current }
     }
     return this.settings
   }
@@ -73,7 +75,10 @@ export class SettingsStore {
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     await this.load()
-    this.settings = { ...this.settings, ...patch }
+    const current = { ...patch } as Partial<AppSettings> & Record<string, unknown>
+    delete current.onlineCatalogConsent
+    delete current.onlineCatalogConsentPrompted
+    this.settings = { ...this.settings, ...current }
     await this.persist()
     return this.get()
   }

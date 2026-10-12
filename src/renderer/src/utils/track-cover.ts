@@ -1,15 +1,13 @@
 import { isLocalTrack, ONLINE_SOURCE_IDS, type PlayableTrack, type SourceId } from '@shared/types'
 import { toMediaUrl } from '@shared/media-url'
 
-/** A third-party catalog cover is a request too: require consent and its live source. */
+/** Catalog covers are available independently of playback source availability. */
 export function trackCoverUrl(
   track: PlayableTrack | null | undefined,
-  catalogConsent: boolean,
-  playableSourceIds: readonly SourceId[]
 ): string | undefined {
   if (!track) return undefined
   if (isLocalTrack(track)) return track.coverPath ? toMediaUrl(track.coverPath) : undefined
-  if (!catalogConsent || !ONLINE_SOURCE_IDS.includes(track.source) || !playableSourceIds.includes(track.source)) {
+  if (!ONLINE_SOURCE_IDS.includes(track.source)) {
     return undefined
   }
   const fromScript = track.assets?.cover?.some(cover => cover.provider === '音源脚本')

@@ -77,7 +77,7 @@ export class OnlineEntityDetails {
 
   async artistPage(source: SourceId, id: string, page = 1, signal?: AbortSignal): Promise<OnlineEntityPage<OnlineArtistRef>> {
     if (source !== 'wy') return unavailablePage(page, '该平台的精确艺术家详情尚未开放。')
-    if (!this.allows(source, 'artistDetail')) return unavailablePage(page, '请启用并验证对应平台的 LX 音源，并同意在线目录请求。')
+    if (!this.allows(source, 'artistDetail')) return unavailablePage(page, '请确认已开启在线目录请求，并检查该平台的详情适配能力。')
     if (!isEntityId(id)) return unavailablePage(page, '缺少有效的艺术家平台 ID。')
     if (!Number.isInteger(page) || page < 1 || page > ONLINE_ARTIST_MAX_PAGES) {
       return unavailablePage(page, '艺术家曲目页码超出范围。')
@@ -124,7 +124,7 @@ export class OnlineEntityDetails {
 
   async albumPage(source: SourceId, id: string, page = 1, signal?: AbortSignal): Promise<OnlineEntityPage<OnlineAlbumRef>> {
     if (source !== 'wy') return unavailablePage(page, '该平台的精确专辑详情尚未开放。')
-    if (!this.allows(source, 'albumDetail')) return unavailablePage(page, '请启用并验证对应平台的 LX 音源，并同意在线目录请求。')
+    if (!this.allows(source, 'albumDetail')) return unavailablePage(page, '请确认已开启在线目录请求，并检查该平台的详情适配能力。')
     if (!isEntityId(id)) return unavailablePage(page, '缺少有效的专辑平台 ID。')
     if (!Number.isInteger(page) || page < 1 || page > ONLINE_ALBUM_MAX_PAGES) {
       return unavailablePage(page, '专辑曲目页码超出范围。')
@@ -170,7 +170,7 @@ export class OnlineEntityDetails {
     if (source !== 'wy') return unavailableCandidates(trimmed, '该平台尚无可验证的详情候选搜索。')
     if (!trimmed) return unavailableCandidates('', '请输入名称以查找候选项。')
     if (!this.allows(source, 'search')) {
-      return unavailableCandidates(trimmed, '请启用并验证对应平台的 LX 音源，并同意在线目录请求。')
+      return unavailableCandidates(trimmed, '请在设置中开启在线目录请求。')
     }
 
     try {

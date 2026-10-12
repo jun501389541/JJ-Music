@@ -74,8 +74,10 @@ export interface AudioEngine {
 
   /** Load a track, replacing whatever was loaded. Resolves when ready. */
   load(options: LoadOptions): Promise<void>
-  play(): Promise<void>
-  pause(): void
+  play(fadeInMs?: number): Promise<void>
+  pause(fadeOutMs?: number): void | Promise<void>
+  fadeOut?(durationMs: number): Promise<boolean>
+  setTransitionsEnabled?(enabled: boolean): void
   /** Stop and release the current track. */
   stop(): void
   /** Seek to an absolute position in seconds. */

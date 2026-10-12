@@ -51,8 +51,7 @@ function makeRegistry(state) {
       apiId: 'test-script',
       sources: state.platforms.map((id) => ({ id, name: id, actions: ['musicUrl'] }))
     }] : [],
-    isScriptEnabled: () => state.enabled,
-    catalogConsent: () => state.consent
+    isScriptEnabled: () => state.enabled
   })
 }
 
@@ -84,7 +83,7 @@ function checkMainProcessWiring() {
   const source = readFileSync(join(repoRoot, 'src', 'main', 'index.ts'), 'utf8')
   assert.match(source, /sourcesByScript:\s*\(\)\s*=>\s*sourceEngine\.getSourcesByScript\(\)/)
   assert.match(source, /isScriptEnabled:\s*\(apiId\)\s*=>\s*sourceStore\.metas\(\)\.some/)
-  assert.match(source, /catalogConsent:\s*\(\)\s*=>\s*settings\.get\(\)\.onlineCatalogConsent/)
+  assert.doesNotMatch(source, /onlineCatalogConsent|maybePromptOnlineCatalogConsent/)
   assert.doesNotMatch(source, /\.settings\.get\(\)\.allowBuiltinOnlineSearch/)
   assert.match(source, /searchRouter\.search\(source, keyword, page, signal\)/)
   assert.match(source, /allows: \(source, capability\) => onlinePlatforms\.allows\(source, capability\)/)
@@ -112,57 +111,58 @@ try {
   ;({ SearchRouter } = await load('online/search-router.js'))
   ;({ HotWordSource } = await load('online/hot-words.js'))
 
-  console.log('平台请求拦截检查：来源状态与用户同意决定是否允许目录请求\n')
+  console.log('平台请求检查：目录默认可用，音源状态只控制播放能力\n')
 
-  await check('无音源时搜索与热词都不发请求（旧全局开关不能授权）', async () => {
-    const state = makeState({ legacyAllowBuiltinOnlineSearch: true })
+  await check('旧拒绝状态不影响默认在线目录', async () => {
+    const state = makeState({ consent: false, legacyAllowBuiltinOnlineSearch: true })
     const router = makeRouter(state)
     resetAttempts()
     await router.search('all', '晴天', 1)
     await router.hotWords('all')
-    assert.equal(attempts.length, 0)
+    assert.ok(attempts.length > 0)
   })
 
-  await check('有音源但未同意时不发请求', async () => {
+  await check('本地与空关键词搜索不发目录请求', async () => {
     const state = makeState({ platforms: ['kw'], consent: false })
     const router = makeRouter(state)
     resetAttempts()
-    await router.search('all', '晴天', 1)
-    await router.hotWords('all')
+    await router.search('local', '晴天', 1)
+    await router.search('all', '   ', 1)
     assert.equal(attempts.length, 0)
   })
 
-  await check('仅酷我音源时搜索和热词只访问酷我域名', async () => {
-    const state = makeState({ platforms: ['kw'] })
+  await check('没有 LX 音源时目录搜索与热词默认可用', async () => {
+    const state = makeState({ platforms: [] })
     const router = makeRouter(state)
     resetAttempts()
     await router.search('all', '晴天', 1)
     assert.ok(attempts.length > 0, 'allowed search should reach the fetch interceptor')
-    assert.deepEqual([...new Set(attempts.map(platformFor))], ['kw'])
+    assert.deepEqual([...new Set(attempts.map(platformFor))], ['tx', 'wy', 'kw', 'kg', 'mg'])
 
     resetAttempts()
     await router.hotWords('all')
     assert.ok(attempts.length > 0, 'allowed hot words should reach the fetch interceptor')
-    assert.deepEqual([...new Set(attempts.map(platformFor))], ['kw'])
+    assert.deepEqual([...new Set(attempts.map(platformFor))], ['tx', 'wy', 'kw', 'kg'])
 
     resetAttempts()
     await router.search('tx', '晴天', 1)
     await router.hotWords('tx')
-    assert.equal(attempts.length, 0, 'unconfigured platform must remain closed')
+    assert.ok(attempts.length > 0, 'a built-in adapter is available without an LX playback source')
   })
 
-  await check('来源停用或运行时崩溃后立即停止后续请求', async () => {
+  await check('音源停用或运行时崩溃不影响目录请求', async () => {
     const state = makeState({ platforms: ['kw'] })
     const router = makeRouter(state)
     state.enabled = false
     resetAttempts()
     await router.search('all', '晴天', 1)
-    assert.equal(attempts.length, 0)
+    assert.ok(attempts.length > 0)
 
     state.enabled = true
     state.healthy = false
+    resetAttempts()
     await router.hotWords('all')
-    assert.equal(attempts.length, 0)
+    assert.ok(attempts.length > 0)
   })
 
   await check('主进程搜索、艺术家/专辑详情、歌词、头像、封面和歌单补全都接入准入表', async () => {

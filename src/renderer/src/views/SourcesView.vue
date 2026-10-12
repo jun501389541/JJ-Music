@@ -8,6 +8,7 @@
  * own console output.
  */
 import { useUiStore } from '../stores/ui'
+import AppIcon from '../components/AppIcon.vue'
 import { computed, reactive, ref } from 'vue'
 import type { UserApiMeta, UpdateCheckResult } from '@shared/types'
 import type { ValidationReport } from '@shared/validation'
@@ -29,8 +30,9 @@ const logsFor = ref<string | null>(null)
 const logs = ref<string[]>([])
 /** Reports that caused a refusal, kept visible until the user dismisses them. */
 const blockedReports = ref<Record<string, ValidationReport>>({})
-/** True while a batch enable is running, so the button cannot be double-fired. */
+/** Keep imports and source changes from overlapping a batch operation. */
 const batching = ref(false)
+const batchMenuOpen = computed(() => ui.menu?.items.some(item => item.action === removeAll) ?? false)
 const verifying = computed(() => Object.values(library.platformHealth).some(item => item.status === 'checking'))
 const statusLabel = { checking: '验证中', available: '抽测通过', failed: '验证失败', unknown: '未能验证' }
 function healthDetails(id: string): string {
@@ -47,6 +49,7 @@ const RISK_LABEL: Record<string, string> = {
 }
 
 async function importFromFile(): Promise<void> {
+  if (batching.value || importing.value) return
   importing.value = true
   try {
     const result = await library.importSourceFile()
@@ -61,6 +64,7 @@ async function importFromFile(): Promise<void> {
 }
 
 async function importFromPaste(): Promise<void> {
+  if (batching.value || importing.value) return
   const payload = pasteText.value.trim()
   if (!payload) return
   importing.value = true
@@ -86,6 +90,7 @@ async function importFromPaste(): Promise<void> {
  * still lands disabled and unvalidated until the user starts it.
  */
 async function importFromUrl(): Promise<void> {
+  if (batching.value || importing.value) return
   const url = pasteUrl.value.trim()
   if (!url) return
   importing.value = true
@@ -115,6 +120,7 @@ async function importFromUrl(): Promise<void> {
  * "已启用" for a source the engine refused to start was the state-desync bug.
  */
 async function toggle(api: UserApiMeta): Promise<void> {
+  if (batching.value) return
   try {
     const result = await library.toggleSource(api.id, !api.enabled)
 
@@ -154,6 +160,7 @@ async function toggle(api: UserApiMeta): Promise<void> {
 }
 
 async function reload(api: UserApiMeta): Promise<void> {
+  if (batching.value) return
   try {
     await library.reloadSource(api.id)
     toast.success(`已重新加载「${api.name}」`)
@@ -163,6 +170,7 @@ async function reload(api: UserApiMeta): Promise<void> {
 }
 
 async function remove(api: UserApiMeta): Promise<void> {
+  if (batching.value) return
   if (!await ui.confirm('删除音源', `确定删除音源「${api.name}」？`)) return
   try {
     await library.removeSource(api.id)
@@ -325,6 +333,7 @@ function dismissBlocked(id: string): void {
  * first reason.
  */
 async function enableAll(): Promise<void> {
+  if (batching.value || importing.value) return
   const targets = library.userApis.filter((api) => !api.enabled && !api.quarantined)
   const skipped = library.userApis.filter((api) => api.quarantined)
 
@@ -391,6 +400,7 @@ async function enableAll(): Promise<void> {
  * because each stop tears down a child process and awaits its exit.
  */
 async function disableAll(): Promise<void> {
+  if (batching.value || importing.value) return
   const targets = library.userApis.filter((api) => api.enabled)
 
   if (targets.length === 0) {
@@ -424,6 +434,65 @@ async function disableAll(): Promise<void> {
 
   toast.success(`已停用 ${stopped} 个音源`)
 }
+
+function showBatchMenu(event: MouseEvent): void {
+  if (batching.value || importing.value || library.userApis.length === 0) return
+  if (batchMenuOpen.value) {
+    ui.menu = null
+    return
+  }
+  event.stopPropagation()
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  ui.menu = {
+    x: rect.left,
+    y: rect.bottom + 6,
+    items: [
+      { label: '全部启动', icon: 'play', action: enableAll,
+        disabled: !library.userApis.some(api => !api.enabled && !api.quarantined) },
+      { label: '全部关闭', icon: 'pause', action: disableAll,
+        disabled: !library.userApis.some(api => api.enabled) },
+      { label: '', separator: true },
+      { label: '全部移除', icon: 'trash', danger: true, action: removeAll }
+    ]
+  }
+}
+
+async function removeAll(): Promise<void> {
+  if (batching.value || importing.value) return
+  const targets = library.userApis.map(api => ({ id: api.id, name: api.name }))
+  if (targets.length === 0) return
+
+  batching.value = true
+  let removed = 0
+  const failed: string[] = []
+  try {
+    if (!await ui.confirm(
+      '全部移除音源',
+      `将移除全部 ${targets.length} 个音源，并停止它们的运行。移除后需要重新导入脚本才能使用。确定继续？`
+    )) return
+
+    for (const api of targets) {
+      try {
+        await library.removeSource(api.id)
+        removed += 1
+        delete blockedReports.value[api.id]
+        if (logsFor.value === api.id) { logsFor.value = null; logs.value = [] }
+        if (updateFor.value === api.id) updateFor.value = null
+      } catch {
+        failed.push(api.name)
+      }
+    }
+  } finally {
+    await library.refreshSources().catch(() => undefined)
+    batching.value = false
+  }
+
+  if (failed.length) {
+    toast.error(`已移除 ${removed} 个音源，${failed.length} 个移除失败：${failed.join('、')}`)
+  } else {
+    toast.success(`已移除 ${removed} 个音源`)
+  }
+}
 </script>
 
 <template>
@@ -432,40 +501,26 @@ async function disableAll(): Promise<void> {
       <div>
         <h1 class="view__title">音源管理</h1>
         <p class="view__subtitle">
-          LX 音源脚本负责解析播放地址；JJ Music 单独请求搜索、热词、歌词、封面和歌单目录数据。目录请求需你同意，并且只使用已启用、健康且声明了对应平台的音源。
+          LX 音源脚本负责解析播放地址；JJ Music 单独请求搜索、热词、歌词、封面和歌单目录数据。在线资料默认可用；在线播放需要已启用且可用的音源。
         </p>
       </div>
       <div class="actions">
-        <!--
-          Batch enable. Offered because imported scripts now start disabled, so
-          restoring a library means flipping many switches. It deliberately
-          reuses the per-source start path instead of a bulk IPC: every script
-          is validated on its own, and a refusal is reported rather than
-          skipped.
-        -->
         <button
           class="btn"
           type="button"
-          :disabled="batching || importing"
-          :title="`为 ${library.userApis.filter(a => !a.enabled && !a.quarantined).length} 个未启用的音源逐个校验并启用`"
-          @click="enableAll"
+          :disabled="batching || importing || library.userApis.length === 0"
+          aria-haspopup="menu"
+          :aria-expanded="batchMenuOpen"
+          @click="showBatchMenu"
         >
           <span v-if="batching" class="spinner" />
-          <span v-else>全部启动</span>
+          <span>批量操作</span>
+          <AppIcon name="down" :size="14" />
         </button>
-        <button
-          class="btn"
-          type="button"
-          :disabled="batching || importing"
-          :title="`停用 ${library.userApis.filter(a => a.enabled).length} 个已启用的音源`"
-          @click="disableAll"
-        >
-          全部关闭
-        </button>
-        <button class="btn" type="button" @click="pasting = !pasting">粘贴导入</button>
-        <button class="btn btn--primary" type="button" :disabled="importing" @click="importFromFile">
+        <button class="btn" type="button" :disabled="batching || importing" @click="pasting = !pasting">粘贴导入</button>
+        <button class="btn btn--primary" type="button" :disabled="batching || importing" @click="importFromFile">
           <span v-if="importing" class="spinner" />
-          <span v-else>选择文件</span>
+          <span v-else>本地导入</span>
         </button>
       </div>
     </header>
@@ -478,9 +533,9 @@ async function disableAll(): Promise<void> {
           class="input"
           type="url"
           aria-label="音源链接"
-          placeholder="粘贴音源链接：http(s)://… （.js 或 LX 导出的 .json）"
+          placeholder="粘贴音源脚本链接：http(s)://… （.js）"
         />
-        <button class="btn" type="button" :disabled="!pasteUrl.trim() || importing" @click="importFromUrl">
+        <button class="btn" type="button" :disabled="!pasteUrl.trim() || importing || batching" @click="importFromUrl">
           <span v-if="importing" class="spinner" />
           <span v-else>从网址导入</span>
         </button>
@@ -497,7 +552,7 @@ async function disableAll(): Promise<void> {
         spellcheck="false"
       />
       <div class="paste__actions">
-        <button class="btn btn--primary" type="button" :disabled="!pasteText.trim()" @click="importFromPaste">
+        <button class="btn btn--primary" type="button" :disabled="!pasteText.trim() || importing || batching" @click="importFromPaste">
           导入
         </button>
         <button class="btn btn--ghost" type="button" @click="pasting = false">取消</button>
@@ -508,10 +563,9 @@ async function disableAll(): Promise<void> {
     <div v-if="library.userApis.length === 0" class="empty">
       <span class="empty__title">还没有导入任何音源</span>
       <span class="empty__hint">
-        JJ Music 本身不内置在线播放源。导入音源脚本后可解析播放地址；在线目录请求还需要授权和对应平台的可用音源。<br />
-        你现有的 <code>%APPDATA%\lx-music-desktop\LxDatas\user_api.json</code> 也可以直接选中导入。
+        JJ Music 本身不内置在线播放源。导入并启用音源脚本后可解析播放地址；搜索、歌词、封面等在线资料默认可用。
       </span>
-      <button class="btn btn--primary" type="button" @click="importFromFile">选择音源文件</button>
+      <button class="btn btn--primary" type="button" :disabled="batching || importing" @click="importFromFile">本地导入</button>
     </div>
 
     <!-- script list -->
@@ -766,7 +820,7 @@ async function disableAll(): Promise<void> {
       <ul class="notes__list">
         <li>
           LX 音源脚本提供<strong>播放地址</strong>，也可提供歌词或封面（<code>musicUrl</code> /
-          <code>lyric</code> / <code>pic</code>）；JJ Music 的平台目录请求单独受同意状态和对应的已启用、健康音源控制。
+          <code>lyric</code> / <code>pic</code>）；JJ Music 默认请求平台目录资料；播放地址仍由已启用且可用的音源解析。
         </li>
         <li>
           脚本可声明的平台仅限 <code>kw</code>、<code>kg</code>、<code>tx</code>、<code>wy</code>、

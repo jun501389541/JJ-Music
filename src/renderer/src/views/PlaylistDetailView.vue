@@ -10,6 +10,7 @@ import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
 import AppIcon from '../components/AppIcon.vue'
 import TrackList from '../components/TrackList.vue'
+import PlaylistRefreshPanel from '../components/PlaylistRefreshPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -194,6 +195,7 @@ async function clearCover(): Promise<void> {
       </div>
     </header>
 
+    <PlaylistRefreshPanel v-if="playlist?.sourceListId&&playlist.source!=='local'" :playlist-id="listId" @applied="library.refreshPlaylists()" />
     <div v-if="loading" class="empty">
       <span class="spinner" />
     </div>

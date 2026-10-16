@@ -30,9 +30,10 @@ import { WebAudioEngine } from '../audio/web-audio-engine'
 import { activeLineIndex, parseLyrics, type ParsedLyrics } from '../audio/lyrics'
 import { cancellableMusic } from '../utils/cancellable-music'
 import { resolveOnlinePlayback, resolutionCacheKey, ResolutionError, RESOLUTION_BUDGET_MS } from '../utils/online-resolver'
+import { playbackUrlLease, MediaPlaybackError, canRecoverMedia, type PlaybackUrlTimes, type MediaFailure } from '@shared/playback-reliability'
 
 /** How to reach a queued track's audio. */
-interface ResolvedSource {
+interface ResolvedSource extends PlaybackUrlTimes {
   url: string
   quality?: Quality
   providerId?: string
@@ -43,7 +44,6 @@ interface ResolvedSource {
   ephemeral: boolean
 }
 
-const URL_CACHE_TTL_MS = 5 * 60_000
 const URL_CACHE_LIMIT = 128
 
 function urlKey(track: OnlineMusicInfo, preferred: Quality): string {
@@ -132,18 +132,21 @@ export const usePlayerStore = defineStore('player', () => {
   /** Cache of resolved URLs, keyed by track id + quality. */
   let resolutionAbort: AbortController | null = null
   let sourceEpoch = 0
-  const urlCache = new Map<string, { source: ResolvedSource; expiresAt: number }>()
+  const urlCache = new Map<string, { source: ResolvedSource; fetchedAt: number; expiresAt: number; monotonicAt:number; monotonicUntil:number }>()
 
   const unsubscribeSourcesChanged = typeof window !== 'undefined' &&
     typeof window.jj?.sources?.onChanged === 'function'
-    ? window.jj.sources.onChanged(() => { sourceEpoch++; urlCache.clear(); resolutionAbort?.abort() })
+    ? window.jj.sources.onChanged(event => { if(event?.kind==='metadata')return;sourceEpoch++; urlCache.clear(); resolutionAbort?.abort() })
     : undefined
   onScopeDispose(() => { unsubscribeSourcesChanged?.(); resolutionAbort?.abort() })
 
   function cacheUrl(key: string, source: ResolvedSource): void {
+    const lease=playbackUrlLease(source,Date.now())
+    if(!lease)return
     urlCache.delete(key)
     if (urlCache.size >= URL_CACHE_LIMIT) urlCache.delete(urlCache.keys().next().value!)
-    urlCache.set(key, { source, expiresAt: Date.now() + URL_CACHE_TTL_MS })
+    const monotonicAt=performance.now()
+    urlCache.set(key, { source, fetchedAt:lease.fetchedAt, expiresAt:lease.cacheUntil,monotonicAt,monotonicUntil:monotonicAt+Math.min(300_000,lease.cacheUntil-Date.now()) })
   }
 
   const currentTrack = computed<PlayableTrack | null>(() =>
@@ -255,20 +258,20 @@ export const usePlayerStore = defineStore('player', () => {
    * The cache is keyed by track id + quality, as before; a failed attempt is
    * deliberately not cached, because availability changes over time.
    */
-  async function resolve(track: PlayableTrack, preferred: Quality, signal: AbortSignal, budgetMs: number): Promise<ResolvedSource> {
+  async function resolve(track: PlayableTrack, preferred: Quality, signal: AbortSignal, budgetMs: number, manualRetry=false): Promise<ResolvedSource> {
     if (isLocalTrack(track)) return { url: toMediaUrl(track.path), ephemeral: false }
     const online = toIpcPayload(track)
     const key = urlKey(online, preferred)
     const cached = urlCache.get(key)
     if (signal.aborted) throw new ResolutionError('cancelled', '播放解析已取消')
-    if (cached && cached.expiresAt > Date.now() && cached.source.quality === preferred) return cached.source
+    if (cached && cached.fetchedAt<=Date.now() && cached.expiresAt > Date.now() && cached.monotonicAt<=performance.now() && cached.monotonicUntil>performance.now() && cached.source.quality === preferred) return cached.source
     urlCache.delete(key)
     const epoch = sourceEpoch
     const result = await resolveOnlinePlayback({
       track: online, preferred, signal, budgetMs,
       platforms: async () => (await window.jj.sources.available()).filter(item => item.actions.includes('musicUrl') && ONLINE_SOURCE_IDS.includes(item.id)).map(item => item.id),
       search: async (source, keyword, requestSignal) => (await cancellableMusic(requestSignal, id => window.jj.music.search(source, keyword, 1, id))).list,
-      url: (candidate, requested, requestSignal) => cancellableMusic(requestSignal, id => window.jj.music.url(candidate.source, toIpcPayload(candidate), requested, true, id))
+      url: (candidate, requested, requestSignal) => cancellableMusic(requestSignal, id => window.jj.music.url(candidate.source, toIpcPayload(candidate), requested, true, id, manualRetry))
     })
     if (signal.aborted || epoch !== sourceEpoch) throw new ResolutionError('cancelled', '音源状态已变化，请重试')
     // A cached downgrade must never skip the next play's target-tier attempts.
@@ -295,7 +298,9 @@ export const usePlayerStore = defineStore('player', () => {
   let failureGeneration = -1
   let mayRetryUrl = true
   let startupDeadline: number | undefined
+  let startupMonotonicDeadline: number | undefined
   let loadedTrackId: string | null = null
+  let loadedMediaUrl: string | null = null
 
   /** How long audio may stall before we treat it as a failed source. */
   const STALL_TIMEOUT_MS = 20_000
@@ -321,37 +326,47 @@ export const usePlayerStore = defineStore('player', () => {
     stallTimer = setTimeout(() => {
       stallTimer = undefined
       if (generation !== playGeneration || !waiting.value) return
-      handlePlaybackError(new Error('音源响应超时，已自动尝试切换'))
+      handlePlaybackError(new MediaPlaybackError({code:'network'},'音源响应超时'))
     }, STALL_TIMEOUT_MS)
   }
 
-  async function resolveWithTimeout(track: PlayableTrack, preferred: Quality, signal: AbortSignal, deadline: number): Promise<ResolvedSource> {
-    const remaining = deadline - Date.now()
+  async function resolveWithTimeout(track: PlayableTrack, preferred: Quality, signal: AbortSignal, deadline: number, monotonicDeadline:number, manualRetry=false): Promise<ResolvedSource> {
+    const remaining = Math.min(deadline - Date.now(),monotonicDeadline-performance.now())
     if (remaining <= 0) throw new ResolutionError('timeout', '播放解析等待预算已耗尽')
-    return resolve(track, preferred, signal, remaining)
+    return resolve(track, preferred, signal, remaining, manualRetry)
   }
 
   function handlePlaybackError(err: Error): void {
+    if(err instanceof MediaPlaybackError&&err.failure.code==='cancelled')return
     if (failureGeneration === playGeneration) return
     failureGeneration = playGeneration
     clearStallTimer()
     const track = currentTrack.value
+    const generation=playGeneration,failedUrl=loadedMediaUrl
+    const finish=():void=>{stop();failureGeneration=playGeneration;error.value=err.message}
     if (track && !isLocalTrack(track)) {
       urlCache.delete(urlKey(track, quality.value))
-      if (mayRetryUrl) {
-        // Clearing the cached URL makes the retry ask the engine again, which
-        // is what walks the source list to the next capable 音源.
-        void playTrackAt(currentIndex.value, {
-          retryUrl: false,
-          resolutionDeadline: recordedGeneration === playGeneration ? undefined : startupDeadline
-        })
-        return
-      }
+      void (async()=>{
+        let failure:MediaFailure=err instanceof MediaPlaybackError?err.failure:{code:'unknown'}
+        if(failedUrl?.startsWith('jjstream://')&&typeof window.jj.music.mediaFailure==='function'){
+          let timer:ReturnType<typeof setTimeout>|undefined
+          try{
+            const remaining=Math.max(0,Math.min(1000,(startupDeadline??Date.now())-Date.now(),(startupMonotonicDeadline??performance.now())-performance.now()))
+            failure=await Promise.race([window.jj.music.mediaFailure(failedUrl),new Promise<undefined>(resolve=>{timer=setTimeout(()=>resolve(undefined),remaining)})])??failure
+          }catch{/* Diagnosis unavailable; retain the actual media classification. */}
+          finally{if(timer)clearTimeout(timer)}
+        }
+        if(generation!==playGeneration||currentTrack.value?.id!==track.id)return
+        if(mayRetryUrl&&canRecoverMedia(failure)){
+          const index=queue.value.findIndex(item=>item.id===track.id)
+          if(index<0)return
+          await playTrackAt(index,{retryUrl:false,resolutionDeadline:startupDeadline,resolutionMonotonicDeadline:startupMonotonicDeadline})
+        }else finish()
+      })()
+      return
     }
     // A broken queue must not spin forever (especially in single-repeat mode).
-    stop()
-    failureGeneration = playGeneration
-    error.value = err.message
+    finish()
   }
 
   /**
@@ -401,19 +416,23 @@ export const usePlayerStore = defineStore('player', () => {
 
   async function playTrackAt(
     index: number,
-    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; transition?: boolean } = {}
+    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; resolutionMonotonicDeadline?: number; transition?: boolean } = {}
   ): Promise<void> {
     if (index < 0 || index >= queue.value.length) return
+    const manualRetry=options.retryUrl!==false&&!!error.value
     const generation = ++playGeneration
     toggleGeneration++
     pausePending = false
     loadedTrackId = null
+    loadedMediaUrl = null
     clearStallTimer()
     resolutionAbort?.abort()
     const resolving = new AbortController()
     resolutionAbort = resolving
     const deadline = options.resolutionDeadline ?? Date.now() + RESOLUTION_BUDGET_MS
+    const monotonicDeadline=options.resolutionMonotonicDeadline??performance.now()+Math.max(0,Math.min(RESOLUTION_BUDGET_MS,deadline-Date.now()))
     startupDeadline = deadline
+    startupMonotonicDeadline=monotonicDeadline
     lyricGeneration += 1
     lyricAbort?.abort()
     mayRetryUrl = options.retryUrl !== false
@@ -448,12 +467,13 @@ export const usePlayerStore = defineStore('player', () => {
       }
       if (isStale()) return
       haltEngine()
-      const source = await resolveWithTimeout(track, quality.value, resolving.signal, deadline)
+      const source = await resolveWithTimeout(track, quality.value, resolving.signal, deadline, monotonicDeadline, manualRetry)
       // A newer selection superseded this one while we were resolving.
       if (isStale()) return
       // Recorded only once this attempt survived the generation check, so a
       // superseded resolve cannot leave the previous track labelled with it.
       resolvedResource.value = source.resource ?? null
+      loadedMediaUrl=source.url
       resolvedQuality.value = source.quality ?? null
       resolvedSourceName.value = isLocalTrack(track) ? null : source.providerName ?? null
 
@@ -490,6 +510,8 @@ export const usePlayerStore = defineStore('player', () => {
       void loadLyrics(track)
     } catch (err) {
       if (isStale()) return
+      // The audio error event owns any in-progress media diagnosis/recovery.
+      if(failureGeneration===generation)return
       // A URL that never arrived is a failed *source*, not a failed track:
       // hand it to the same failover path the engine uses so the next capable
       // 音源 gets a chance instead of stopping playback outright.
@@ -497,7 +519,13 @@ export const usePlayerStore = defineStore('player', () => {
       if (!isLocalTrack(track)) {
         const terminal = err instanceof ResolutionError && ['cancelled', 'timeout', 'providerMissing', 'matchFailed'].includes(err.reason)
         if (options.retryUrl !== false && !terminal) {
-          await playTrackAt(index, { ...options, retryUrl: false, resolutionDeadline: deadline })
+          // Queue edits keep this playback intent but can move its row.
+          const retryIndex = queue.value.findIndex(item => item.id === track.id)
+          if (retryIndex < 0 || currentTrack.value?.id !== track.id) {
+            loading.value = false
+            return
+          }
+          await playTrackAt(retryIndex, { ...options, retryUrl: false, resolutionDeadline: deadline, resolutionMonotonicDeadline:monotonicDeadline })
           return
         }
         error.value = `${message}（${track.name}）`

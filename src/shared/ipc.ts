@@ -35,6 +35,9 @@ export const IPC = {
   playlistImportProviders: 'playlist:import-providers',
   playlistImportPreview: 'playlist:import-preview',
   playlistImportSave: 'playlist:import-save',
+  playlistRefreshPreview: 'playlist:refresh-preview',
+  playlistRefreshApply: 'playlist:refresh-apply',
+  playlistRefreshDiscard: 'playlist:refresh-discard',
   // Window controls (frameless window)
   windowMinimize: 'window:minimize',
   windowMaximize: 'window:maximize',
@@ -123,6 +126,9 @@ export const IPC = {
   musicSearchProviders: 'music:search-providers',
   /** What each platform's users are searching right now, for the search page. */
   musicHotWords: 'music:hot-words',
+  onlineDiagnosticsExport: 'online:diagnostics-export',
+  onlineDiagnosticsClear: 'online:diagnostics-clear',
+  onlineCacheClear: 'online:cache-clear',
   /** Exact-ID, source-scoped online artist and album detail pages. */
   onlineArtistPage: 'online:artist-page',
   onlineAlbumPage: 'online:album-page',
@@ -131,6 +137,7 @@ export const IPC = {
   onlineArtistCandidates: 'online:artist-candidates',
   onlineAlbumCandidates: 'online:album-candidates',
   musicUrl: 'music:url',
+  musicMediaFailure: 'music:media-failure',
   musicLyric: 'music:lyric',
   musicPic: 'music:pic',
   /** Look up an artist's portrait online and save it with the cover art. */

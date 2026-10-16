@@ -1,4 +1,8 @@
-import type { UpdateCheckResult } from '@shared/types'
+import type { SourceApplyResult, UpdateCheckResult } from '@shared/types'
+export function sourceUpdateFeedback(result:Pick<SourceApplyResult,'verification'>):string{
+  const state=result.verification?.initialization
+  return `已安装，${state==='passed'?'初始化通过':state==='notRun'?'保持停用，未运行初始化':'初始化未确认'}；实际播放未验证`
+}
 
 /** Per-source update results and request generations for the Sources view. */
 export function createSourceUpdateState<T = UpdateCheckResult>() {

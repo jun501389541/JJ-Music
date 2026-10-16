@@ -50,6 +50,16 @@ const shared = {
 await build({
   ...shared,
   entryPoints: [
+    join(repoRoot, 'src', 'main', 'online', 'reliability-policy.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'capability-health.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'online-diagnostics.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'diagnostic-check.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'diagnostic-media.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'resource-cache.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'playlist-refresh.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'online-asset-cache.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'cover-byte-store.ts'),
+    join(repoRoot, 'src', 'main', 'online', 'catalog-reliability.ts'),
     join(repoRoot, 'src', 'main', 'online', 'read-bounded.ts'),
     join(repoRoot, 'src', 'main', 'downloads', 'download-manager.ts'),
     join(repoRoot, 'src', 'main', 'online', 'playlist-import.ts'),
@@ -114,6 +124,7 @@ await build({
   ...shared,
   entryPoints: [
         join(repoRoot, 'src', 'shared', 'types.ts'),
+        join(repoRoot, 'src', 'shared', 'playback-reliability.ts'),
         join(repoRoot, 'src', 'shared', 'persisted-track.ts'),
         join(repoRoot, 'src', 'shared', 'media-url.ts'),
         // The overlay's geometry maths is the part of the feature that can fail

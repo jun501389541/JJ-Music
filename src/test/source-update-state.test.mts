@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createSourceUpdateState } from './renderer/utils/source-update-state.js'
+import { createSourceUpdateState, sourceUpdateFeedback } from './renderer/utils/source-update-state.js'
 
 test('update results are isolated by source when checks complete out of order', () => {
   const state = createSourceUpdateState()
@@ -23,4 +23,9 @@ test('a stale result cannot replace a newer check for the same source', () => {
   assert.equal(state.complete('source-a', older, { version: 'old' }), false)
   assert.equal(state.complete('source-a', newer, { version: 'new' }), true)
   assert.equal(state.results.get('source-a')?.version, 'new')
+})
+test('installation feedback states initialization separately from unverified actual playback',()=>{
+  assert.match(sourceUpdateFeedback({verification:{initialization:'passed',playback:'unverified'}}),/已安装.*初始化通过.*实际播放未验证/)
+  assert.match(sourceUpdateFeedback({verification:{initialization:'notRun',playback:'unverified'}}),/保持停用.*未运行.*实际播放未验证/)
+  assert.match(sourceUpdateFeedback({verification:{initialization:'unavailable',playback:'unverified'}}),/初始化未确认.*实际播放未验证/)
 })

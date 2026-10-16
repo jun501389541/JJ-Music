@@ -312,7 +312,11 @@ export type UpdateCheckFailure =
  * Nothing is written until `sourcesUpdateApply` is called with `script`, so the
  * user approves the exact text reported here.
  */
+export interface SourceApplyResult extends UserApiMeta {
+  verification: { initialization:'passed'|'notRun'|'unavailable'; playback:'unverified' }
+}
 export interface UpdatePlan {
+  baseSha256?:string
   /** Whether this is a version bump or changed bytes under the same version. */
   change: 'newVersion' | 'contentChanged'
   /** Version installed now, from the stored script's header. */
@@ -503,6 +507,7 @@ export interface OnlineAlbumRef {
 
 /** Result of a gated artist or album detail request. */
 export interface OnlineEntityPage<T> {
+  reliability?: import('./online-reliability').ResourceStatus
   status: 'available' | 'unavailable'
   entity?: T
   tracks: OnlineMusicInfo[]
@@ -766,6 +771,7 @@ export interface PendingAsset {
 
 /** One available source for an asset. */
 export interface AssetRef {
+  reliability?: import('./online-reliability').ResourceStatus
   origin: AssetOrigin
   /**
    * Who supplied it: a platform id, `音源脚本`, a tag descriptor. Local cover art
@@ -823,6 +829,7 @@ export function describeAsset(asset: AssetRef | undefined): string {
   // Staged but not written yet: the label has to say so, or 「在线获取」 reads as
   // if the text were already safe in a file.
   const pending = asset.pending ? '（待写入）' : ''
+  const stale = asset.reliability?.cacheState === 'stale' ? ' · 资料较旧' : ''
   switch (asset.origin) {
     case 'embedded':
       return asset.synced === undefined
@@ -831,9 +838,9 @@ export function describeAsset(asset: AssetRef | undefined): string {
     case 'sidecar':
       return '同目录文件'
     case 'cache':
-      return `应用缓存${who}${pending}`
+      return `应用缓存${who}${pending}${stale}`
     case 'remote':
-      return `在线获取${who}${pending}`
+      return `在线获取${who}${pending}${stale}`
     case 'user':
       return '用户指定'
   }
@@ -879,6 +886,7 @@ export interface MusicUrlResult {
 }
 
 export interface LyricResult {
+  reliability?: import('./online-reliability').ResourceStatus
   /** Original lyrics, LRC. */
   lyric: string
   /** Translation, LRC. */
@@ -1197,6 +1205,9 @@ export interface HotWord {
 }
 
 export interface ImportedPlaylist {
+  /** Only explicit complete snapshots are eligible for replacing a saved list. */
+  complete?: boolean
+  reliability?: import('./online-reliability').ResourceStatus
   name: string
   source: SourceId
   sourceListId: string

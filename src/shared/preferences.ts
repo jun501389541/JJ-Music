@@ -43,6 +43,8 @@ export const UI_DEFAULTS = {
    */
   showSearchHistory: true,
   showSearchHotWords: true,
+  onlineReliability: true,
+  onlineDiagnostics: true,
   equalizerGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   equalizerName: '平坦'
 }

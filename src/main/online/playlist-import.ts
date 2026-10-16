@@ -3,6 +3,8 @@ import { readBounded } from './read-bounded'
 import { safeFetchBytes } from './url-guard'
 import { COVER_HOSTS } from './cover-fetch'
 import { miguSongToInfo, type MiguSong } from './search'
+import { onlineContext, onlineHttpFailure, OnlineRequestError, runOnlineRequest } from './reliability-policy'
+import type { OnlineFailure } from '@shared/online-reliability'
 
 const domains: Record<string,string[]> = {wy:['music.163.com','163cn.tv'],tx:['y.qq.com','c.y.qq.com'],kw:['kuwo.cn'],kg:['kugou.com'],mg:['migu.cn']}
 /** 咪咕的图片是裸路径，和搜索适配器同一域名；结尾带斜杠，拼接前会去掉路径开头的斜杠。 */
@@ -76,24 +78,46 @@ export async function importPlaylist(
   source: SourceId,
   input: string,
   http: typeof fetch = fetch,
-  assertAllowed: () => void = () => undefined
+  assertAllowed: () => void = () => undefined,
+  options: { signal?: AbortSignal; budgetMs?: number; onFailure?: (failure:OnlineFailure)=>void; beforeAttempt?:()=>void } = {}
 ): Promise<ImportedPlaylist> {
   const id=parsePlaylistId(source,input)
-  const signal=AbortSignal.timeout(90000)
+  const budget = Math.max(1, Math.min(60_000, options.budgetMs ?? 60_000))
+  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(budget)]) : AbortSignal.timeout(budget)
+  const deadline = performance.now() + budget
+  const context = onlineContext(source, 'playlistImport')
   async function json(url:string,referer:string,origin?:string):Promise<Row> {
     // Pagination and detail completion can span many requests. Recheck just
     // before each fetch so a revoked source cannot continue the sequence.
     assertAllowed()
-    const res=await http(url,{headers:{Referer:referer,...(origin?{Origin:origin}:{}),'User-Agent':'Mozilla/5.0'},signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])})
-    const text=(await readBounded(res,20*1024*1024)).toString('utf8')
-    try{return JSON.parse(text)}catch{throw Error('平台未返回歌单数据，请检查链接或稍后重试')}
+    return runOnlineRequest(async requestSignal => {
+      assertAllowed()
+      const res=await http(url,{headers:{Referer:referer,...(origin?{Origin:origin}:{}),'User-Agent':'Mozilla/5.0'},signal:requestSignal})
+      if (!res.ok) { await res.body?.cancel().catch(() => undefined); throw onlineHttpFailure(res, context) }
+      const text=(await readBounded(res,20*1024*1024)).toString('utf8')
+      let data: unknown
+      try { data = JSON.parse(text) } catch { throw new OnlineRequestError({ ...context, code: 'schemaChanged' }) }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new OnlineRequestError({ ...context, code: 'schemaChanged' })
+      return data as Row
+    }, context, { signal, budgetMs: Math.max(0, deadline - performance.now()), attemptMs: 12_000,beforeAttempt:options.beforeAttempt,onAttempt:(_n,failure)=>{if(failure)options.onFailure?.(failure)} })
   }
-  let rows:Row[]=[],total=0,name='',cover='',warnings:string[]=[],pageLimitReached=false
+  let rows:Row[]=[],total=0,name='',cover='',warnings:string[]=[],pageLimitReached=false, incomplete=false, hasTotal=false
+  const count = (value: unknown): number | undefined => {
+    if (value === undefined || value === null || value === '') return undefined
+    const n = Number(value)
+    if (!Number.isSafeInteger(n) || n < 0) throw new OnlineRequestError({ ...context, code: 'schemaChanged' })
+    return n
+  }
   if(source==='wy') {
     const data=await json(`https://music.163.com/api/v6/playlist/detail?id=${id}&n=1000&s=0`,'https://music.163.com/')
     const list=data.playlist||data.result
     if(!list || data.code!==200)throw Error('歌单不存在、非公开或平台拒绝访问')
-    name=list.name;rows=list.tracks||[];total=Number(list.trackCount||list.trackIds?.length||rows.length)
+    if (!Array.isArray(list.tracks) || (list.trackIds !== undefined && !Array.isArray(list.trackIds))) throw new OnlineRequestError({ ...context, code: 'schemaChanged' })
+    name=list.name;rows=list.tracks.slice(0,5001)
+    const expected = count(list.trackCount) ?? count(list.trackIds?.length)
+    hasTotal = expected !== undefined; total = expected ?? rows.length
+    if (!hasTotal) incomplete=true
+    if (list.trackIds && (list.trackIds.length!==total || new Set(list.trackIds.map((t:Row)=>String(t?.id))).size!==list.trackIds.length)) incomplete=true
     // `coverImgUrl` is what the v6 detail actually returns (measured against the
     // live endpoint); the other two are kept as fallbacks only. Guessing the wrong
     // name here is invisible — the preview just never shows a cover for 网易云.
@@ -103,16 +127,22 @@ export async function importPlaylist(
     for(let i=0;i<missing.length;i+=100) {
       try {
         const detail=await json('https://music.163.com/api/song/detail?'+new URLSearchParams({ids:JSON.stringify(missing.slice(i,i+100))}),'https://music.163.com/')
-        rows.push(...(detail.songs||[]))
-      } catch {warnings.push('部分歌曲详情获取失败');break}
+        if (!Array.isArray(detail.songs)) throw new OnlineRequestError({ ...context, code: 'schemaChanged' })
+        rows.push(...detail.songs.slice(0, Math.max(0,5001-rows.length)))
+      } catch (error) { if (signal.aborted) throw error; incomplete=true;warnings.push('部分歌曲详情获取失败');break }
     }
     const order=new Map((list.trackIds||[]).map((t:Row,i:number)=>[String(t.id),i]))
+    if (list.trackIds && (rows.length!==order.size || rows.some(t=>!order.has(String(t.id))))) incomplete=true
     rows.sort((a,b)=>Number(order.get(String(a.id))||0)-Number(order.get(String(b.id))||0))
   } else if(source==='tx') {
     const data=await json(`https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${id}&format=json&platform=yqq.json`,'https://y.qq.com/')
     const list=data.cdlist?.[0]
     if(!list || data.code!==0)throw Error('歌单不存在、非公开或平台拒绝访问')
-    name=list.dissname;rows=list.songlist||[];total=Number(list.total_song_num||list.songnum||rows.length)
+    if (!Array.isArray(list.songlist)) throw new OnlineRequestError({ ...context, code: 'schemaChanged' })
+    name=list.dissname;rows=list.songlist.slice(0,5001)
+    const expected = count(list.total_song_num) ?? count(list.songnum)
+    hasTotal = expected !== undefined; total = expected ?? rows.length
+    if (!hasTotal) incomplete=true
     cover=String(list.imgurl||list.picurl||list.headerurl||'')
   } else if(source==='mg') {
     // Two endpoints: the header carries the name/cover, the song list is paged.
@@ -121,14 +151,16 @@ export async function importPlaylist(
     const head=await json(`https://app.c.nf.migu.cn/resource/playlist/v2.0?playlistId=${id}`,'https://music.migu.cn/','https://music.migu.cn')
     if(head.code!=='000000'||!head.data)throw Error('歌单不存在、非公开或平台拒绝访问')
     name=String(head.data.title||'');cover=String(head.data.imgItem?.img||head.data.originalImgUrl||'')
-    total=Number(head.data.musicNum)||0
+    const expected = count(head.data.musicNum); hasTotal = expected !== undefined; total=expected ?? 0
     for(let page=1;page<=MG_MAX_PAGE;page++) {
       const data=await json(`https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/song/v2.0?${new URLSearchParams({pageNo:`${page}`,pageSize:`${MG_PAGE_SIZE}`,playlistId:id})}`,'https://music.migu.cn/','https://music.migu.cn')
       if(data.code!=='000000')throw Error('歌单不存在、非公开或平台拒绝访问')
       const chunk=data.data?.songList
       if(!Array.isArray(chunk))throw Error('歌单数据格式已变化')
-      total=Math.max(total,Number(data.data?.totalCount)||0)
-      rows.push(...chunk)
+      const expected = count(data.data?.totalCount)
+      if (expected !== undefined) { if(hasTotal && expected!==total)incomplete=true; hasTotal=true; total=expected }
+      rows.push(...chunk.slice(0,Math.max(0,5001-rows.length)))
+      if (rows.length > 5000) { pageLimitReached=true; break }
       // A short or empty page is the only trustworthy end marker: a playlist whose
       // `totalCount` is missing would otherwise stop after page one, because
       // `rows.length >= 0` is always true. Truncating someone's playlist in
@@ -150,8 +182,10 @@ export async function importPlaylist(
       if(!Array.isArray(chunk))throw Error('歌单数据格式已变化')
       name=data.title||data.data?.specialname||name||`酷狗歌单 ${id}`
       cover=cover||String(data.pic||data.header||data.data?.imgurl||data.data?.cover||'')
-      total=Number(source==='kw'?data.total:data.data?.total)||0
-      rows.push(...chunk)
+      const expected = count(source==='kw'?data.total:data.data?.total)
+      if (expected !== undefined) { if(hasTotal && expected !== total) incomplete=true; hasTotal=true; total=expected }
+      rows.push(...chunk.slice(0,Math.max(0,5001-rows.length)))
+      if(rows.length>5000){pageLimitReached=true;break}
       // 平台报了总数就按总数走（有的接口末页本来就短）；没报总数的情况下，
       // 短页是唯一可信的结束标志。以前总数缺失时把"目前手上的数量"当总数，
       // 于是第一页刚好满 100 就停 —— 500 首的歌单静默导入 100 首。
@@ -168,11 +202,15 @@ export async function importPlaylist(
     try {const track=playlistTrack(source,row);if(track && !seen.has(track.id)){seen.add(track.id);tracks.push(track)}else if(!track)invalid++} catch {invalid++}
   }
   if(invalid)warnings.push(`${invalid} 首歌曲信息无效，已跳过`)
-  if(!tracks.length)throw Error('歌单为空或平台未返回可导入的歌曲')
+  if(!tracks.length && rows.length>0)throw Error('平台未返回可验证的歌单歌曲')
+  if (!hasTotal) total = tracks.length
+  const complete = !incomplete && !pageLimitReached && invalid===0 && rows.length===tracks.length && (!hasTotal || total===tracks.length)
+  if (!complete && !warnings.length && total<=tracks.length) warnings.push('未完整获取歌单，不能作为刷新快照应用。')
   if(pageLimitReached)warnings.push('已达到平台分页上限 5000 首，后续歌曲未读取。')
   if(total>tracks.length)warnings.push(`平台标记 ${total} 首，本次可导入 ${tracks.length} 首；其余可能受访问限制或超出 5000 首上限`)
   const coverUrl=normalizeCover(source,cover)
-  return {name:name||`导入歌单 ${id}`,source,sourceListId:id,...(coverUrl?{coverUrl}:{}) ,tracks,total,warnings:[...new Set(warnings)]}
+  if(signal.aborted)throw new OnlineRequestError({...context,code:'cancelled'})
+  return {name:name||`导入歌单 ${id}`,source,sourceListId:id,complete,...(coverUrl?{coverUrl}:{}) ,tracks,total,warnings:[...new Set(warnings)]}
 }
 
 /**

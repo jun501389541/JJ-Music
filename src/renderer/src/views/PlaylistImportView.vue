@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { ImportedPlaylist, OnlineMusicInfo, PlayableTrack, SourceId } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
@@ -7,12 +7,15 @@ import { useToastStore } from '../stores/toast'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import TrackList from '../components/TrackList.vue'
 import AppIcon from '../components/AppIcon.vue'
+import { cancellableMusic } from '../utils/cancellable-music'
 
 const source=ref<SourceId>('wy'),input=ref(''),busy=ref(false),error=ref(''),preview=ref<(ImportedPlaylist & {token:string})|null>(null)
 const providers=ref<Array<{id:SourceId;name:string}>>([]),providersLoading=ref(true),providersError=ref('')
 /** 预览列表是可编辑副本：排序与移除只改它，导入时才按这份顺序提交。 */
 const rows=ref<OnlineMusicInfo[]>([]),removed=ref<OnlineMusicInfo[]>([])
 const library=useLibraryStore(),router=useRouter(),toast=useToastStore(),ui=useUiStore()
+let generation=0,request:AbortController|null=null
+onUnmounted(()=>{generation++;request?.abort()})
 onMounted(async()=>{
   try{
     providers.value=await window.jj.playlistImport.providers()
@@ -20,10 +23,15 @@ onMounted(async()=>{
   }catch(e){providersError.value=e instanceof Error?e.message:'无法读取可用平台'}
   finally{providersLoading.value=false}
 })
-watch([source,input],()=>{preview.value=null;error.value='';rows.value=[];removed.value=[]})
+watch([source,input],()=>{generation++;request?.abort();busy.value=false;preview.value=null;error.value='';rows.value=[];removed.value=[]})
 // 顺序不同也算改过：拖动不改变数量，但提交出去的歌单顺序确实和预览不一样了。
 const edited=computed(()=>{const original=preview.value?.tracks??[];return rows.value.length!==original.length||rows.value.some((track,index)=>track.id!==original[index]?.id)})
-async function read():Promise<void>{busy.value=true;error.value='';preview.value=null;rows.value=[];removed.value=[];try{const result=await window.jj.playlistImport.preview(source.value,input.value);preview.value=result;rows.value=[...result.tracks]}catch(e){error.value=e instanceof Error?e.message:'读取失败'}finally{busy.value=false}}
+async function read():Promise<void>{
+  request?.abort();const current=++generation,controller=new AbortController();request=controller;busy.value=true;error.value=''
+  try{const result=await cancellableMusic(controller.signal,id=>window.jj.playlistImport.preview(source.value,input.value,id));if(current===generation){preview.value=result;rows.value=[...result.tracks];removed.value=[]}}
+  catch(e){if(current===generation)error.value=(e instanceof Error?e.message:'读取失败')+(preview.value?'；已保留上次待导入列表。':'')}
+  finally{if(current===generation){busy.value=false;request=null}}
+}
 function reorder(from:number,to:number):void{const list=[...rows.value];const[moved]=list.splice(from,1);if(!moved)return;list.splice(to,0,moved);rows.value=list}
 /** 移除只作用于这份待导入列表，不碰曲库也不碰任何文件。 */
 async function remove(selection:PlayableTrack[]):Promise<void>{
@@ -38,11 +46,12 @@ function importActions(_track:PlayableTrack,_index:number,selection:PlayableTrac
   return [{label:selection.length>1?`从待导入列表移除 ${selection.length} 首`:'从待导入列表移除',icon:'trash',action:()=>remove(selection)}]
 }
 async function save():Promise<void>{if(!preview.value||!rows.value.length)return;busy.value=true;error.value=''
+  const current=generation
   try{
     const list=await window.jj.playlistImport.save(preview.value.token,rows.value.map(track=>track.id))
     await library.refreshPlaylists()
     toast.success(list.coverFailed?`已导入 ${list.trackCount} 首歌曲，封面获取失败`:`已导入 ${list.trackCount} 首歌曲`)
-    await router.push('/playlist/'+list.id)
+    if(current===generation)await router.push('/playlist/'+list.id)
   }catch(e){error.value=e instanceof Error?e.message:'导入失败'}finally{busy.value=false}}
 </script>
 <template><div class="view import-view">
@@ -59,6 +68,8 @@ async function save():Promise<void>{if(!preview.value||!rows.value.length)return
         <h2>{{ preview.name }}</h2>
         <p>待导入 {{ rows.length }} 首 / 已读取 {{ preview.tracks.length }} 首 / 平台共 {{ preview.total }} 首<small>拖动行可调顺序，勾选可批量移除；私密或受限歌曲可能缺失。</small></p>
         <p v-for="warning in preview.warnings" :key="warning" class="warning">{{ warning }}</p>
+        <p v-if="preview.complete===false" class="warning">未完整获取；可按当前条目导入为新歌单，不能用于覆盖已有歌单。</p>
+        <p v-if="preview.reliability?.cacheState==='stale'" class="warning">资料较旧，来自上次成功缓存；请核对后再导入。</p>
       </div>
       <div class="preview__buttons">
         <button v-if="removed.length" class="btn" :disabled="busy" @click="restore">恢复全部（{{ removed.length }} 首已移除）</button>

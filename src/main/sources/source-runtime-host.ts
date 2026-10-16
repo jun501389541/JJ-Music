@@ -899,7 +899,7 @@ export class SourceRuntimeHost {
 
       const timer = setTimeout(() => {
         cancelChild()
-        settle(new Error(`音源请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`))
+        settle(Object.assign(new Error(`音源请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`), { code: 'ETIMEDOUT' }))
       }, REQUEST_TIMEOUT_MS)
 
       state.pending.set(id, { resolve: (value) => settle(undefined, value), reject: (error) => settle(error), timer })

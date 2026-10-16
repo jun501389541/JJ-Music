@@ -85,7 +85,7 @@ test('aggregate search calls app directory adapters without requiring matching L
   assert.equal(page.total, 2)
   assert.equal(page.allPage, 4)
   assert.deepEqual(calls, ['tx', 'wy', 'kw', 'kg', 'mg'])
-  assert.deepEqual(page.failed, ['wy', 'kw', 'kg', 'mg'].map(source => ({ source, error: 'timeout' })))
+  assert.deepEqual(page.failed, ['wy', 'kw', 'kg', 'mg'].map(source => ({ source, error: '在线请求失败，请稍后重试' })))
 })
 
 test('consented directory search works when no playback source is installed', async () => {
@@ -116,7 +116,7 @@ test('aggregate with no results and failures returns an actionable unavailable s
 
   assert.equal(page.servedBy, 'none')
   assert.equal(page.reason, 'builtinFailed')
-  assert.match(page.message ?? '', /tx.*connection refused/)
+  assert.match(page.message ?? '', /tx.*在线请求失败/)
 })
 
 test('aggregate hot words use app adapters that publish hot words', async () => {

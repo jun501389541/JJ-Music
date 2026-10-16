@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
-import { resolveLocalLyric, primeLyricCache, clearLyricCache, sidecarPathFor } from './library/lyric-service.js'
+import { resolveLocalLyric, primeLyricCache, clearLyricCache, clearAutomaticLyricCache, sidecarPathFor } from './library/lyric-service.js'
 import { writeTags } from './library/tag-writer.js'
 
 async function fixture(work) {
@@ -15,6 +15,53 @@ async function fixture(work) {
   try { await work(track) }
   finally { clearLyricCache(track.id); assert.ok(resolve(dir).startsWith(resolve(tmpdir()) + sep)); await rm(dir, { recursive: true, force: true }) }
 }
+test('automatic online lyric expired timestamp cannot outlive its resource cache', async () => {
+  await fixture(async track => {
+    primeLyricCache(track.id, { lyric: '[00:01]expired', source: 'online', synchronized: true,
+      reliability: { cacheState: 'stale', fetchedAt: 1, expiresAt: 2, staleUntil: 3, servedBy: 'builtin', partial: false } })
+    const resolved = await resolveLocalLyric(track, { allowOnline: false })
+    assert.equal(resolved.source, 'none')
+  })
+})
+test('pending user choice survives online cache expiration while current local tags still win', async () => {
+  await fixture(async track => {
+    primeLyricCache(track.id, { lyric: '[00:01]chosen', source: 'online', synchronized: true, asset: { origin: 'remote', pending: true },
+      reliability: { cacheState: 'stale', fetchedAt: 1, expiresAt: 2, staleUntil: 3, servedBy: 'builtin', partial: false } })
+    assert.equal((await resolveLocalLyric(track, { allowOnline: false })).lyric, '[00:01]chosen')
+    assert.equal((await writeTags(track.path, { lyrics: '[00:01]local' })).written, true)
+    assert.equal((await resolveLocalLyric(track, { allowOnline: false })).source, 'embedded')
+  })
+})
+test('automatic cache maintenance preserves a pending choice', async () => {
+  await fixture(async track => {
+    primeLyricCache(track.id, { lyric: '[00:01]chosen', source: 'online', synchronized: true, asset: { origin: 'remote', pending: true } })
+    clearAutomaticLyricCache()
+    assert.equal((await resolveLocalLyric(track, { allowOnline: false })).lyric, '[00:01]chosen')
+  })
+})
+test('source lifecycle invalidation preserves platform auto lyrics and confirmed pending choices',async()=>{
+  for(const kind of ['platform','script','pending'])await fixture(async track=>{
+    primeLyricCache(track.id,{lyric:'[00:01]kept',source:'online',synchronized:true,asset:{origin:'remote',provider:kind==='pending'?'script':kind,pending:kind==='pending'}})
+    clearAutomaticLyricCache('script')
+    const resolved=await resolveLocalLyric(track,{allowOnline:false})
+    assert.equal(resolved.source,kind==='script'?'none':'online')
+  })
+})
+test('a sidecar written during online lookup takes priority over the late network result', async () => {
+  await fixture(async track => {
+    let release, entered
+    const waiting = new Promise(r => { entered = r })
+    const fetchLyric = async () => { entered(); return new Promise(r => { release = r }) }
+    const online = resolveLocalLyric(track, {}, {
+      search: async () => [{ id: 'wy_1', source: 'wy', name: track.name, singer: track.singer, meta: { songmid: '1' } }], fetchLyric
+    })
+    await waiting
+    await writeFile(sidecarPathFor(track.path), '[00:01]new sidecar')
+    release({ lyric: '[00:01]old remote' })
+    const resolved = await online
+    assert.equal(resolved.source, 'sidecar'); assert.match(resolved.lyric, /new sidecar/)
+  })
+})
 test('a new or edited sidecar immediately outranks already cached online lyrics', async () => {
   await fixture(async track => {
     primeLyricCache(track.id, { lyric: '[00:01]online', source: 'online', synchronized: true, asset: { origin: 'remote', pending: true } })

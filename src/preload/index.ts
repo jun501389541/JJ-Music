@@ -80,7 +80,7 @@ const api = {
   },
   playlistImport: {
     providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.playlistImportProviders),
-    preview: (source: SourceId, input: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input),
+    preview: (source: SourceId, input: string, requestId?: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input, requestId),
     /**
      * Commit a previewed list. `ids` is the order and subset the user arranged in
      * the preview — the tracks themselves come from the main-process cache, so
@@ -180,6 +180,9 @@ const api = {
    * every path the app writes, so main opens the picker and does the copy.
    */
   data: {
+    exportOnlineDiagnostics: () => invoke<boolean>(IPC.onlineDiagnosticsExport),
+    clearOnlineDiagnostics: () => invoke<void>(IPC.onlineDiagnosticsClear),
+    clearOnlineCache: () => invoke<void>(IPC.onlineCacheClear),
     location: () => invoke<{
       dir: string
       source: 'switch' | 'pointer' | 'portable' | 'appdata'
@@ -189,6 +192,11 @@ const api = {
     moveTo: () => invoke<{ moved: boolean; dir?: string; reason?: string }>(IPC.dataDirMove)
   },
 
+  playlistRefresh: {
+    preview: (id: string, requestId?: string) => invoke<import('../shared/playlist-refresh').PlaylistRefreshPreview>(IPC.playlistRefreshPreview,id,requestId),
+    apply: (token: string) => invoke<Playlist>(IPC.playlistRefreshApply,token),
+    discard: (token: string) => invoke<void>(IPC.playlistRefreshDiscard,token)
+  },
   sources: {
     list: () => invoke<UserApiMeta[]>(IPC.sourcesList),
     /** Import from pasted text or a script body. */
@@ -227,13 +235,13 @@ const api = {
      */
     updates: {
       check: (id: string) => invoke<UpdateCheckResult>(IPC.sourcesUpdateCheck, id),
-      apply: (id: string, script: string) =>
-        invoke<UserApiMeta>(IPC.sourcesUpdateApply, id, script),
-      rollback: (id: string) => invoke<UserApiMeta | null>(IPC.sourcesUpdateRollback, id)
+      apply: (id: string, script: string, baseSha256?:string) =>
+        invoke<import('../shared/types').SourceApplyResult>(IPC.sourcesUpdateApply, id, script, baseSha256),
+      rollback: (id: string) => invoke<import('../shared/types').SourceApplyResult>(IPC.sourcesUpdateRollback, id)
     },
     /** Subscribe to source-list changes; returns an unsubscribe function. */
-    onChanged: (handler: () => void) => {
-      const listener = (): void => handler()
+    onChanged: (handler: (event?:import('../shared/source-lifecycle').SourceChangeEvent) => void) => {
+      const listener = (_event:Electron.IpcRendererEvent,change?:import('../shared/source-lifecycle').SourceChangeEvent): void => handler(change)
       ipcRenderer.on(IPC.sourcesChanged, listener)
       return () => ipcRenderer.removeListener(IPC.sourcesChanged, listener)
     },
@@ -247,7 +255,7 @@ const api = {
   music: {
     cancel: (requestId: string) => ipcRenderer.send(IPC.musicCancel, requestId),
     search: (source: SourceId, keyword: string, page = 1, requestId?: string) =>
-      invoke<{ list: OnlineMusicInfo[]; total?: number; allPage?: number }>(
+      invoke<{ list: OnlineMusicInfo[]; total?: number; allPage?: number } & import('../shared/online-reliability').OnlineSearchStatus>(
         IPC.musicSearch,
         source, keyword, page, requestId
       ),
@@ -263,7 +271,7 @@ const api = {
         allPage: number
         failed: Array<{ source: SourceId; error: string }>
         sources: Array<{ source: SourceId; count: number }>
-      }>(IPC.musicSearchAll, keyword, page, requestId),
+      } & import('../shared/online-reliability').OnlineSearchStatus>(IPC.musicSearchAll, keyword, page, requestId),
     /** Platforms with a built-in search adapter, for the UI's tab list. */
     providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.musicSearchProviders),
     /**
@@ -273,8 +281,12 @@ const api = {
      * "this platform publishes no such list" — the row is hidden rather than
      * showing a placeholder, so the absence is honest.
      */
-    hotWords: (scope: SourceId | 'all') => invoke<HotWord[]>(IPC.musicHotWords, scope),
-    url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality, strict = false, requestId?: string) =>
+    hotWords: async (scope: SourceId | 'all', requestId?: string) =>
+      (await invoke<{ words: HotWord[] }>(IPC.musicHotWords, scope, requestId)).words,
+    hotWordStatus: (scope: SourceId | 'all', requestId?: string) =>
+      invoke<{ words: HotWord[]; platformStates?: Record<string, import('../shared/online-reliability').ResourceStatus> }>(IPC.musicHotWords, scope, requestId),
+    mediaFailure: (url:string)=>invoke<import('../shared/playback-reliability').MediaFailure|undefined>(IPC.musicMediaFailure,url),
+    url: (source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality, strict = false, requestId?: string, manualRetry=false) =>
       invoke<{
         url: string
         quality: Quality
@@ -282,7 +294,10 @@ const api = {
         providerId?: string
         providerName?: string
         providerVersion?: string
-      }>(IPC.musicUrl, source, musicInfo, quality, strict, requestId),
+        providerGeneration?:number
+        resolvedAt?: number
+        expiresAt?: number
+      }>(IPC.musicUrl, source, musicInfo, quality, strict, requestId, manualRetry),
     lyric: (source: SourceId, musicInfo: OnlineMusicInfo) =>
       invoke<LyricResult>(IPC.musicLyric, source, musicInfo),
     pic: (source: SourceId, musicInfo: OnlineMusicInfo) =>

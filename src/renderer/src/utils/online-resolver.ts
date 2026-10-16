@@ -1,5 +1,6 @@
 import { ONLINE_SOURCE_IDS, type OnlineMusicInfo, type OnlinePlaybackResource, type Quality, type SourceId } from '@shared/types'
 import { recordingCandidates } from './recording-match'
+import { playbackUrlLease, type PlaybackUrlTimes } from '@shared/playback-reliability'
 
 const TIERS: Quality[] = ['flac24bit', 'flac', '320k', '128k']
 const PLATFORMS: SourceId[] = ['tx', 'wy', 'kw', 'kg', 'mg']
@@ -8,7 +9,7 @@ export type ResolutionFailure = 'cancelled' | 'timeout' | 'providerMissing' | 'm
 export class ResolutionError extends Error {
   constructor(public readonly reason: ResolutionFailure, message: string) { super(message); this.name = 'ResolutionError' }
 }
-export interface ResolvedOnlinePlayback {
+export interface ResolvedOnlinePlayback extends PlaybackUrlTimes {
   url: string
   quality: Quality
   providerId?: string
@@ -17,7 +18,7 @@ export interface ResolvedOnlinePlayback {
   resource: OnlinePlaybackResource
   ephemeral: true
 }
-interface UrlResult {
+interface UrlResult extends PlaybackUrlTimes {
   url: string; quality: Quality; providerId?: string; providerName?: string; providerVersion?: string
 }
 export interface OnlineResolutionOptions {
@@ -58,7 +59,7 @@ export async function resolveOnlinePlayback(options: OnlineResolutionOptions): P
   const cancel = (): void => controller.abort(new ResolutionError('cancelled', '播放解析已取消'))
   options.signal.addEventListener('abort', cancel, { once: true })
   if (options.signal.aborted) cancel()
-  const timer = setTimeout(() => controller.abort(new ResolutionError('timeout', '播放解析等待已达到 60 秒预算，请重试或更换音源')), options.budgetMs ?? RESOLUTION_BUDGET_MS)
+  const timer = setTimeout(() => controller.abort(new ResolutionError('timeout', '播放解析等待已达到 60 秒预算，请重试或更换音源')), Math.max(0,Math.min(options.budgetMs??RESOLUTION_BUDGET_MS,RESOLUTION_BUDGET_MS)))
   const alternate = new Map<SourceId, OnlineMusicInfo[]>()
   let otherPlatforms: SourceId[] | undefined
   let sawOtherPlatforms = false
@@ -79,6 +80,7 @@ export async function resolveOnlinePlayback(options: OnlineResolutionOptions): P
       const result = await abortable(signal, () => options.url(candidate, quality, signal))
       if (signal.aborted) throw abortReason(signal)
       if (result.quality !== quality) throw new Error(`严格 ${quality} 请求返回了 ${result.quality ?? '未知档位'}`)
+      if(!playbackUrlLease(result,Date.now()))throw new Error('返回的播放地址有效期不足，请重新解析')
       return makeResource(candidate, result)
     } catch (error) {
       if (signal.aborted) throw abortReason(signal)

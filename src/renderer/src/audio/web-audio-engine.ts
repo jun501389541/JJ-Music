@@ -26,6 +26,7 @@ import {
   type LoadOptions
 } from '@shared/audio-engine'
 import { GainTransition } from './gain-transition'
+import { MediaPlaybackError, mediaFailure } from '@shared/playback-reliability'
 
 /** How often the position loop samples the element. See `startProgressLoop`. */
 const PROGRESS_INTERVAL_MS = 200
@@ -191,7 +192,7 @@ export class WebAudioEngine implements AudioEngine {
       // ignore those so switching tracks does not surface a phantom failure.
       const code = this.element.error?.code
       if (!code) return
-      this.emit('error', new Error(describeMediaError(code)))
+      this.emit('error', new MediaPlaybackError(mediaFailure(code),describeMediaError(code)))
     })
   }
 
@@ -254,7 +255,8 @@ export class WebAudioEngine implements AudioEngine {
       // Autoplay rejection is expected before any user gesture; surface
       // anything else.
       if (!/user.*(gesture|interact)|NotAllowedError/i.test(message)) {
-        this.emit('error', new Error(message))
+        const failure=this.element.error?.code?mediaFailure(this.element.error.code):{code:(error as Error)?.name==='NotSupportedError'?'unsupported' as const:'unknown' as const}
+        this.emit('error', new MediaPlaybackError(failure,message))
       }
       throw error
     }

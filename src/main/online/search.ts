@@ -26,6 +26,7 @@
 import vm from 'node:vm'
 import type { OnlineMusicInfo, Quality, SourceId } from '@shared/types'
 import { readBounded } from './read-bounded'
+import { onlineContext, onlineHttpFailure, OnlineRequestError } from './reliability-policy'
 
 /** Shared HTTP helper with a browser-ish UA and a hard timeout. */
 const DEFAULT_TIMEOUT_MS = 12_000
@@ -56,7 +57,9 @@ async function httpGet(url: string, options: FetchOptions = {}): Promise<string>
       signal
   })
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+    await response.body?.cancel().catch(() => undefined)
+    const host = new URL(url).hostname
+    throw onlineHttpFailure(response, onlineContext(host.endsWith('qq.com') ? 'tx' : host.endsWith('163.com') ? 'wy' : 'unknown', 'search'))
   }
   // Bounded rather than `response.text()`: the destination here is a host we
   // chose, but the size still comes from someone else's answer.
@@ -182,9 +185,13 @@ const tencentProvider: SearchProvider = {
 
     const text = await httpGet(url, { headers: { Referer: 'https://y.qq.com/' }, signal })
     const payload = JSON.parse(text) as {
+      code?: number
       data?: { song?: { list?: TencentSong[]; totalnum?: number } }
     }
     const song = payload.data?.song
+    if ((payload.code !== undefined && payload.code !== 0) || !song || !Array.isArray(song.list) || song.list.some(item => !item || typeof item.mid !== 'string' || !item.mid || typeof item.name !== 'string' || !item.name.trim())) {
+      throw new OnlineRequestError({ ...onlineContext('tx', 'search'), code: 'schemaChanged' })
+    }
     const list = song?.list ?? []
     const total = song?.totalnum ?? list.length
 
@@ -379,7 +386,14 @@ const neteaseProvider: SearchProvider = {
 
     const text = await httpGet(url, { headers: { Referer: 'https://music.163.com/' }, signal })
     const payload = JSON.parse(text) as {
+      code?: number
       result?: { songs?: NeteaseSong[]; songCount?: number }
+    }
+    if ((payload.code !== undefined && payload.code !== 200) || !payload.result ||
+      (payload.result.songs !== undefined && !Array.isArray(payload.result.songs)) ||
+      (!Array.isArray(payload.result.songs) && payload.result.songCount !== 0) ||
+      payload.result.songs?.some(item => !item || !item.id || typeof item.name !== 'string' || !item.name.trim())) {
+      throw new OnlineRequestError({ ...onlineContext('wy', 'search'), code: 'schemaChanged' })
     }
     const songs = payload.result?.songs ?? []
     const total = payload.result?.songCount ?? songs.length

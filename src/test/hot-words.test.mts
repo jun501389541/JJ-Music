@@ -199,6 +199,45 @@ test('一家挂了不影响其余三家', async () => {
  * ------------------------------------------------------------------ */
 const dayAt = (month, day, hour = 10) => new Date(2026, month - 1, day, hour, 0, 0).getTime()
 
+test('可靠性模式使用24小时和7天上限，时钟回拨不无限新鲜', async () => {
+  let clock = dayAt(9, 22, 23), calls = 0, fail = false
+  const source = new HotWordSource(async () => {
+    calls++; if (fail) throw new SyntaxError('private')
+    return qqPayload([`v${calls}`])
+  }, { now: () => clock, reliability: true })
+  await source.words('tx')
+  clock = dayAt(9, 23, 2); await source.words('tx'); assert.equal(calls, 1)
+  clock = dayAt(9, 24); fail = true
+  assert.deepEqual((await source.words('tx')).map(w => w.text), ['v1'])
+  assert.equal(source.state('tx').cacheState, 'stale')
+  clock = dayAt(10, 5)
+  assert.deepEqual(await source.words('tx'), [])
+  clock = dayAt(9, 21)
+  assert.deepEqual(await source.words('tx'), [])
+})
+test('可靠性模式版本切换和清理后的迟到结果不能回填', async () => {
+  let release, calls = 0
+  const source = new HotWordSource(async () => {
+    calls++
+    if (calls === 1) return new Promise(r => { release = r })
+    return qqPayload(['new'])
+  }, { reliability: true })
+  const old = source.words('tx')
+  await new Promise(r => setImmediate(r))
+  source.clear()
+  assert.deepEqual((await source.words('tx')).map(w => w.text), ['new'])
+  release(qqPayload(['old'])); await old
+  assert.deepEqual((await source.words('tx')).map(w => w.text), ['new'])
+})
+test('可靠性模式清理后的最后消费者取消仍终止底层', async () => {
+  let underlying
+  const source = new HotWordSource(async (_u, _r, _h, signal) => { underlying = signal; return new Promise(() => {}) }, { reliability: true })
+  const c = new AbortController(), pending = source.words('tx', undefined, c.signal)
+  await new Promise(r => setImmediate(r))
+  source.clear(); c.abort(); await pending
+  assert.equal(underlying.aborted, true)
+})
+
 async function waitFor(predicate, ms = 1500) {
   const until = Date.now() + ms
   while (Date.now() < until) {
@@ -241,10 +280,10 @@ test('有昨天的记录：先立刻给昨天的，今天在后台换', async ()
   assert.ok(await waitFor(async () => (await stale.words('tx')).map((word) => word.text)[0] === '今天的词'),
     '后台那次跑完之后，再进搜索页就是今天的了')
   assert.equal(asks, 1, '跨天只问一次')
-  // 落盘是后台那次的尾巴，只能等文件本身：`tools/build-test.mjs` 把 `json-file` 打进了
-  // hot-words 这个 bundle，测试里 import 的 `flushJsonWrites()` 是另一份副本、另一张
-  // pendingWrites 表，等不到那边的写。
-  assert.ok(await waitFor(async () => JSON.parse(await readFile(file, 'utf8')).tx.words[0] === '今天的词'),
+  // Wait for this instance's writer before opening the destination. Polling
+  // readFile during atomic replacement can make Windows reject the rename.
+  await stale.flush()
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).tx.words[0], '今天的词',
     '刷新到的结果要落盘，否则重启又退回"昨天"')
   await rm(dir, { recursive: true, force: true })
 })

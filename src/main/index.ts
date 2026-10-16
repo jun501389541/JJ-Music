@@ -38,17 +38,24 @@ import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
 import { MusicLibrary } from './library/music-library'
 import { PlaylistStore, SettingsStore } from './store/settings-store'
+import { CapabilityHealth } from './online/capability-health'
 import { searchProviders, fetchNeteaseDetails } from './online/search'
 import { HotWordSource } from './online/hot-words'
 import { SearchRouter } from './online/search-router'
+import { ADAPTER_REVISIONS, CatalogReliability } from './online/catalog-reliability'
+import { OnlineAssetCache, assetIdentity } from './online/online-asset-cache'
+import { onlineContext, runOnlineRequest } from './online/reliability-policy'
+import { writeJsonAtomic } from './store/json-file'
 import { OnlinePlatformRegistry } from './online/platform-registry'
 import { OnlineEntityDetails } from './online/entity-details'
 import { LibraryRouter } from './online/library-router'
+import { PlaylistRefreshService } from './online/playlist-refresh'
 import { PlaybackRouter } from './sources/playback-router'
 import { fetchOnlineLyric } from './online/lyrics'
-import { fetchCoverBytes, shouldFetchCover } from './online/cover-fetch'
+import { fetchCoverUrl, shouldFetchCover, type CoverBytes } from './online/cover-fetch'
 import {
   clearLyricCache,
+  clearAutomaticLyricCache,
   lyricCandidates,
   primeLyricCache,
   lyricFromOtherPlatforms,
@@ -291,7 +298,8 @@ const sourceMediaProxy = new SourceMediaProxy({
     try {
       const { sourceEngine, sourceStore } = requireServices()
       return sourceEngine.supportsProvider(identity.sourceId as SourceId, identity.providerId, 'musicUrl') &&
-        sourceStore.versionOf(identity.providerId) === identity.providerVersion
+        sourceStore.versionOf(identity.providerId) === identity.providerVersion &&
+        identity.providerGeneration!==undefined && sourceEngine.providerRevision(identity.providerId)?.generation===identity.providerGeneration
     } catch {
       return false
     }
@@ -355,12 +363,18 @@ interface Services {
   onlinePlatforms: OnlinePlatformRegistry
   /** Routes catalog search and hot words through onlinePlatforms. */
   searchRouter: SearchRouter
+  catalogReliability: CatalogReliability
+  capabilityHealth: CapabilityHealth
+  onlineAssets: OnlineAssetCache
+  platformCover: (music: Pick<OnlineMusicInfo, 'source' | 'picUrl'>, signal?: AbortSignal) => Promise<CoverBytes | null>
+  scriptCover: (music: OnlineMusicInfo, signal?: AbortSignal) => Promise<{ dataUrl: string; asset?: AssetRef }>
   /** Exact-ID artist/album details and explicit name-based candidate lists. */
   entityDetails: OnlineEntityDetails
   /** Resolves playback through the shared LX source lifecycle. */
   playbackRouter: PlaybackRouter
   /** Routes playlist imports; leaderboard support is deferred to F1. */
   libraryRouter: LibraryRouter
+  playlistRefresh: PlaylistRefreshService
   downloads: DownloadManager
   /**
    * Lyrics for an online track, from the sources the user ranked in Settings.
@@ -398,6 +412,7 @@ interface Services {
 type LyricDeps = {
   search: SearchOnlineForMatch
   fetchLyric: typeof fetchOnlineLyric
+  fetchLyricFresh: typeof fetchOnlineLyric
   /** Cache-isolation key: see `SourceStore.versionOf`. Absent means no isolation. */
   provider?: () => string | undefined
 }
@@ -433,13 +448,15 @@ async function createServices(): Promise<Services> {
   const library = new MusicLibrary(dataDir)
   const pendingAssets = new PendingAssetStore(dataDir)
   const sourceStore = new SourceStore(dataDir)
+  const capabilityHealth = new CapabilityHealth({ enabled: () => settings.get().onlineReliability !== false })
   const hotWords = new HotWordSource(undefined, {
-    file: join(dataDir, 'library', 'hot-words.json')
+    file: join(dataDir, 'library', 'hot-words.json'), reliability: true, health: capabilityHealth,
+    revision: source => ADAPTER_REVISIONS[source] ?? 'unknown'
   })
   // Sources run in a forked child process, so they can be killed without
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
-  const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'))
+  const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'), 'auto', { health: capabilityHealth })
   const onlinePlatforms = new OnlinePlatformRegistry({
     sourcesByScript: () => sourceEngine.getSourcesByScript(),
     isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled)
@@ -453,19 +470,73 @@ async function createServices(): Promise<Services> {
       return resolveArtistImage(name, http, () => onlinePlatforms.platforms('artistImage'))
     }) as ArtistImageResolver
   })
+  await settings.load()
+  const catalogReliability = new CatalogReliability({ dataDir, health: capabilityHealth, enabled: () => settings.get().onlineReliability !== false })
+  await catalogReliability.load()
+  await catalogReliability.diagnostics.load()
+  catalogReliability.diagnostics.setEnabled(settings.get().onlineDiagnostics !== false)
+  const onlineAssets = new OnlineAssetCache({ dataDir, health: capabilityHealth, diagnostics: catalogReliability.diagnostics, enabled: () => settings.get().onlineReliability !== false })
+  await onlineAssets.load()
+  const platformCover = async (music: Pick<OnlineMusicInfo, 'source' | 'picUrl'>, signal?: AbortSignal): Promise<CoverBytes | null> => {
+    if (!music.picUrl || !onlinePlatforms.allows(music.source, 'cover')) return null
+    const load = (s?: AbortSignal): Promise<CoverBytes | null> => fetchCoverUrl(music.source, music.picUrl!, undefined, s)
+    if (settings.get().onlineReliability === false) return load(signal)
+    const result = await onlineAssets.cover({ platform: music.source, capability: 'cover', identity: assetIdentity(music.picUrl), adapterRevision: ADAPTER_REVISIONS[music.source] ?? 'unknown' }, load,
+      { signal, isCurrent: () => onlinePlatforms.allows(music.source, 'cover') })
+    const { data, ...reliability } = result
+    return data ? { ...data, reliability } : null
+  }
+  const platformLyric = async (music: OnlineMusicInfo, signal?: AbortSignal, force = false): Promise<LyricResult> => {
+    if (!onlinePlatforms.allows(music.source, 'lyrics')) return { lyric: '' }
+    if (settings.get().onlineReliability === false) return fetchOnlineLyric(music, signal)
+    const { data, ...reliability } = await onlineAssets.lyric({ platform: music.source, capability: 'lyrics',
+      identity: String(music.meta?.songmid ?? music.id), adapterRevision: ADAPTER_REVISIONS[music.source] ?? 'unknown' }, s => fetchOnlineLyric(music, s),
+    { signal, force, isCurrent: () => onlinePlatforms.allows(music.source, 'lyrics') })
+    return { ...(data ?? { lyric: '' }), reliability }
+  }
   const searchRouter = new SearchRouter({
+    reliability: catalogReliability,
     hotWords,
     registry: onlinePlatforms
   })
   const entityDetails = new OnlineEntityDetails({
+    reliability: catalogReliability,
     allows: (source, capability) => onlinePlatforms.allows(source, capability),
     searchTracks: (source, keyword, page, signal) => searchRouter.search(source, keyword, page, signal),
-    saveArtwork: (data, mimeType) => library.saveCover(data, mimeType)
+    fetchArtwork: (source, url, signal) => platformCover({ source, picUrl: url }, signal),
+    saveArtwork: async (data, mimeType) => `data:${mimeType};base64,${Buffer.from(data).toString('base64')}`
   })
   const playbackRouter = new PlaybackRouter({ sourceEngine })
+  const scriptStamp = (music: OnlineMusicInfo, action: 'lyric' | 'pic'): string => assetIdentity(JSON.stringify(
+    sourceEngine.getSourcesByScript().filter(runtime => {
+      const meta = sourceStore.get(runtime.apiId)?.meta
+      return meta?.enabled && (!music.providerId || music.providerId === runtime.apiId || music.providerId === meta.stableId) &&
+        runtime.sources.some(s => s.id === music.source && s.actions.includes(action))
+    }).map(runtime => [sourceStore.get(runtime.apiId)?.meta.stableId ?? runtime.apiId, sourceStore.versionOf(runtime.apiId),runtime.generation]).sort((a,b) => String(a[0]).localeCompare(String(b[0])))))
+  const scriptLyric = async (music: OnlineMusicInfo, signal?: AbortSignal, force = false): Promise<LyricResult> => {
+    if (settings.get().onlineReliability === false) return playbackRouter.lyric(music, signal)
+    const stamp = scriptStamp(music, 'lyric')
+    const { data, ...reliability } = await onlineAssets.lyric({ platform: music.source, capability: 'lyrics', identity: String(music.meta?.songmid ?? music.id),
+      adapterRevision: 'lx-1', providerId: music.providerId ?? 'lx-candidates', providerVersion: stamp }, s => playbackRouter.lyric(music, s),
+    { signal, force, retryOwner: 'source', isCurrent: () => scriptStamp(music, 'lyric') === stamp })
+    return { ...(data ?? { lyric: '' }), reliability }
+  }
+  const scriptCover = async (music: OnlineMusicInfo, signal?: AbortSignal): Promise<{ dataUrl: string; asset?: AssetRef }> => {
+    const load = async (s: AbortSignal): Promise<CoverBytes | null> => {
+      const url = await playbackRouter.pic(music, s)
+      return url ? sourceMediaProxy.imageBytes(url, s) : null
+    }
+    const stamp = scriptStamp(music, 'pic')
+    const { data, ...reliability } = await onlineAssets.cover({ platform: music.source, capability: 'cover', identity: String(music.meta?.songmid ?? music.id),
+      adapterRevision: 'lx-1', providerId: music.providerId ?? 'lx-candidates', providerVersion: stamp }, load,
+    { signal, retryOwner: 'source', isCurrent: () => scriptStamp(music, 'pic') === stamp })
+    return data ? { dataUrl: `data:${data.mimeType};base64,${Buffer.from(data.data).toString('base64')}`, asset: { origin: 'remote', provider: '音源脚本', at: reliability.fetchedAt, reliability } } : { dataUrl: '' }
+  }
   const libraryRouter = new LibraryRouter({
-    registry: onlinePlatforms
+    registry: onlinePlatforms, dataDir, health: capabilityHealth, enabled:()=>settings.get().onlineReliability!==false
   })
+  await libraryRouter.load()
+  const playlistRefresh=new PlaylistRefreshService({playlists,readSnapshot:(source,input,signal,force)=>libraryRouter.readSnapshot(source,input,signal,force)})
 
   await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load(), hotWords.load()])
   sourceStore.load()
@@ -477,7 +548,7 @@ async function createServices(): Promise<Services> {
    * through here, so one setting moves all three and there is no second copy of
    * the "script first, then the platform, then everything else" chain to drift.
    */
-  const onlineLyric = (music: OnlineMusicInfo, only?: OnlineLyricSource, signal?: AbortSignal) => {
+  const onlineLyric = async (music: OnlineMusicInfo, only?: OnlineLyricSource, signal?: AbortSignal) => {
     const preference = settings.get()
     /*
      * JJ's lyric adapter is optional and uses the same live source-plus-consent
@@ -485,12 +556,12 @@ async function createServices(): Promise<Services> {
      * admitted keeps the user's configured script / platform / search fallback
      * order intact.
      */
-    return resolveOnlineLyricByOrder(
+    try { return await runOnlineRequest(requestSignal => resolveOnlineLyricByOrder(
       lyricSourceOrder(preference.onlineLyricSource, preference.onlineLyricFallback, only),
       {
-        script: () => playbackRouter.lyric(music, signal),
+        script: () => scriptLyric(music, requestSignal, only !== undefined),
         platform: () => onlinePlatforms.allows(music.source, 'lyrics')
-          ? fetchOnlineLyric(music, signal)
+          ? platformLyric(music, requestSignal, only !== undefined)
           : Promise.resolve({ lyric: '' }),
         search: () => lyricFromOtherPlatforms(music, {
           sources: onlinePlatforms.platforms('lyrics'),
@@ -503,12 +574,13 @@ async function createServices(): Promise<Services> {
           }),
           fetchLyric: async (candidate, requestSignal) =>
             onlinePlatforms.allows(candidate.source, 'lyrics')
-              ? fetchOnlineLyric(candidate, requestSignal)
+              ? platformLyric(candidate, requestSignal, only === 'search')
               : { lyric: '' }
-        }, signal)
+        }, requestSignal)
       },
-      signal
-    )
+      requestSignal
+    ), onlineContext(music.source, 'lyric'), { signal, budgetMs: 10_000, attemptMs: 10_000, retryOwner: 'none' }) }
+    catch { return { lyric: { lyric: '' }, asset: null } }
   }
 
   /**
@@ -530,6 +602,7 @@ async function createServices(): Promise<Services> {
    * of what it is handed, which keeps its offline tests honest.
    */
   const lyricDeps: LyricDeps = {
+    fetchLyricFresh: (music, signal) => platformLyric(music, signal, true),
     search: async (source: SourceId, keyword: string, signal?: AbortSignal) => {
       if (!onlinePlatforms.allows(source, 'lyrics')) return []
       const routed = await searchRouter.search(source, keyword, 1, signal)
@@ -537,12 +610,9 @@ async function createServices(): Promise<Services> {
     },
     fetchLyric: async (music: OnlineMusicInfo, signal?: AbortSignal) => {
       if (!onlinePlatforms.allows(music.source, 'lyrics')) return { lyric: '' }
-      return fetchOnlineLyric(music, signal)
+      return platformLyric(music, signal)
     },
-    provider: () => {
-      const enabled = sourceStore.list().find((api) => api.meta.enabled)
-      return enabled ? sourceStore.versionOf(enabled.meta.id) : undefined
-    }
+    provider: () => assetIdentity(JSON.stringify(ADAPTER_REVISIONS))
   }
 
   const downloads = new DownloadManager(dataDir, {
@@ -581,7 +651,7 @@ async function createServices(): Promise<Services> {
     }
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, entityDetails, playbackRouter, libraryRouter, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, capabilityHealth, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -628,6 +698,16 @@ async function createServices(): Promise<Services> {
         author: meta.author,
         message
       })
+    },
+    providerChanged: event => {
+      if(event.phase==='invalidated'){
+        onlineAssets.invalidateProvider(event.providerId,[event.apiId])
+        capabilityHealth.forgetProvider(event.providerId)
+        sourceMediaProxy.revokeProvider(event.providerId)
+        sourceMediaProxy.revokeProvider(event.apiId)
+        clearAutomaticLyricCache('script')
+      }
+      if(!mainWindow?.isDestroyed())mainWindow?.webContents.send(IPC.sourcesChanged,event)
     },
     sourcesChanged: (apiId) => {
       platformProbes.clear()
@@ -1639,6 +1719,11 @@ function registerIpc(): void {
     // "别留"。同一份补丁里把它打开（快照恢复、重置）仍然允许带着列表进来。
     if (!(writable.showSearchHistory ?? settings.get().showSearchHistory)) writable.searchHistory = []
     const after = await settings.update(writable)
+    if (patch.onlineDiagnostics !== undefined) requireServices().catalogReliability.diagnostics.setEnabled(after.onlineDiagnostics !== false)
+    if (patch.onlineReliability !== undefined) requireServices().catalogReliability.clear()
+    if (patch.onlineReliability !== undefined) requireServices().capabilityHealth.clear()
+    if (patch.onlineReliability !== undefined) { clearAutomaticLyricCache(); await requireServices().onlineAssets.clear() }
+    if (patch.onlineReliability !== undefined) { requireServices().playlistRefresh.clear();requireServices().libraryRouter.clear() }
     if (patch.displayScale !== undefined) mainWindow?.webContents.setZoomFactor(Math.min(1.25, Math.max(0.85, after.displayScale / 100)))
     if (patch.alwaysOnTop !== undefined) mainWindow?.setAlwaysOnTop(after.alwaysOnTop)
     if (patch.windowMaterial !== undefined && process.platform === 'win32') { mainWindow?.setBackgroundMaterial(after.windowMaterial === 'acrylic' ? 'acrylic' : after.windowMaterial === 'mica' ? 'mica' : 'none'); mainWindow?.setBackgroundColor(after.windowMaterial === 'none' ? '#1B1D26' : '#00000000') }
@@ -1951,9 +2036,10 @@ function registerIpc(): void {
     const { sourceStore } = requireServices()
     const loaded = sourceStore.get(id)
     if (!loaded) throw new Error('音源不存在')
+    const revision=sourceStore.versionOf(id)
     const checkedAt = Date.now()
     sourceStore.recordUpdateCheck(id, { checkedAt, state: 'checking' })
-    mainWindow?.webContents.send(IPC.sourcesChanged)
+    mainWindow?.webContents.send(IPC.sourcesChanged,{kind: 'metadata'})
     try {
       const result = await checkForUpdate({
         currentVersion: loaded.meta.version,
@@ -1961,17 +2047,19 @@ function registerIpc(): void {
         homepage: loaded.meta.homepage,
         currentScript: loaded.source
       })
+      if(sourceStore.versionOf(id)!==revision)return {ok:false,message:'音源内容已变化，请重新检查更新'}
       sourceStore.recordUpdateCheck(id, summarizeUpdateCheck(result, checkedAt))
-      mainWindow?.webContents.send(IPC.sourcesChanged)
+      mainWindow?.webContents.send(IPC.sourcesChanged,{kind: 'metadata'})
       return result
     } catch (error) {
+      if(sourceStore.versionOf(id)!==revision)return {ok:false,message:'音源内容已变化，请重新检查更新'}
       sourceStore.recordUpdateCheck(id, {
         checkedAt,
         state: 'failed',
         currentVersion: loaded.meta.version,
         message: `检查更新失败：${error instanceof Error ? error.message : String(error)}`
       })
-      mainWindow?.webContents.send(IPC.sourcesChanged)
+      mainWindow?.webContents.send(IPC.sourcesChanged,{kind: 'metadata'})
       throw error
     }
   })
@@ -1988,10 +2076,11 @@ function registerIpc(): void {
    * update that turns out to be unsafe is blocked and quarantined here exactly
    * as an import would be.
    */
-  handle(IPC.sourcesUpdateApply, async (id: string, script: string) => {
+  handle(IPC.sourcesUpdateApply, async (id: string, script: string, baseSha256?:string) => {
     const { sourceStore, sourceEngine } = requireServices()
     if (typeof id !== 'string' || !id) throw new Error('音源不存在')
-    return applySourceUpdate(sourceStore, sourceEngine, id, script)
+    const result=await applySourceUpdate(sourceStore, sourceEngine, id, script,baseSha256)
+    return {...result,verification:{initialization:result.enabled?(sourceEngine.isInitialized(id)?'passed':'unavailable'):'notRun',playback:'unverified'}}
   })
 
   /**
@@ -2003,7 +2092,8 @@ function registerIpc(): void {
    */
   handle(IPC.sourcesUpdateRollback, async (id: string) => {
     const { sourceStore, sourceEngine } = requireServices()
-    return rollbackSourceUpdate(sourceStore, sourceEngine, id)
+    const result=await rollbackSourceUpdate(sourceStore, sourceEngine, id)
+    return {...result,verification:{initialization:result.enabled?(sourceEngine.isInitialized(id)?'passed':'unavailable'):'notRun',playback:'unverified'}}
   })
 
   /* ---------------- online music ---------------- */
@@ -2053,10 +2143,30 @@ function registerIpc(): void {
    * row is decoration on top of the search page, and a caller bug should not turn
    * into a page that cannot be used.
    */
-  handle(IPC.musicHotWords, async (scope: unknown) => {
+  handle(IPC.musicHotWords, async (scope: unknown, requestId?: string) => cancellableRequest(requestId, async signal => {
     const wanted = typeof scope === 'string' && scope.length <= 12 ? scope : 'all'
     const { searchRouter } = requireServices()
-    return searchRouter.hotWords(wanted === 'all' ? 'all' : (wanted as SourceId))
+    return searchRouter.hotWords(wanted === 'all' ? 'all' : (wanted as SourceId), signal)
+  }))
+
+  handle(IPC.onlineDiagnosticsExport, async () => {
+    const chosen = await dialog.showSaveDialog({ title: '导出在线诊断', defaultPath: 'jj-online-diagnostics.json', filters: [{ name: 'JSON', extensions: ['json'] }] })
+    if (chosen.canceled || !chosen.filePath) return false
+    await writeJsonAtomic(chosen.filePath, requireServices().catalogReliability.diagnostics.export())
+    return true
+  })
+  handle(IPC.onlineDiagnosticsClear, async () => {
+    const { diagnostics } = requireServices().catalogReliability
+    diagnostics.clear(); await diagnostics.flush()
+  })
+  handle(IPC.onlineCacheClear, async () => {
+    const { catalogReliability, hotWords, onlineAssets } = requireServices()
+    clearAutomaticLyricCache()
+    await onlineAssets.clear()
+    requireServices().playlistRefresh.clear()
+    requireServices().libraryRouter.clear()
+    hotWords.clear()
+    catalogReliability.clear(); await catalogReliability.flush()
   })
 
   /**
@@ -2078,6 +2188,8 @@ function registerIpc(): void {
       failed: routed.failed ?? [],
       sources: [],
       servedBy: routed.servedBy,
+      reliability: routed.reliability,
+      platformStates: routed.platformStates,
       ...(routed.message ? { message: routed.message } : {}),
       ...(routed.reason ? { reason: routed.reason } : {})
     }
@@ -2092,7 +2204,7 @@ function registerIpc(): void {
    * whatever it could find — a missing cover is not a failure.
    */
   handle(IPC.musicEnrich, async (music: OnlineMusicInfo, only?: unknown, requestId?: string) => cancellableRequest(requestId, async signal => {
-    const { sourceEngine, onlineLyric, onlinePlatforms } = requireServices()
+    const { onlineLyric, onlinePlatforms, scriptCover, platformCover } = requireServices()
     // The renderer may name one source (the now-playing menu's switch); anything
     // it sends that is not one of the three is ignored rather than obeyed.
     const picked: OnlineLyricSource | undefined =
@@ -2102,16 +2214,20 @@ function registerIpc(): void {
 
     let cover: AssetRef | undefined = music.assets?.cover?.[0]
     let picUrl = music.picUrl ?? ''
-    if (!picUrl && onlinePlatforms.allows(music.source, 'cover')) {
-      const scriptPic = await sourceEngine.getPic(music.source, music, signal)
-      if (scriptPic) {
-        try {
-          picUrl = await sourceMediaProxy.imageDataUrl(scriptPic)
-          cover = { origin: 'remote', provider: '音源脚本', at: Date.now() }
-        } catch {
-          picUrl = ''
-        }
+    if (/^https?:\/\//i.test(picUrl) && (!cover ||
+      ((cover.origin === 'remote' || cover.origin === 'cache') && !cover.pending && cover.provider !== '音源脚本'))) {
+      const image = await platformCover(music, signal)
+      if (image) {
+        picUrl = `data:${image.mimeType};base64,${Buffer.from(image.data).toString('base64')}`
+        cover = { origin: 'remote', provider: '平台搜索结果', at: image.reliability?.fetchedAt ?? Date.now(), reliability: image.reliability }
       }
+      // A failed cache/network lookup has already spent its bounded request;
+      // do not make Chromium silently repeat it through the original URL.
+      else picUrl = ''
+    }
+    if (!picUrl && onlinePlatforms.allows(music.source, 'cover')) {
+      try { const result = await scriptCover(music, signal); picUrl = result.dataUrl; cover = result.asset }
+      catch { picUrl = '' }
     } else if (!cover) {
       cover = { origin: 'remote', provider: '平台搜索结果', at: Date.now() }
     }
@@ -2130,21 +2246,27 @@ function registerIpc(): void {
 
   handle(
     IPC.musicUrl,
-    async (_source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality, strict = false, requestId?: string) => cancellableRequest(requestId, async signal => {
+    async (_source: SourceId, musicInfo: OnlineMusicInfo, quality: Quality, strict = false, requestId?: string, manualRetry=false) => cancellableRequest(requestId, async signal => {
       const { playbackRouter } = requireServices()
-      const result = await playbackRouter.musicUrl(musicInfo, quality, strict === true, signal)
+      const result = await playbackRouter.musicUrl(musicInfo, quality, strict === true, signal, manualRetry)
       if (signal?.aborted) throw new Error('请求已取消')
       if (!result.providerId || !result.providerVersion) throw new Error('音源没有可验证的身份，无法安全播放')
+      const revision=requireServices().sourceEngine.providerRevision(result.providerId)
+      if(!revision||revision.providerVersion!==result.providerVersion||revision.generation!==result.providerGeneration)throw new Error('音源运行版本已变化，请重新解析')
       return {
         ...result,
+        resolvedAt: Date.now(),
         url: sourceMediaProxy.audioUrl(result.url, {
           sourceId: musicInfo.source,
           providerId: result.providerId,
-          providerVersion: result.providerVersion
+          providerVersion: result.providerVersion,
+          providerGeneration:result.providerGeneration
         })
       }
     })
   )
+
+  handle(IPC.musicMediaFailure,(url:string)=>sourceMediaProxy.failure(url))
 
   handle(IPC.musicLyric, async (_source: SourceId, musicInfo: OnlineMusicInfo) => {
     const { playbackRouter } = requireServices()
@@ -2282,14 +2404,15 @@ function registerIpc(): void {
     const admitted = new Set(requireServices().libraryRouter.playablePlatforms())
     return searchProviders().filter((item) => admitted.has(item.id))
   })
-  handle(IPC.playlistImportPreview, async (source: SourceId, input: string) => {
+  handle(IPC.playlistImportPreview, async (source: SourceId, input: string, requestId?: string) => cancellableRequest(requestId,async signal=>{
     if (typeof input !== 'string' || input.length > 4096) throw Error('歌单链接无效')
     // The host recognises the link, not the script: `parsePlaylistId` is what rejects
     // a 网易云 link sent to a QQ 音乐 source, and it also decides the id a script is
     // allowed to see. Handing over the raw URL instead would lose that check and tell
     // the script where the user browses — see `library-router.ts`.
     const listId = parsePlaylistId(source, input)
-    const routed = await requireServices().libraryRouter.importTracks(source, input, listId)
+    const routed = await requireServices().libraryRouter.importTracks(source, input, listId,signal)
+    if(signal?.aborted)throw new Error('请求已取消')
     if (routed.servedBy === 'none') throw Error(routed.message ?? '无法读取该歌单')
     const token = randomUUID()
     const preview: ImportedPlaylist = {
@@ -2299,12 +2422,14 @@ function registerIpc(): void {
       ...(routed.coverUrl ? { coverUrl: routed.coverUrl } : {}),
       tracks: routed.list,
       total: routed.total ?? routed.list.length,
-      warnings: routed.warnings ?? []
+      warnings: routed.warnings ?? [],
+      complete: routed.complete,
+      reliability: routed.reliability
     }
     if(importPreviews.size>=10)importPreviews.delete(importPreviews.keys().next().value!)
     importPreviews.set(token,preview)
     return {...preview,token}
-  })
+  }))
   handle(IPC.playlistImportSave, async (token: string, ids: unknown) => {
     const preview=importPreviews.get(token)
     if(!preview)throw Error('预览已失效，请重新读取歌单')
@@ -2325,6 +2450,9 @@ function registerIpc(): void {
     }
     return {...playlist,trackCount:tracks.length,coverFailed}
   })
+  handle(IPC.playlistRefreshPreview,(id:string,requestId?:string)=>cancellableRequest(requestId,signal=>requireServices().playlistRefresh.preview(id,signal)))
+  handle(IPC.playlistRefreshApply,(token:string)=>requireServices().playlistRefresh.apply(token))
+  handle(IPC.playlistRefreshDiscard,(token:string)=>requireServices().playlistRefresh.discard(token))
   handle(IPC.playlistList, () => requireServices().playlists.list())
   // Keep the legacy IPC shape for callers while F1's platform-backed leaderboard route is unavailable.
   handle(IPC.leaderboardList, (source?: SourceId) =>
@@ -2452,7 +2580,7 @@ function registerIpc(): void {
   handle(IPC.lyricSearchOnline, async (trackId: string) => {
     const track = indexedTrack(trackId)
     const deps = requireServices().lyricDeps
-    return stageFetchedLyric(track, await searchLyricOnline(track, { ...deps, provider: deps.provider?.() }))
+    return stageFetchedLyric(track, await searchLyricOnline(track, { ...deps, fetchLyric: deps.fetchLyricFresh, provider: deps.provider?.() }))
   })
 
   /**
@@ -2719,7 +2847,7 @@ function registerIpc(): void {
       if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))
         && options?.coverFrom
         && requireServices().onlinePlatforms.allows(options.coverFrom.source, 'cover')) {
-        const cover = await fetchCoverBytes(options?.coverFrom)
+        const cover = await requireServices().platformCover(options.coverFrom)
         if (cover) effective.cover = cover
       }
 
@@ -2730,7 +2858,7 @@ function registerIpc(): void {
   /** Fetch a cover image for a matched track, returned as a data URL. */
   handle(IPC.matchCover, async (music: OnlineMusicInfo) => {
     if (!requireServices().onlinePlatforms.allows(music.source, 'cover')) return null
-    const cover = await fetchCoverBytes(music)
+    const cover = await requireServices().platformCover(music)
     if (!cover) return null
     return {
       dataUrl: `data:${cover.mimeType};base64,${Buffer.from(cover.data).toString('base64')}`,
@@ -2814,7 +2942,7 @@ if (!app.requestSingleInstanceLock()) {
     void services.sourceEngine.startAll()
       .then(() => {
         void checkDailySourceUpdates(services!.sourceStore, {
-          onChange: () => mainWindow?.webContents.send(IPC.sourcesChanged)
+          onChange: () => mainWindow?.webContents.send(IPC.sourcesChanged,{kind:'metadata'})
         }).catch(error => console.error('音源每日更新检查失败:', error))
       })
       .catch((error) => console.error('启动音源失败:', error))
@@ -2853,6 +2981,11 @@ if (!app.requestSingleInstanceLock()) {
     // The source lifecycle owns child processes, so stop it before quitting.
     void Promise.allSettled([
       current.downloads.shutdown(),
+      current.catalogReliability.flush(),
+      current.onlineAssets.flush(),
+      current.libraryRouter.flush(),
+      current.hotWords.flush(),
+      current.playlists.flush(),
       current.sourceEngine.stopAll()
     ])
       .then(() => flushJsonWrites())

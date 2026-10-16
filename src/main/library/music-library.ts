@@ -131,6 +131,10 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+function pathKey(path: string): string {
+  return path.toLowerCase().replace(/\\/g, '/')
+}
+
 export class MusicLibrary {
   private readonly indexPath: string
   private readonly coverDir: string
@@ -138,6 +142,8 @@ export class MusicLibrary {
   private tracks = new Map<string, LocalMusicInfo>()
   private folders: string[] = []
   private loaded = false
+  /** Deletions invalidate old reads only for scans already in flight. */
+  private readonly scanRemovals = new Set<Set<string>>()
   /**
    * True when the loaded index predates the current schema, so entries are
    * missing fields that only a file read can supply. `scan()` uses this to
@@ -248,7 +254,10 @@ export class MusicLibrary {
   /** Reconcile a download-owned path only after its audio was removed. */
   async removeDownloadedFile(path: string): Promise<void> {
     await this.load()
-    const ids = this.getAll().filter(track => track.path.toLowerCase() === path.toLowerCase()).map(track => track.id)
+    const key = pathKey(path)
+    // Also invalidate a pending first scan read, even if no indexed row exists yet.
+    for (const removed of this.scanRemovals) removed.add(key)
+    const ids = this.getAll().filter(track => pathKey(track.path) === key).map(track => track.id)
     if (ids.length) await this.removeTracks(ids)
   }
 
@@ -312,6 +321,16 @@ export class MusicLibrary {
    */
   async scan(options: ScanOptions = {}): Promise<ScanProgress> {
     await this.load()
+    const removed = new Set<string>()
+    this.scanRemovals.add(removed)
+    try {
+      return await this.scanFolders(options, removed)
+    } finally {
+      this.scanRemovals.delete(removed)
+    }
+  }
+
+  private async scanFolders(options: ScanOptions, removed: Set<string>): Promise<ScanProgress> {
     const extensions = new Set(
       (options.extensions ?? DEFAULT_EXTENSIONS).map((ext) => ext.toLowerCase())
     )
@@ -339,6 +358,7 @@ export class MusicLibrary {
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i]
         const result = results[i]
+        if (removed.has(pathKey(item.file))) continue
         if (result.failed || !result.track) progress.failed += 1
         else {
           this.tracks.set(item.file, result.track)
@@ -363,6 +383,7 @@ export class MusicLibrary {
         if (options.signal?.aborted) break
         const ext = extname(file).slice(1).toLowerCase()
         if (!extensions.has(ext)) continue
+        if (removed.has(pathKey(file))) continue
 
         if (seen.has(file)) continue
         seen.add(file)

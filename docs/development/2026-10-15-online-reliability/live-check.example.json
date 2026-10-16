@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "samples": {
+    "wy": {
+      "keyword": null,
+      "track": null,
+      "coverUrl": null,
+      "artistId": null,
+      "albumId": null,
+      "playlistId": null
+    },
+    "tx": {
+      "keyword": null,
+      "track": null,
+      "coverUrl": null,
+      "playlistId": null
+    }
+  }
+}

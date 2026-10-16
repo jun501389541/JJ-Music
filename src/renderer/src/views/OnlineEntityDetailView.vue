@@ -84,6 +84,7 @@ async function load(): Promise<void> {
       }
       state.value = 'available'
       entity.value = result.entity
+      message.value = result.message || ''
       tracks.value = result.tracks
       total.value = result.total
       hasMore.value = result.hasMore
@@ -129,7 +130,7 @@ async function loadArtwork(target: EntityRef, expectedGeneration: number): Promi
   activeArtworkRequestId = requestId
   try {
     const localPath = await window.jj.onlineDetails.artwork(source.value, props.kind, url, requestId)
-    if (expectedGeneration === generation && localPath.startsWith('jjmedia://')) artwork.value = localPath
+    if (expectedGeneration === generation && (localPath.startsWith('jjmedia://') || /^data:image\/(?:png|jpeg|webp);base64,/.test(localPath))) artwork.value = localPath
   } catch {
     // Artwork is optional; a failed image must not hide the entity or its tracks.
   } finally {
@@ -216,6 +217,7 @@ onUnmounted(cancelActiveRequest)
     </section>
 
     <template v-else-if="state === 'available'">
+      <p v-if="message" class="online-entity__message" role="status">{{ message }}</p>
       <p v-if="truncated" class="online-entity__message" role="status">
         专辑曲目数量超过安全上限，当前展示前 {{ total }} 首。
       </p>

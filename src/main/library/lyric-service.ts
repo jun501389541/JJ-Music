@@ -78,7 +78,7 @@ export async function resolveOnlineLyricByOrder(
     try {
       const result = await steps[source]()
       if (signal?.aborted) break
-      if (result?.lyric?.trim()) return { lyric: result, asset: { origin: 'remote', provider: source, at: Date.now() } }
+      if (result?.lyric?.trim()) return { lyric: result, asset: { origin: 'remote', provider: source, at: result.reliability?.fetchedAt ?? Date.now(), ...(result.reliability ? { reliability: result.reliability } : {}) } }
     } catch {
       /* try the next one */
     }
@@ -145,6 +145,7 @@ export async function lyricFromOtherPlatforms(
 interface CachedLyric { value: ResolvedLyric; localVersion?: string }
 const cache = new Map<string, CachedLyric>()
 const CACHE_LIMIT = 64
+let cacheEpoch = 0
 
 function cacheSet(key: string, value: ResolvedLyric, localVersion?: string): void {
   cache.delete(key)
@@ -180,6 +181,7 @@ function cacheKeyFor(trackId: string, provider?: string): string {
  * script's output winning for as long as that took.
  */
 export function clearLyricCacheFor(provider: string): void {
+  cacheEpoch++
   const prefix = `${provider}\u0000`
   for (const key of cache.keys()) {
     if (key.startsWith(prefix)) cache.delete(key)
@@ -187,6 +189,7 @@ export function clearLyricCacheFor(provider: string): void {
 }
 
 export function clearLyricCache(trackId?: string): void {
+  cacheEpoch++
   if (!trackId) {
     cache.clear()
     return
@@ -198,6 +201,13 @@ export function clearLyricCache(trackId?: string): void {
   for (const key of cache.keys()) {
     if (key === trackId || key.endsWith(suffix)) cache.delete(key)
   }
+}
+
+/** Cache maintenance must preserve confirmed pending choices. */
+export function clearAutomaticLyricCache(onlyProvider?:string): void {
+  cacheEpoch++
+  for (const [key, entry] of cache) if (entry.value.source === 'online' && !entry.value.asset?.pending &&
+    (onlyProvider===undefined||entry.value.asset?.provider===onlyProvider)) cache.delete(key)
 }
 
 /**
@@ -295,6 +305,7 @@ export async function resolveLocalLyric(
   } = {}
 ): Promise<ResolvedLyric> {
   const allowOnline = options.allowOnline !== false
+  const epoch = cacheEpoch
   const key = cacheKeyFor(track.id, deps.provider)
   let localVersion: string
   try {
@@ -310,7 +321,12 @@ export async function resolveLocalLyric(
     cacheSet(key, resolved, localVersion)
     return resolved
   }
-  const cached = options.force ? undefined : cache.get(key)
+  let cached = options.force ? undefined : cache.get(key)
+  if (cached?.value.source === 'online' && !cached.value.asset?.pending && cached.value.reliability) {
+    const state = cached.value.reliability, now = Date.now()
+    const until = allowOnline ? state.expiresAt : state.staleUntil
+    if (state.fetchedAt === undefined || until === undefined || now < state.fetchedAt || now >= until) cached = undefined
+  }
   if (cached?.localVersion === localVersion && cached.value.source !== 'sidecar') return cached.value
 
   // A rescan is not required to notice freshly written embedded tags. A cache
@@ -331,6 +347,12 @@ export async function resolveLocalLyric(
   if (allowOnline) {
     const online = await searchLyricOnline(track, deps)
     if (online.lyric.trim()) {
+      let currentVersion: string
+      try { const info = await stat(track.path, { bigint: true }); currentVersion = JSON.stringify([track.path, String(info.size), String(info.mtimeNs), String(info.ctimeNs)]) }
+      catch { currentVersion = `${track.path}:missing` }
+      if (epoch !== cacheEpoch || currentVersion !== localVersion || (await readSidecar(sidecarPathFor(track.path)))?.trim()) {
+        return resolveLocalLyric(track, { allowOnline: false, force: true }, deps)
+      }
       cacheSet(key, online, localVersion)
       return online
     }
@@ -370,6 +392,7 @@ export async function searchLyricOnline(
 
   return {
     lyric: best.lyric,
+    ...(best.reliability ? { reliability: best.reliability } : {}),
     ...(best.tlyric ? { tlyric: best.tlyric } : {}),
     ...(best.rlyric ? { rlyric: best.rlyric } : {}),
     /*
@@ -385,7 +408,7 @@ export async function searchLyricOnline(
     matchScore: best.score,
     // This path is cross-platform matching by name, whatever the winner's own
     // platform turns out to be — the record says which slot, `matchedMusic` the row.
-    asset: { origin: 'remote', provider: 'search', at: Date.now() }
+    asset: { origin: 'remote', provider: 'search', at: best.reliability?.fetchedAt ?? Date.now(), ...(best.reliability ? { reliability: best.reliability } : {}) }
   }
 }
 
@@ -493,6 +516,7 @@ export async function lyricCandidates(
           ...(candidate.music.albumName ? { album: candidate.music.albumName } : {}),
           score: candidate.score,
           lyric: result.lyric,
+          ...(result.reliability ? { reliability: result.reliability } : {}),
           ...(result.tlyric ? { tlyric: result.tlyric } : {}),
           ...(result.rlyric ? { rlyric: result.rlyric } : {}),
           synchronized: looksSynchronized(result.lyric),

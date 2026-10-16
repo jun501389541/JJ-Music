@@ -15,7 +15,7 @@ import type { ValidationReport } from '@shared/validation'
 import { QUALITY_LABELS } from '@shared/types'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
-import { createSourceUpdateState } from '../utils/source-update-state'
+import { createSourceUpdateState, sourceUpdateFeedback } from '../utils/source-update-state'
 
 const library = useLibraryStore()
 const ui = useUiStore()
@@ -247,8 +247,8 @@ async function applyUpdate(api: UserApiMeta): Promise<void> {
   if (!confirmed) return
   updating.value = true
   try {
-    await window.jj.sources.updates.apply(api.id, plan.script)
-    toast.success(`已更新「${api.name}」到 v${plan.nextVersion || '新版本'}`)
+    const result=await window.jj.sources.updates.apply(api.id, plan.script,plan.baseSha256)
+    toast.success(`「${api.name}」v${result.version || plan.nextVersion || '新版本'}：${sourceUpdateFeedback(result)}`)
     dismissUpdate()
     await library.refreshSources().catch(() => undefined)
   } catch (error) {
@@ -267,8 +267,8 @@ async function rollback(api: UserApiMeta): Promise<void> {
   )
   if (!confirmed) return
   try {
-    await window.jj.sources.updates.rollback(api.id)
-    toast.success(`已回退「${api.name}」到 ${label}`)
+    const result=await window.jj.sources.updates.rollback(api.id)
+    toast.success(`已回退「${api.name}」到 ${label}；${sourceUpdateFeedback(result)}`)
     await library.refreshSources().catch(() => undefined)
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '回退失败')
@@ -676,6 +676,7 @@ async function removeAll(): Promise<void> {
               </p>
               <p class="update__caveat">
                 校验值只说明下载内容与上面显示的一致，不证明发布者身份。确认前请自行判断来源是否可信。
+                安装时只检查初始化，实际播放需要另行验证；停用音源不会为更新而启动。
               </p>
               <div class="update__actions">
                 <button class="btn btn--primary" type="button" :disabled="updating" @click="applyUpdate(api)">

@@ -57,6 +57,29 @@ export interface UpdateLifecycle {
   reload(id: string, scriptOverride?: string): Promise<void>
   /** Mark a successfully persisted candidate as the durable runtime. */
   commitCandidate?(id: string): void
+  canCommitCandidate?(id:string):boolean
+  invalidate?(id:string):void
+}
+const changingSources=new WeakMap<SourceStore,Set<string>>()
+async function sourceChange<T>(store:SourceStore,id:string,work:(id:string)=>Promise<T>):Promise<T>{
+  const before=store.get(id)
+  if(!before)throw new Error('音源不存在，可能已被删除')
+  const canonical=before.meta.id
+  let changing=changingSources.get(store)
+  if(!changing){changing=new Set();changingSources.set(store,changing)}
+  if(changing.has(canonical))throw new Error('该音源正在更新或回退，请等待当前操作完成')
+  changing.add(canonical)
+  try{return await work(canonical)}finally{changing.delete(canonical)}
+}
+function unchanged(store:SourceStore,id:string,source:string,engine:UpdateLifecycle):void{
+  const current=store.get(id)
+  if(!current||current.source!==source)throw new Error('音源内容已变化，请重新检查更新')
+  if(!current.meta.enabled)throw new Error('音源已停用，候选提交已取消')
+  if(engine.canCommitCandidate?.(id)===false)throw new Error('音源候选已失效，提交已取消')
+}
+async function restore(store:SourceStore,engine:UpdateLifecycle,id:string):Promise<void>{
+  if(store.get(id)?.meta.enabled)await engine.reload(id)
+  else engine.invalidate?.(id)
 }
 
 /**
@@ -68,8 +91,16 @@ export async function applySourceUpdate(
   store: SourceStore,
   engine: UpdateLifecycle,
   id: string,
-  script: string
+  script: string,
+  baseSha256?:string
 ): Promise<UserApiMeta> {
+  return sourceChange(store,id,canonical=>{
+    const current=store.get(canonical)
+    if(baseSha256!==undefined&&(!/^[a-f0-9]{64}$/i.test(baseSha256)||!current||createHash('sha256').update(current.source).digest('hex')!==baseSha256.toLowerCase()))throw new Error('音源内容已变化，请重新检查更新')
+    return applyUpdate(store,engine,canonical,script)
+  })
+}
+async function applyUpdate(store:SourceStore,engine:UpdateLifecycle,id:string,script:string):Promise<UserApiMeta>{
   const before = store.get(id)
   if (!before) throw new Error('音源不存在，可能已被删除')
   if (typeof script !== 'string' || !script.trim()) throw new Error('更新内容为空')
@@ -79,6 +110,7 @@ export async function applySourceUpdate(
   if (!wasEnabled) {
     const updated = store.replaceScript(id, script, '在线音源')
     if (!updated) throw new Error('音源不存在，可能已被删除')
+    engine.invalidate?.(id)
     return updated
   }
 
@@ -86,7 +118,7 @@ export async function applySourceUpdate(
     await engine.reload(id, script)
   } catch (updateError) {
     try {
-      await engine.reload(id)
+      await restore(store,engine,id)
     } catch (restoreError) {
       throw new Error(
         `更新启动失败，旧版本重新启动也失败：${messageOf(restoreError)}`,
@@ -97,13 +129,14 @@ export async function applySourceUpdate(
   }
 
   try {
+    unchanged(store,id,before.source,engine)
     const updated = store.replaceScript(id, script, '在线音源')
     if (!updated) throw new Error('音源不存在，可能已被删除')
     engine.commitCandidate?.(id)
     return updated
   } catch (commitError) {
     try {
-      await engine.reload(id)
+      await restore(store,engine,id)
     } catch (restoreError) {
       throw new Error(
         `更新未能保存，旧版本重新启动也失败：${messageOf(restoreError)}`,
@@ -120,6 +153,9 @@ export async function rollbackSourceUpdate(
   engine: UpdateLifecycle,
   id: string
 ): Promise<UserApiMeta> {
+  return sourceChange(store,id,canonical=>rollbackUpdate(store,engine,canonical))
+}
+async function rollbackUpdate(store:SourceStore,engine:UpdateLifecycle,id:string):Promise<UserApiMeta>{
   const before = store.get(id)
   if (!before) throw new Error('音源不存在，可能已被删除')
   const wasEnabled = before.meta.enabled
@@ -129,6 +165,7 @@ export async function rollbackSourceUpdate(
     if (!store.rollback(id)) throw new Error('没有可回退的版本')
     const rolledBack = store.get(id)
     if (!rolledBack) throw new Error('回退后找不到音源记录')
+    engine.invalidate?.(id)
     return rolledBack.meta
   }
 
@@ -136,7 +173,7 @@ export async function rollbackSourceUpdate(
     await engine.reload(id, previousSource)
   } catch (rollbackError) {
     try {
-      await engine.reload(id)
+      await restore(store,engine,id)
     } catch (restoreError) {
       throw new Error(
         `回退启动失败，当前版本重新启动也失败：${messageOf(restoreError)}`,
@@ -147,6 +184,7 @@ export async function rollbackSourceUpdate(
   }
 
   try {
+    unchanged(store,id,before.source,engine)
     if (!store.rollback(id)) throw new Error('没有可回退的版本')
     const rolledBack = store.get(id)
     if (!rolledBack) throw new Error('回退后找不到音源记录')
@@ -156,7 +194,7 @@ export async function rollbackSourceUpdate(
     // A failed durable rollback leaves the current script intact; restore its
     // runtime so the live process and the persistent record agree.
     try {
-      await engine.reload(id)
+      await restore(store,engine,id)
     } catch (restoreError) {
       throw new Error(
         `回退未能保存，当前版本重新启动也失败：${messageOf(restoreError)}`,
@@ -194,6 +232,8 @@ export type UpdateCheckFailure =
 
 /** Outcome of comparing a fetched script against the installed one. */
 export interface UpdatePlan {
+  /** Installed content the user reviewed; same-version edits also invalidate it. */
+  baseSha256?:string
   change: 'newVersion' | 'contentChanged'
   /** Version string currently installed, as parsed from the stored script. */
   currentVersion: string
@@ -426,6 +466,7 @@ export async function checkForUpdate(
   return {
     ok: true,
     plan: {
+      ...(source.currentScript!==undefined?{baseSha256:createHash('sha256').update(source.currentScript).digest('hex')}:{}),
       change: contentChanged ? 'contentChanged' : 'newVersion',
       currentVersion: source.currentVersion,
       nextVersion,
@@ -483,34 +524,44 @@ export async function checkDailySourceUpdates(
     try { await options.onChange?.(id, status) } catch { /* UI refresh must not fail the check. */ }
   }
 
-  const runOne = async (loaded: ReturnType<SourceStore['list']>[number]): Promise<void> => {
-    const { meta } = loaded
-    const started: SourceUpdateCheck = { checkedAt: timestamp, state: 'checking' }
+  const runOne = async (queued: ReturnType<SourceStore['list']>[number]): Promise<void> => {
+    const id = queued.meta.id
     try {
-      if (!store.recordUpdateCheck(meta.id, started)) return
-      await notify(meta.id, started)
-      const result = await check({
-        currentVersion: loaded.meta.version,
-        updateUrl: loaded.meta.updateUrl,
-        homepage: loaded.meta.homepage,
-        currentScript: loaded.source
-      })
-      const status = summarizeUpdateCheck(result, timestamp)
-      if (store.recordUpdateCheck(meta.id, status)) await notify(meta.id, status)
-    } catch (error) {
-      const status: SourceUpdateCheck = {
-        checkedAt: timestamp,
-        state: 'failed',
-        currentVersion: meta.version,
-        message: `自动检查失败：${error instanceof Error ? error.message : String(error)}`
-      }
+      // Another worker may have waited long enough for this source to change.
+      // The checked body and the revision guard must describe the same record.
+      const loaded = store.get(id)
+      if (!loaded?.meta.enabled || !loaded.meta.updateUrl) return
+      const { meta } = loaded
+      const revision=store.versionOf(id)
+      const started: SourceUpdateCheck = { checkedAt: timestamp, state: 'checking' }
       try {
+        if (!store.recordUpdateCheck(meta.id, started)) return
+        await notify(meta.id, started)
+        const result = await check({
+          currentVersion: loaded.meta.version,
+          updateUrl: loaded.meta.updateUrl,
+          homepage: loaded.meta.homepage,
+          currentScript: loaded.source
+        })
+        const status = summarizeUpdateCheck(result, timestamp)
+        if(store.versionOf(meta.id)!==revision)return
         if (store.recordUpdateCheck(meta.id, status)) await notify(meta.id, status)
-      } catch (persistError) {
-        console.error(`保存音源「${meta.name}」更新检查状态失败`, persistError)
+      } catch (error) {
+        if(store.versionOf(meta.id)!==revision)return
+        const status: SourceUpdateCheck = {
+          checkedAt: timestamp,
+          state: 'failed',
+          currentVersion: meta.version,
+          message: `自动检查失败：${error instanceof Error ? error.message : String(error)}`
+        }
+        try {
+          if (store.recordUpdateCheck(meta.id, status)) await notify(meta.id, status)
+        } catch (persistError) {
+          console.error(`保存音源「${meta.name}」更新检查状态失败`, persistError)
+        }
       }
     } finally {
-      dailyChecksInFlight.delete(meta.id)
+      dailyChecksInFlight.delete(id)
     }
   }
 

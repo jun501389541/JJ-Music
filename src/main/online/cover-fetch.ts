@@ -69,7 +69,7 @@ export const COVER_HOSTS: Partial<Record<SourceId, string[]>> = {
 const MAX_BYTES = 8 * 1024 * 1024
 const TIMEOUT_MS = 10_000
 
-export type CoverBytes = { data: Uint8Array; mimeType: string }
+export type CoverBytes = { data: Uint8Array; mimeType: string; reliability?: import('@shared/online-reliability').ResourceStatus }
 
 /**
  * Fetch one candidate's cover, or `null` when there is nothing usable.

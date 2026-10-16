@@ -28,6 +28,9 @@ import { readFile } from 'node:fs/promises'
 import type { HotWord, SourceId } from '@shared/types'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 import { safeFetchText } from './url-guard'
+import type { ResourceStatus } from '@shared/online-reliability'
+import { normalizeOnlineError, onlineContext, runOnlineRequest } from './reliability-policy'
+import { CapabilityHealth } from './capability-health'
 
 /** One platform's board. Beyond this it stops being a hint and becomes a list. */
 export const HOT_WORD_LIMIT = 20
@@ -124,6 +127,7 @@ const ADAPTERS: HotWordAdapter[] = [
 export const HOT_WORD_SOURCES: SourceId[] = ADAPTERS.map((adapter) => adapter.source)
 
 interface HotWordEntry {
+  adapterRevision?: string
   /** When this platform was last asked. Only a same-day stamp counts as fresh. */
   at: number
   words: string[]
@@ -140,6 +144,9 @@ interface HotWordEntry {
 }
 
 export interface HotWordOptions {
+  reliability?: boolean
+  health?: CapabilityHealth
+  revision?: (source: SourceId) => string
   /** `<dataDir>/library/hot-words.json`. Left out means memory only, which is what the offline suite uses. */
   file?: string
   /** Injectable so "did it ask again today" is testable without waiting for tomorrow. */
@@ -147,9 +154,11 @@ export interface HotWordOptions {
 }
 
 export class HotWordSource {
+  private writing: Promise<void> = Promise.resolve()
   private readonly entries = new Map<SourceId, HotWordEntry>()
   private readonly failedAt = new Map<SourceId, number>()
-  private readonly inflight = new Map<SourceId, Promise<string[]>>()
+  private readonly inflight = new Map<SourceId, { task: Promise<string[]>; controller: AbortController; consumers: number; valid: boolean; settled: boolean; version?: string; revision?: string }>()
+  private readonly failures = new Map<SourceId, ReturnType<typeof normalizeOnlineError>>()
   private readonly now: () => number
   /**
    * The source version currently answering, read fresh on every request.
@@ -162,7 +171,7 @@ export class HotWordSource {
   private version: () => string | undefined
 
   constructor(
-    private readonly fetchText: (url: string, referer: string, headers?: Record<string, string>) => Promise<string> = defaultFetch,
+    private readonly fetchText: (url: string, referer: string, headers?: Record<string, string>, signal?: AbortSignal) => Promise<string> = defaultFetch,
     private readonly options: HotWordOptions & { version?: () => string | undefined } = {}
   ) {
     this.now = options.now ?? Date.now
@@ -183,6 +192,8 @@ export class HotWordSource {
    */
   setVersion(version: string | undefined): void {
     if (version === this.version()) return
+    for (const flight of this.inflight.values()) flight.valid = false
+    this.inflight.clear(); this.failedAt.clear(); this.failures.clear()
     this.version = version === undefined ? () => undefined : () => version
     let changed = false
     for (const [source, entry] of this.entries) {
@@ -216,8 +227,9 @@ export class HotWordSource {
         if (!ADAPTERS.some((adapter) => adapter.source === source)) continue
         if (!entry || typeof entry.at !== 'number' || !Array.isArray(entry.words)) continue
         if (current !== undefined && entry.provider !== current) continue
+        if (this.options.reliability && entry.adapterRevision !== this.options.revision?.(source as SourceId)) continue
         const words = entry.words.filter((word): word is string => typeof word === 'string' && word.length > 0 && word.length <= 40)
-        if (words.length) this.entries.set(source as SourceId, { at: entry.at, words, ...(entry.provider ? { provider: entry.provider } : {}) })
+        if (words.length) this.entries.set(source as SourceId, { at: entry.at, words, ...(entry.provider ? { provider: entry.provider } : {}), ...(entry.adapterRevision ? { adapterRevision: entry.adapterRevision } : {}) })
       }
     } catch {
       /* first launch, or the file is not there yet */
@@ -231,13 +243,13 @@ export class HotWordSource {
    * from the first platform answered would mean the other three never appear on
    * screen, which is the opposite of what 全部 is for.
    */
-  async words(scope: SourceId | 'all', allowedSources?: readonly SourceId[]): Promise<HotWord[]> {
+  async words(scope: SourceId | 'all', allowedSources?: readonly SourceId[], signal?: AbortSignal): Promise<HotWord[]> {
     if (scope !== 'all' && !ADAPTERS.some((adapter) => adapter.source === scope)) return []
     const allowed = allowedSources ? new Set(allowedSources) : undefined
     const wanted = (scope === 'all' ? ADAPTERS.map((adapter) => adapter.source) : [scope])
       .filter((source) => !allowed || allowed.has(source))
     const lists = await Promise.all(wanted.map(async (source) => {
-      const words = await this.showNow(source, scope === 'all')
+      const words = await this.showNow(source, scope === 'all', signal)
       return words.map((text) => ({ text, source }))
     }))
     const limit = scope === 'all' ? HOT_WORD_AGGREGATE_LIMIT : HOT_WORD_LIMIT
@@ -264,7 +276,19 @@ export class HotWordSource {
    * refresh already running behind it, or — only when nothing was ever remembered
    * — the fetch itself.
    */
-  private async showNow(source: SourceId, budgeted: boolean): Promise<string[]> {
+  state(source: SourceId): ResourceStatus {
+    const entry = this.entries.get(source), age = entry ? this.now() - entry.at : -1
+    const usable = entry && age >= 0 && age < 7 * 86400_000 && entry.adapterRevision === this.options.revision?.(source) && (this.version() === undefined || entry.provider === this.version())
+    return { cacheState: usable ? age < 86400_000 ? 'fresh' : 'stale' : 'miss', servedBy: usable ? 'builtin' : 'none', partial: false,
+      ...(usable ? { fetchedAt: entry.at, expiresAt: entry.at + 86400_000, staleUntil: entry.at + 7 * 86400_000 } : {}),
+      ...(this.failures.has(source) ? { error: this.failures.get(source) } : {}) }
+  }
+  clear(): void {
+    for (const flight of this.inflight.values()) flight.valid = false
+    this.inflight.clear(); this.entries.clear(); this.failedAt.clear(); this.failures.clear()
+    void this.persist()
+  }
+  private async showNow(source: SourceId, budgeted: boolean, signal?: AbortSignal): Promise<string[]> {
     const entry = this.entries.get(source)
     /*
      * An entry stamped with a version other than the one answering now is not
@@ -273,6 +297,18 @@ export class HotWordSource {
      * source stands behind. The stale-serve path is only for the same version.
      */
     const current = this.version()
+    if (this.options.reliability) {
+      const state = this.state(source)
+      if (state.cacheState === 'fresh') return entry!.words
+      const controller = new AbortController()
+      const abort = (): void => controller.abort()
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) controller.abort()
+      const timer = setTimeout(abort, budgeted ? AGGREGATE_WAIT_MS : 12_000)
+      try { return await this.refresh(source, controller.signal) }
+      catch { return signal?.aborted ? [] : state.cacheState === 'stale' ? entry!.words : [] }
+      finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+    }
     if (entry && current !== undefined && entry.provider !== current) {
       this.entries.delete(source)
     } else if (entry && sameLocalDay(entry.at, this.now())) {
@@ -292,9 +328,13 @@ export class HotWordSource {
    * stamp today as done either — that would silence the board for the rest of the
    * day over one transient 500. It records a backoff instead.
    */
-  private refresh(source: SourceId): Promise<string[]> {
+  private refresh(source: SourceId, signal?: AbortSignal): Promise<string[]> {
+    if (signal?.aborted) return Promise.reject(new DOMException('Cancelled', 'AbortError'))
     const running = this.inflight.get(source)
-    if (running) return running
+    const current = this.version(), revision = this.options.revision?.(source)
+    if (running && running.version === current && running.revision === revision) return this.subscribe(source, running, signal)
+    if (running) running.valid = false
+    const flight = { task: Promise.resolve([] as string[]), controller: new AbortController(), consumers: 0, valid: true, settled: false, version: current, revision }
     const task = (async () => {
       const adapter = ADAPTERS.find((candidate) => candidate.source === source)
       if (!adapter) return []
@@ -311,7 +351,7 @@ export class HotWordSource {
        * looking at the cache.
        */
       const current = this.version()
-      const usable = previous && (current === undefined || previous.provider === current) ? previous : undefined
+      const usable = previous && (current === undefined || previous.provider === current) && (!this.options.reliability || this.state(source).cacheState !== 'miss') ? previous : undefined
       const failed = this.failedAt.get(source)
       /*
        * Backoff is decided by the failure stamp alone, not by whether anything is
@@ -324,33 +364,60 @@ export class HotWordSource {
        * stamp says "do not ask again yet", `usable` says "and here is what to
        * show if you do not".
        */
-      if (failed && this.now() - failed < FAILURE_BACKOFF_MS) return usable?.words ?? []
+      if (failed !== undefined && this.now() >= failed && this.now() - failed < FAILURE_BACKOFF_MS) return usable?.words ?? []
       let words: string[] = []
       try {
-        words = clean(parseLoose(await this.fetchText(adapter.url, adapter.referer, adapter.headers)), adapter)
+        const fetchWords = async (requestSignal?: AbortSignal): Promise<string[]> => clean(parseLoose(await this.fetchText(adapter.url, adapter.referer, adapter.headers, requestSignal)), adapter)
+        const context=onlineContext(source,'hotWords',revision)
+        const load=(observe?:(failure:ReturnType<typeof normalizeOnlineError>)=>void,beforeAttempt?:()=>void)=>runOnlineRequest(async s=>{
+          const result=await fetchWords(s)
+          if(!result.length)throw new SyntaxError('Invalid hot words')
+          return result
+        },context,{signal:flight.controller.signal,beforeAttempt,onAttempt:(_n,failure)=>{if(failure)observe?.(failure)}})
+        words = this.options.reliability ? await (this.options.health?.run(context,load,{signal:flight.controller.signal})??load()) : await fetchWords()
       } catch (error) {
-        console.warn('热门搜索词获取失败', source, error instanceof Error ? error.message : error)
+        if (flight.valid && !flight.controller.signal.aborted) this.failures.set(source, normalizeOnlineError(error, onlineContext(source, 'hotWords', revision)))
       }
+      if (!flight.valid || flight.controller.signal.aborted || current !== this.version() || revision !== this.options.revision?.(source)) return []
       if (!words.length) {
+        if (!this.failures.has(source)) this.failures.set(source, normalizeOnlineError(new SyntaxError(), onlineContext(source, 'hotWords', revision)))
         this.failedAt.set(source, this.now())
         return usable?.words ?? []
       }
-      this.entries.set(source, { at: this.now(), words, ...(current ? { provider: current } : {}) })
+      this.entries.set(source, { at: this.now(), words, ...(current ? { provider: current } : {}), ...(revision ? { adapterRevision: revision } : {}) })
       this.failedAt.delete(source)
+      this.failures.delete(source)
       await this.persist()
       return words
-    })().finally(() => this.inflight.delete(source))
-    this.inflight.set(source, task)
-    return task
+    })().finally(() => { flight.settled = true; if (this.inflight.get(source) === flight) this.inflight.delete(source) })
+    flight.task = task
+    this.inflight.set(source, flight)
+    return this.subscribe(source, flight, signal)
   }
 
-  private async persist(): Promise<void> {
-    if (!this.options.file) return
-    try {
-      await writeJsonAtomic(this.options.file, Object.fromEntries(this.entries))
-    } catch (error) {
+  private subscribe(source: SourceId, flight: { task: Promise<string[]>; controller: AbortController; consumers: number; valid: boolean; settled: boolean }, signal?: AbortSignal): Promise<string[]> {
+    flight.consumers++
+    return new Promise((resolve, reject) => {
+      let done = false
+      const finish = (): boolean => {
+        if (done) return false
+        done = true; signal?.removeEventListener('abort', abort); flight.consumers--
+        if (!flight.consumers && !flight.settled) { flight.valid = false; if (this.inflight.get(source) === flight) this.inflight.delete(source); flight.controller.abort() }
+        return true
+      }
+      const abort = (): void => { if (finish()) reject(new DOMException('Cancelled', 'AbortError')) }
+      signal?.addEventListener('abort', abort, { once: true })
+      flight.task.then(words => { if (finish()) resolve(words) }, error => { if (finish()) reject(error) })
+    })
+  }
+
+  async flush(): Promise<void> { await this.writing }
+  private persist(): Promise<void> {
+    if (!this.options.file) return Promise.resolve()
+    this.writing=writeJsonAtomic(this.options.file, Object.fromEntries(this.entries)).catch(error=>{
       console.error('热门搜索词缓存保存失败', error)
-    }
+    })
+    return this.writing
   }
 }
 
@@ -397,13 +464,14 @@ function clean(data: Row, adapter: HotWordAdapter): string[] {
   return out
 }
 
-async function defaultFetch(url: string, referer: string, headers?: Record<string, string>): Promise<string> {
+async function defaultFetch(url: string, referer: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<string> {
   return safeFetchText(url, {
     headers: { Referer: referer, Origin: new URL(referer).origin, 'User-Agent': 'Mozilla/5.0', ...headers },
     timeoutMs: 8000,
     maxBytes: 512 * 1024,
     // These are our own hosts, and a redirect out of them is not something this
     // feature needs to follow.
-    allowedHosts: [new URL(url).host]
+    allowedHosts: [new URL(url).host],
+    ...(signal ? { init: { signal } } : {})
   })
 }

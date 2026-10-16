@@ -83,6 +83,10 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
     { label: '播放 / 暂停', description: 'Space', kind: 'info' }, { label: '上一首 / 下一首', description: 'Ctrl + ← / →', kind: 'info' }, { label: '后退 / 前进 5 秒', description: '← / →', kind: 'info' }, { label: '音量', description: 'Ctrl + ↑ / ↓', kind: 'info' }, { label: '全局搜索', description: 'Ctrl + F', kind: 'info' }, { label: '全屏', description: 'F11', kind: 'info' }, { label: '静音 / 收起播放界面', description: 'M / Esc', kind: 'info' }, { label: '歌曲列表多选', description: 'Ctrl + 单击 / Shift + 单击 / Ctrl + A', kind: 'info' }, { label: '快捷键生效范围', description: '应用窗口获得焦点时生效；输入框内保留正常输入行为。', kind: 'info' }
   ] },
   accessibility: { title: '无障碍', icon: 'artist', items: [range('显示缩放', 'displayScale', 85, 125, 5, '%'), toggle('减少动态效果', 'reduceMotion'), toggle('使用复选框选择项目', 'showCheckboxes'), { label: '键盘导航', description: 'Tab 切换控件；方向键展开菜单；Enter 确认；Esc 关闭。', kind: 'info' }] },
-  data: { title: 'App 数据', icon: 'folder', items: [{ label: '本地保存', kind: 'info', description: '设置、歌单、音源、曲库索引与浏览器缓存的存放位置见下方「数据目录」；音乐文件始终保留在原位置。便携版默认放在程序旁边，安装版可迁移到其它盘。' }] },
+  data: { title: 'App 数据', icon: 'folder', items: [
+    { label: '本地保存', kind: 'info', description: '设置、歌单、音源、曲库索引与浏览器缓存的存放位置见下方「数据目录」；音乐文件始终保留在原位置。便携版默认放在程序旁边，安装版可迁移到其它盘。' },
+    { label: '在线资料缓存', key: 'onlineReliability', kind: 'toggle', description: '保留可展示的上次成功资料，并在连续故障时短暂等待，减少重复请求。关闭后保留基础播放。' },
+    { label: '本地在线诊断', key: 'onlineDiagnostics', kind: 'toggle', description: '记录最近的请求阶段和错误类型，保存在本机。' }
+  ] },
   about: { title: '关于', icon: 'info', items: [{ label: 'JJ Music', description: __APP_VERSION__ + ' · Windows 桌面音乐播放器', kind: 'info' }, { label: '设计与功能', description: '独立实现的 Salt Player 风格界面，兼容 LX Music 自定义音源协议。', kind: 'info' }, { label: '构建技术', description: 'Electron · Vue 3 · TypeScript · Web Audio', kind: 'info' }, { label: '开源组件', description: 'Vue / Pinia / Electron（MIT）、music-metadata（MIT）、iconv-lite（MIT）、node-id3（MIT）', kind: 'info' }] }
 }

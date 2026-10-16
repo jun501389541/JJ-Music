@@ -103,16 +103,18 @@ function pickSuggestion(track: PlayableTrack): void {
 /** 结果列表。整体替换时要把它拨回顶部，追加时不碰。 */
 const searchList = ref<{ scrollToTop(): void } | null>(null)
 /** 问一页。`全部` 打五家并行再交错合并，单平台页签只打那一家。 */
-async function fetchPage(query: string, targetPage: number, signal: AbortSignal): Promise<{ list: OnlineMusicInfo[]; total: number; allPage: number; failed: Array<{ source: SourceId }> }> {
+async function fetchPage(query: string, targetPage: number, signal: AbortSignal): Promise<{ list: OnlineMusicInfo[]; total: number; allPage: number; failed: Array<{ source: SourceId }>; message?: string }> {
   // 发出去的请求次数。"到底之后不该再发请求"这条只能靠计数证明：一页如果失败或
   // 全是重复，`page` 和条数都不动，从外面看和"根本没发"一模一样。
   fetchCount.value++
   if (activeSource.value === 'all') {
     const result = await cancellableMusic(signal, id => window.jj.music.searchAll(query, targetPage, id))
-    return { list: result.list, total: result.total, allPage: result.allPage, failed: result.failed }
+    if (result.servedBy === 'none') throw new Error(result.message || '在线搜索暂不可用')
+    return { list: result.list, total: result.total, allPage: result.allPage, failed: result.failed, message: result.message }
   }
   const result = await cancellableMusic(signal, id => window.jj.music.search(activeSource.value, query, targetPage, id))
-  return { list: result.list, total: result.total ?? result.list.length, allPage: result.allPage ?? 1, failed: [] }
+  if (result.servedBy === 'none') throw new Error(result.message || '在线搜索暂不可用')
+  return { list: result.list, total: result.total ?? result.list.length, allPage: result.allPage ?? 1, failed: [], message: result.message }
 }
 function failureNote(failed: Array<{ source: SourceId }>): string {
   if (!failed.length) return ''
@@ -147,7 +149,7 @@ async function runSearch(): Promise<void> {
     const result = await fetchPage(query, 1, controller.signal)
     if (request !== generation) return
     onlineResults.value = result.list; total.value = result.total; allPage.value = result.allPage
-    searchError.value = failureNote(result.failed)
+    searchError.value = [result.message, failureNote(result.failed)].filter(Boolean).join(' ')
     if (result.list.length === 0) exhausted.value = true
   } catch(error) {
     if (request !== generation) return
@@ -184,7 +186,7 @@ async function loadMore(): Promise<void> {
     // `allPage` 是各平台的最大值，追加过程中可能变大，取 max 而不是覆盖。
     allPage.value = Math.max(allPage.value, result.allPage)
     page.value = next
-    searchError.value = failureNote(result.failed)
+    searchError.value = [result.message, failureNote(result.failed)].filter(Boolean).join(' ')
     /*
      * 这一页一行都没多 → 停。没有这道保护，sentinel 会一直保持可见、observer
      * 反复触发，一直请求同一页 —— 一个安静的无限循环。
@@ -331,6 +333,10 @@ watch(() => route.query.q, value => {
 const HISTORY_LIMIT = 12
 const history = computed(() => library.settings.showSearchHistory ? library.settings.searchHistory ?? [] : [])
 const hotWords = ref<HotWord[]>([])
+const hotWordNote = ref('')
+let hotGeneration = 0
+let hotRequest: AbortController | null = null
+onUnmounted(() => { hotGeneration++; hotRequest?.abort() })
 /**
  * The tab the in-flight request was made for. Switching 全部 → QQ → 网易云 quickly
  * must not let the first answer land last and label itself as the current tab's.
@@ -338,15 +344,23 @@ const hotWords = ref<HotWord[]>([])
 let hotScope: SourceId | 'all' | '' = ''
 
 async function loadHotWords(): Promise<void> {
+  hotRequest?.abort()
+  const request = ++hotGeneration
+  hotWordNote.value = ''
   if (!library.settings.showSearchHotWords) { hotWords.value = []; hotScope = ''; return }
   const scope = activeSource.value
   hotScope = scope
+  const controller = new AbortController()
+  hotRequest = controller
   try {
-    const words = await window.jj.music.hotWords(scope)
-    if (hotScope === scope) hotWords.value = words
+    const result = await cancellableMusic(controller.signal, id => window.jj.music.hotWordStatus(scope, id))
+    if (request === hotGeneration && hotScope === scope) {
+      hotWords.value = result.words
+      if (Object.values(result.platformStates ?? {}).some(s => s.cacheState === 'stale')) hotWordNote.value = '热词资料较旧'
+    }
   } catch {
-    if (hotScope === scope) hotWords.value = []
-  }
+    if (request === hotGeneration && hotScope === scope) hotWords.value = []
+  } finally { if (hotRequest === controller) hotRequest = null }
 }
 /**
  * The hints live or die by what is in the box, not by whether a search has run:
@@ -356,7 +370,8 @@ async function loadHotWords(): Promise<void> {
  */
 const boxEmpty = computed(() => !keyword.value.trim())
 watch([activeSource, boxEmpty, () => library.settings.showSearchHotWords], () => {
-  void (boxEmpty.value ? loadHotWords() : (hotWords.value = [], Promise.resolve()))
+  if (boxEmpty.value) void loadHotWords()
+  else { hotGeneration++; hotRequest?.abort(); hotWords.value = []; hotWordNote.value = '' }
 }, { immediate: true })
 /*
  * 框被清空就把上一轮的结果一起收走。`searched` 那个条件不是省一次赋值，而是让它
@@ -471,7 +486,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
         <button class="hints__clear" type="button" aria-label="清空搜索历史" title="清空搜索历史" @click="clearHistory"><AppIcon name="trash" :size="13"/></button>
         <button v-for="word in history" :key="word" class="chip" type="button" @click="searchFor(word)" @contextmenu.prevent="historyMenu(word, $event)">{{ word }}</button>
       </div>
-      <div v-if="hotWords.length" class="hints__row">
+      <div v-if="hotWords.length" class="hints__row" :title="hotWordNote">
         <span class="hints__label">热门搜索</span>
         <button v-for="word in hotWords" :key="`${word.source}-${word.text}`" class="chip" type="button" :title="activeSource === 'all' ? platformName(word.source) : undefined" @click="searchFor(word.text)">{{ word.text }}</button>
       </div>

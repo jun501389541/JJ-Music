@@ -526,6 +526,10 @@ test('移除进行中的任务会先停下它，并且不留 .jj-<id> 临时件'
       const signal = init && init.signal
       if (signal) signal.addEventListener('abort', () => reject(signal.reason || Error('aborted')), { once: true })
     })
+    // Removal may abort while the manager is opening its temporary file, before
+    // iteration attaches the race below. Mark the fixture promise handled now;
+    // the original rejection still reaches that race and stops the stream.
+    void aborted.catch(() => undefined)
     return {
       ok: true, status: 200, headers: new Headers({ 'content-length': String(body.length) }),
       body: (async function* () { for (;;) { await Promise.race([gate, aborted]); yield body } })()

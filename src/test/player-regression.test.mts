@@ -42,7 +42,7 @@ class FakeAudio extends EventTarget {
   }
   pause() { this.paused = true; this.dispatchEvent(new Event('pause')) }
   finish() { this.ended = true; this.paused = true; this.dispatchEvent(new Event('ended')) }
-  fail() { this.error = { code: 2 }; this.dispatchEvent(new Event('error')) }
+  fail(code = 2) { this.error = { code }; this.dispatchEvent(new Event('error')) }
 }
 const param = () => ({ value: 0, setTargetAtTime() {} })
 const node = () => ({ connect() {}, disconnect() {}, frequency: param(), Q: param(), gain: param() })
@@ -287,6 +287,62 @@ test('URL expires and a failed URL is refreshed only once', async () => {
     assert.match(player.error, /网络/)
   } finally { Date.now = realNow }
 })
+test('URL cache rejects clock rollback and honors host expiry before the five-minute cap',async()=>{
+  const player=setup(),realNow=Date.now;let time=realNow(),calls=0
+  Date.now=()=>time
+  window.jj.music.url=async()=>({url:`https://test/lease-${++calls}`,quality:'320k',resolvedAt:time,expiresAt:time+60_000})
+  try{
+    await player.playTrack(online('lease'));time+=31_000;await player.playTrack(online('lease'));assert.equal(calls,2)
+    time-=1000;await player.playTrack(online('lease'));assert.equal(calls,3)
+  }finally{Date.now=realNow}
+})
+for(const code of [1,3,4])test(`media code ${code} cannot trigger URL refresh`,async()=>{
+  const player=setup();let calls=0
+  window.jj.music.url=async()=>({url:`https://test/no-retry-${++calls}`,quality:'320k'})
+  await player.playTrack(online('media-classification'));FakeAudio.instances[0].fail(code);await flush()
+  assert.equal(calls,1)
+})
+test('wall-clock rollback within the original lifetime cannot extend the real five-minute URL lease',async context=>{
+  const player=setup(),realNow=Date.now,start=realNow();let wall=start,monotonic=1000,calls=0
+  Date.now=()=>wall;context.mock.method(performance,'now',()=>monotonic)
+  window.jj.music.url=async()=>({url:`https://test/monotonic-${++calls}`,quality:'320k'})
+  try{
+    await player.playTrack(online('monotonic'))
+    wall=start+240_000;monotonic+=240_000;await player.playTrack(online('monotonic'));assert.equal(calls,1)
+    wall=start+180_000;monotonic+=120_000;await player.playTrack(online('monotonic'));assert.equal(calls,2)
+  }finally{Date.now=realNow}
+})
+test('proxy HTTP denial does not masquerade as expiry and a late media diagnosis cannot restart a new intent',async()=>{
+  const player=setup();let calls=0
+  window.jj.music.url=async()=>({url:`jjstream://audio/token${++calls}`,quality:'320k'})
+  window.jj.music.mediaFailure=async()=>({code:'forbidden',httpStatus:403})
+  await player.playTrack(online('denied'));FakeAudio.instances[0].fail();await flush();assert.equal(calls,1)
+  const pending=deferred();window.jj.music.mediaFailure=()=>pending.promise
+  await player.playTrack(online('old'));FakeAudio.instances[0].fail();await flush()
+  await player.playTrack(online('new'));pending.resolve({code:'urlExpired'});await flush()
+  assert.equal(calls,3);assert.equal(player.currentTrack.id,'new')
+})
+test('confirmed token expiry refreshes once at the target quality without losing provider binding',async()=>{
+  const player=setup(),calls=[],track={...online('expired-token'),providerId:'stable-bound'}
+  window.jj.music.url=async(_source,candidate,quality)=>{
+    calls.push({id:candidate.id,providerId:candidate.providerId,quality})
+    return {url:`jjstream://audio/token${calls.length}`,quality}
+  }
+  window.jj.music.mediaFailure=async()=>({code:'urlExpired'})
+  await player.playTrack(track);FakeAudio.instances[0].fail(4);await flush();await flush()
+  assert.deepEqual(calls,[{id:track.id,providerId:'stable-bound',quality:'320k'},{id:track.id,providerId:'stable-bound',quality:'320k'}])
+  FakeAudio.instances[0].fail(4);await flush();await flush()
+  assert.equal(calls.length,2);assert.equal(player.currentTrack.id,track.id);assert.equal(player.playing,false)
+})
+test('media failure after actual playback still cannot grant another intent budget',async()=>{
+  const player=setup(),realNow=Date.now;let now=realNow(),calls=0
+  Date.now=()=>now
+  window.jj.music.url=async()=>({url:`https://test/budget-${++calls}`,quality:'320k'})
+  try{
+    await player.playTrack(online('late-network'));now+=60_001;FakeAudio.instances[0].fail();await flush()
+    assert.equal(calls,1);assert.match(player.error,/预算/);assert.equal(player.currentTrack.id,'late-network')
+  }finally{Date.now=realNow}
+})
 
 test('URL resolution failure retries once, then stays on the failed queue row', async () => {
   const player = setup()
@@ -305,6 +361,74 @@ test('URL resolution failure retries once, then stays on the failed queue row', 
   assert.equal(player.currentIndex, 0)
   assert.equal(player.playing, false)
   assert.match(player.error, /source unavailable/)
+})
+
+for (const edit of ['reorder', 'remove preceding']) {
+  for (const retrySucceeds of [false, true]) {
+    test(`URL retry follows the original row after ${edit}, retry succeeds=${retrySucceeds}`, async () => {
+      const player = setup(), pending = deferred(), calls = []
+      player.setQuality('128k')
+      setupPlaylistStorage()
+      const target = edit === 'reorder' ? 'a' : 'b'
+      window.jj.music.url = async (_source, track, quality) => {
+        calls.push(track.id)
+        if (calls.length === 1) return pending.promise
+        if (!retrySucceeds) throw new Error('retry unavailable')
+        return { url: `https://test/${track.id}`, quality }
+      }
+      const starting = player.playQueue([online('a'), online('b')], target === 'a' ? 0 : 1)
+      await flush()
+      if (edit === 'reorder') player.moveInQueue(0, 1)
+      else player.removeFromQueue('a')
+      pending.reject(new Error('transient resolution failure'))
+      await starting
+      await flush()
+
+      assert.deepEqual(calls, [target, target], 'retry must never resolve a different row')
+      assert.equal(player.currentTrack.id, target)
+      assert.equal(player.currentIndex, edit === 'reorder' ? 1 : 0)
+      assert.equal(player.loading, false)
+      assert.equal(player.playing, retrySucceeds)
+      if (retrySucceeds) assert.equal(player.error, null)
+      else assert.match(player.error, /retry unavailable/)
+    })
+  }
+}
+
+test('reordering a resolving row does not reset the retry deadline', async () => {
+  const player = setup(), pending = deferred(), realNow = Date.now
+  let now = realNow(), calls = 0
+  Date.now = () => now
+  player.setQuality('128k')
+  window.jj.music.url = () => { calls++; return pending.promise }
+  try {
+    const starting = player.playQueue([online('a'), online('b')])
+    await flush()
+    player.moveInQueue(0, 1)
+    now += 60_001
+    pending.reject(new Error('transient resolution failure'))
+    await starting
+    assert.equal(calls, 1, 'the expired budget cannot start another request')
+    assert.equal(player.currentTrack.id, 'a')
+    assert.equal(player.currentIndex, 1)
+    assert.equal(player.loading, false)
+    assert.match(player.error, /预算/)
+  } finally { Date.now = realNow }
+})
+
+test('removing the resolving row ends its attempt without retrying another row', async () => {
+  const player = setup(), pending = deferred()
+  let calls = 0
+  window.jj.music.url = () => { calls++; return pending.promise }
+  const starting = player.playQueue([online('a'), online('b')])
+  await flush()
+  player.removeFromQueue('a')
+  pending.reject(new Error('late failure after removal'))
+  await starting
+  assert.equal(calls, 1)
+  assert.equal(player.currentTrack, null)
+  assert.equal(player.loading, false)
+  assert.equal(player.playing, false)
 })
 
 test('strict same-tier switching exposes a resource while collection keeps the original song', async () => {
@@ -373,6 +497,7 @@ test('startup media failure reuses the original wait budget instead of granting 
   Date.now = () => now
   FakeAudio.prototype.play = function () {
     now += 60_001
+    this.error={code:2}
     return Promise.reject(new Error('startup media failure'))
   }
   window.jj.music.url = async () => { calls++; return { url: 'https://test/startup', quality: '320k' } }
@@ -512,6 +637,16 @@ test('source invalidation aborts pending work and a late answer cannot refill th
   assert.equal(calls, 2)
   assert.equal(cancelled.length, 1)
   assert.equal(FakeAudio.instances[0].src, 'https://test/new-source')
+})
+test('update-check metadata notifications preserve the active resolution and its valid URL cache',async()=>{
+  const player=setup(),pending=deferred(),cancelled=[];let calls=0
+  window.jj.music.cancel=id=>cancelled.push(id)
+  window.jj.music.url=async()=>{calls++;return calls===1?pending.promise:{url:'https://test/unexpected-refetch',quality:'320k'}}
+  const playing=player.playTrack(online('metadata-only'));await flush()
+  sourceChangeHandlers.forEach(handler=>handler({kind:'metadata'}))
+  pending.resolve({url:'https://test/metadata-only',quality:'320k'});await playing;await flush()
+  assert.equal(player.playing,true);assert.equal(cancelled.length,0)
+  await player.playTrack(online('metadata-only'));assert.equal(calls,1)
 })
 
 test('failed session restore is not reported as a successful restoration', async () => {

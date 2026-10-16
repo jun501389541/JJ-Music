@@ -2,6 +2,15 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 const { SourceMediaProxy } = await import('./online/source-media-proxy.js')
+test('proxy exposes only typed failure evidence and distinguishes token expiry from upstream denial',async()=>{
+  let now=1000,status=403
+  const proxy=new SourceMediaProxy({now:()=>now,fetchResponse:async()=>new Response(null,{status})})
+  const url=proxy.audioUrl('https://cdn.example.test/private?secret=token')
+  await proxy.handleRequest({url,method:'GET'})
+  assert.deepEqual(proxy.failure(url),{code:'forbidden',httpStatus:403})
+  status=404;await proxy.handleRequest({url,method:'GET'});assert.deepEqual(proxy.failure(url),{code:'unknown',httpStatus:404})
+  now+=16*60_000;assert.deepEqual(proxy.failure(url),{code:'urlExpired'})
+})
 
 test('script audio URL is replaced by an opaque range-capable local token', async () => {
   assert.equal(typeof SourceMediaProxy, 'function', 'remote source media must have a main-process proxy')

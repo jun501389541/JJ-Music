@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { assertPublicHttpUrl, safeFetchBytes, safeFetchResponse } from './url-guard'
+import type { MediaFailure } from '@shared/playback-reliability'
+import { normalizeOnlineError, onlineContext } from './reliability-policy'
 
 const DEFAULT_AUDIO_LIMIT = 1024 ** 3
 const DEFAULT_IMAGE_LIMIT = 4 * 1024 * 1024
@@ -20,9 +22,11 @@ interface AudioToken {
   url: string
   expiresAt: number
   identity?: SourceMediaIdentity
+  failure?: MediaFailure
 }
 
 export interface SourceMediaIdentity {
+  providerGeneration?: number
   sourceId: string
   providerId: string
   providerVersion: string
@@ -93,6 +97,14 @@ export class SourceMediaProxy {
       if (item.identity?.providerId === providerId) this.tokens.delete(token)
     }
   }
+  /** Local evidence only; never expose the relay URL, headers or raw error. */
+  failure(url: string): MediaFailure | undefined {
+    const token=this.readToken(url),item=token?this.tokens.get(token):undefined
+    if(!item)return undefined
+    if(item.expiresAt<=this.now())return {code:'urlExpired'}
+    if(item.identity){try{if(!this.isProviderCurrent(item.identity))return {code:'providerUnavailable'}}catch{return {code:'providerUnavailable'}}}
+    return item.failure?{...item.failure}:undefined
+  }
 
   async handleRequest(request: {
     url: string
@@ -132,13 +144,16 @@ export class SourceMediaProxy {
       upstream = await this.fetchResponse(item.url, {
         init: { method, headers, signal: requestController.signal }
       })
-    } catch {
+    } catch (error) {
+      const failure=normalizeOnlineError(error,onlineContext('unknown','musicUrl'))
+      item.failure={code:requestController.signal.aborted||failure.code==='network'||failure.code==='timeout'?'network':'unknown'}
       return response('媒体地址请求失败', 502)
     } finally {
       clearTimeout(headerTimeout)
     }
 
     const length = parseSize(upstream.headers.get('content-length'))
+    item.failure=upstream.ok?undefined:{code:upstream.status===403||upstream.status===401?'forbidden':upstream.status>=500?'network':'unknown',httpStatus:upstream.status}
     const total = parseRangeTotal(upstream.headers.get('content-range'))
     if ((length !== undefined && length > this.maxAudioBytes) ||
         (total !== undefined && total > this.maxAudioBytes)) {
@@ -165,14 +180,19 @@ export class SourceMediaProxy {
     })
   }
 
-  async imageDataUrl(raw: string): Promise<string> {
+  async imageDataUrl(raw: string, signal?: AbortSignal): Promise<string> {
+    const image = await this.imageBytes(raw, signal)
+    return `data:${image.mimeType};base64,${Buffer.from(image.data).toString('base64')}`
+  }
+
+  async imageBytes(raw: string, signal?: AbortSignal): Promise<{ data: Uint8Array; mimeType: string }> {
     const url = assertPublicHttpUrl(raw)
-    const result = await this.fetchBytes(url, { maxBytes: this.maxImageBytes })
+    const result = await this.fetchBytes(url, { maxBytes: this.maxImageBytes, ...(signal ? { init: { signal } } : {}) })
     if (!result.body.length || result.body.length > this.maxImageBytes) throw new Error('封面图片超过大小限制')
     const declared = result.contentType?.split(';', 1)[0]?.trim().toLowerCase()
     const mime = imageMimeFromBytes(result.body)
     if (!mime || declared !== mime) throw new Error('封面图片格式无效')
-    return `data:${mime};base64,${result.body.toString('base64')}`
+    return { data: new Uint8Array(result.body), mimeType: mime }
   }
 
   private pruneTokens(): void {

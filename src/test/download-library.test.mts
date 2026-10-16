@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test, mock } from 'node:test'
-import { mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile, stat } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DownloadManager } from './downloads/download-manager.js'
@@ -16,7 +16,7 @@ function flac() {
 }
 async function wait(check) {
   const deadline = Date.now() + 1500
-  while (Date.now() < deadline) { const value = check(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 5)) }
+  while (Date.now() < deadline) { const value = await check(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 5)) }
   return check()
 }
 async function fixture(work) {
@@ -151,6 +151,57 @@ test('removal waits for an active import and blocks new import retries', async (
     assert.deepEqual(manager.list(), [])
   })
 })
+
+for (const scanCount of [1, 2]) {
+  test(`deleting an imported download invalidates ${scanCount} in-flight scan(s)`, async () => {
+    await fixture(async ({ manager, library, dir }) => {
+      const [id] = manager.add([track], 'flac')
+      assert.ok(await wait(() => manager.list()[0]?.libraryStatus === 'imported'))
+      // Imported status precedes final staging cleanup; scan only the completed file.
+      assert.ok(await wait(async () => (await readdir(dir)).every(name => !name.startsWith('.jj-'))))
+      const path = manager.list()[0].path
+      await library.addFolder(dir)
+      // Force metadata reads rather than the unchanged-file fast path.
+      await writeFile(path, Buffer.concat([flac(), Buffer.from('updated tags')]))
+      const readTrack = library.readTrack.bind(library)
+      let release, reads = 0
+      const gate = new Promise(resolve => { release = resolve })
+      library.readTrack = async (...args) => {
+        const result = await readTrack(...args)
+        reads++
+        await gate
+        return result
+      }
+      const scans = Array.from({ length: scanCount }, () => library.scan())
+      try {
+        assert.ok(await wait(() => reads === scanCount))
+        await manager.remove(id, true)
+        assert.deepEqual(manager.list(), [])
+        assert.deepEqual(library.getAll(), [])
+        await assert.rejects(stat(path), error => error.code === 'ENOENT')
+        release()
+        const results = await Promise.all(scans)
+        assert.ok(results.every(result => result.added === 0), 'discarded reads must not count as additions')
+        assert.deepEqual(library.getAll(), [])
+        const disk = JSON.parse(await readFile(join(dir, 'library', 'index.json'), 'utf8'))
+        assert.deepEqual(disk.tracks, [])
+        const reloaded = new MusicLibrary(dir)
+        await reloaded.load()
+        assert.deepEqual(reloaded.getAll(), [])
+        // Invalidation is limited to old scans; a future file at this path can be indexed.
+        library.readTrack = readTrack
+        await writeFile(path, flac())
+        await library.scan()
+        assert.equal(library.getAll().length, 1)
+        assert.equal(library.getAll()[0].path, path)
+      } finally {
+        release()
+        await Promise.allSettled(scans)
+        library.readTrack = readTrack
+      }
+    })
+  })
+}
 
 test('a slow import makes removal time out without trashing audio or dropping its record', async () => {
   await fixture(async ({ manager, library, setImporter, setTrash }) => {

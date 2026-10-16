@@ -13,6 +13,8 @@ import {
 import { safeFetchText } from './url-guard'
 import type { OnlineCapability } from './platform-registry'
 import { fetchCoverUrl, type CoverBytes } from './cover-fetch'
+import { CatalogReliability } from './catalog-reliability'
+import { normalizeOnlineError, onlineContext, OnlineRequestError } from './reliability-policy'
 
 const WY_HOST = 'music.163.com'
 const PAGE_SIZE = ONLINE_ENTITY_PAGE_SIZE
@@ -34,6 +36,7 @@ export interface OnlineEntityDetailsOptions {
   fetchText?: typeof safeFetchText
   fetchArtwork?: (source: SourceId, url: string, signal?: AbortSignal) => Promise<CoverBytes | null>
   saveArtwork?: (data: Uint8Array, mimeType: string) => Promise<string | undefined>
+  reliability?: CatalogReliability
 }
 
 interface ParsedAlbum {
@@ -50,6 +53,7 @@ export class OnlineEntityDetails {
   private readonly fetchArtwork: NonNullable<OnlineEntityDetailsOptions['fetchArtwork']>
   private readonly saveArtwork: OnlineEntityDetailsOptions['saveArtwork']
   private readonly albumCache = new Map<string, { expiresAt: number; value: ParsedAlbum }>()
+  private readonly reliability?: CatalogReliability
 
   constructor(options: OnlineEntityDetailsOptions) {
     this.allows = options.allows
@@ -57,6 +61,7 @@ export class OnlineEntityDetails {
     this.fetchText = options.fetchText ?? safeFetchText
     this.fetchArtwork = options.fetchArtwork ?? ((source, url, signal) => fetchCoverUrl(source, url, undefined, signal))
     this.saveArtwork = options.saveArtwork
+    this.reliability = options.reliability
   }
 
   /** Fetch allowed provider art in main and return only an app-local media URL. */
@@ -76,6 +81,13 @@ export class OnlineEntityDetails {
   }
 
   async artistPage(source: SourceId, id: string, page = 1, signal?: AbortSignal): Promise<OnlineEntityPage<OnlineArtistRef>> {
+    if (!this.reliability || source !== 'wy' || !this.allows(source, 'artistDetail') || !isEntityId(id) || !Number.isInteger(page) || page < 1 || page > ONLINE_ARTIST_MAX_PAGES) return this.artistPageRaw(source, id, page, signal)
+    const { data, ...reliability } = await this.reliability.entity(source, 'artistDetail', id, page, s => this.artistPageRaw(source, id, page, s, true), signal)
+    return data ? { ...data, reliability, ...(reliability.cacheState === 'stale' ? { message: '资料较旧，已保留上次成功结果。' } : {}) }
+      : { ...unavailablePage<OnlineArtistRef>(page, reliability.error?.message ?? '详情暂不可用'), reliability }
+  }
+
+  private async artistPageRaw(source: SourceId, id: string, page = 1, signal?: AbortSignal, strict = false): Promise<OnlineEntityPage<OnlineArtistRef>> {
     if (source !== 'wy') return unavailablePage(page, '该平台的精确艺术家详情尚未开放。')
     if (!this.allows(source, 'artistDetail')) return unavailablePage(page, '请确认已开启在线目录请求，并检查该平台的详情适配能力。')
     if (!isEntityId(id)) return unavailablePage(page, '缺少有效的艺术家平台 ID。')
@@ -93,13 +105,16 @@ export class OnlineEntityDetails {
     try {
       const payload = parseJson(await this.fetchJson(url, signal))
       if (!payload || payload.code !== 200 || !Array.isArray(payload.songs)) {
+        if (strict) throw new OnlineRequestError({ ...onlineContext(source, 'artistDetail'), code: 'schemaChanged' })
         return unavailablePage(page, '网易云没有返回可验证的艺术家曲目。')
       }
 
       const songs = payload.songs.map((row) => wySongToInfo(row)).filter(isOnlineTrack)
+      if (strict && songs.length !== payload.songs.length) throw new OnlineRequestError({ ...onlineContext(source, 'artistDetail'), code: 'schemaChanged' })
       const artist = readArtist(payload.artist)
         ?? songs.flatMap((track) => track.artistRefs ?? []).find((item) => item.id === id)
       if (!artist || artist.id !== id) {
+        if (strict) throw new OnlineRequestError({ ...onlineContext(source, 'artistDetail'), code: 'schemaChanged' })
         return unavailablePage(page, '返回结果无法与请求的艺术家 ID 对应。')
       }
 
@@ -118,11 +133,19 @@ export class OnlineEntityDetails {
         ...(page === ONLINE_ARTIST_MAX_PAGES && payload.more === true ? { truncated: true } : {})
       }
     } catch (error) {
+      if (strict) throw error
       return unavailablePage(page, `艺术家详情暂时不可用：${safeError(error)}`)
     }
   }
 
   async albumPage(source: SourceId, id: string, page = 1, signal?: AbortSignal): Promise<OnlineEntityPage<OnlineAlbumRef>> {
+    if (!this.reliability || source !== 'wy' || !this.allows(source, 'albumDetail') || !isEntityId(id) || !Number.isInteger(page) || page < 1 || page > ONLINE_ALBUM_MAX_PAGES) return this.albumPageRaw(source, id, page, signal)
+    const { data, ...reliability } = await this.reliability.entity(source, 'albumDetail', id, page, s => this.albumPageRaw(source, id, page, s, true), signal)
+    return data ? { ...data, reliability, ...(reliability.cacheState === 'stale' ? { message: '资料较旧，已保留上次成功结果。' } : {}) }
+      : { ...unavailablePage<OnlineAlbumRef>(page, reliability.error?.message ?? '详情暂不可用'), reliability }
+  }
+
+  private async albumPageRaw(source: SourceId, id: string, page = 1, signal?: AbortSignal, strict = false): Promise<OnlineEntityPage<OnlineAlbumRef>> {
     if (source !== 'wy') return unavailablePage(page, '该平台的精确专辑详情尚未开放。')
     if (!this.allows(source, 'albumDetail')) return unavailablePage(page, '请确认已开启在线目录请求，并检查该平台的详情适配能力。')
     if (!isEntityId(id)) return unavailablePage(page, '缺少有效的专辑平台 ID。')
@@ -131,8 +154,11 @@ export class OnlineEntityDetails {
     }
 
     try {
-      const album = await this.loadAlbum(id, signal)
-      if (!album) return unavailablePage(page, '返回结果无法与请求的专辑 ID 对应。')
+      const album = await this.loadAlbum(id, signal, strict)
+      if (!album) {
+        if (strict) throw new OnlineRequestError({ ...onlineContext(source, 'albumDetail'), code: 'schemaChanged' })
+        return unavailablePage(page, '返回结果无法与请求的专辑 ID 对应。')
+      }
 
       const offset = (page - 1) * PAGE_SIZE
       return {
@@ -145,6 +171,7 @@ export class OnlineEntityDetails {
         ...(album.truncated ? { truncated: true } : {})
       }
     } catch (error) {
+      if (strict) throw error
       return unavailablePage(page, `专辑详情暂时不可用：${safeError(error)}`)
     }
   }
@@ -202,9 +229,9 @@ export class OnlineEntityDetails {
     }
   }
 
-  private async loadAlbum(id: string, signal?: AbortSignal): Promise<ParsedAlbum | null> {
+  private async loadAlbum(id: string, signal?: AbortSignal, skipCache = false): Promise<ParsedAlbum | null> {
     const cached = this.albumCache.get(id)
-    if (cached && cached.expiresAt > Date.now()) return cached.value
+    if (!skipCache && cached && cached.expiresAt > Date.now()) return cached.value
     if (cached) this.albumCache.delete(id)
 
     const url = `https://${WY_HOST}/api/v1/album/${encodeURIComponent(id)}?id=${encodeURIComponent(id)}`
@@ -223,9 +250,9 @@ export class OnlineEntityDetails {
       ...(albumArtists.length ? { artistRefs: albumArtists } : {})
     }
 
-    const tracks = uniqueTracks(payload.songs
-      .map((row) => wySongToInfo(row, entity))
-      .filter(isOnlineTrack))
+    const parsed = payload.songs.map((row) => wySongToInfo(row, entity)).filter(isOnlineTrack)
+    if (skipCache && parsed.length !== payload.songs.length) throw new OnlineRequestError({ ...onlineContext('wy', 'albumDetail'), code: 'schemaChanged' })
+    const tracks = uniqueTracks(parsed)
       .slice(0, ONLINE_ALBUM_MAX_TRACKS)
     const value: ParsedAlbum = { entity, tracks, truncated: payload.songs.length > ONLINE_ALBUM_MAX_TRACKS }
     while (this.albumCache.size >= ALBUM_CACHE_ENTRIES) {
@@ -233,7 +260,7 @@ export class OnlineEntityDetails {
       if (!oldest) break
       this.albumCache.delete(oldest)
     }
-    this.albumCache.set(id, { value, expiresAt: Date.now() + ALBUM_CACHE_TTL_MS })
+    if (!skipCache && !signal?.aborted) this.albumCache.set(id, { value, expiresAt: Date.now() + ALBUM_CACHE_TTL_MS })
     return value
   }
 
@@ -373,6 +400,5 @@ function toInterval(seconds: number): string {
 }
 
 function safeError(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
-  return text.replace(/[\r\n]+/g, ' ').slice(0, 160)
+  return normalizeOnlineError(error, onlineContext('wy', 'unknown')).message
 }

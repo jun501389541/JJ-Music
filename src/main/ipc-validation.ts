@@ -31,6 +31,28 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const quality = (value: unknown): boolean => LX_QUALITIES.includes(value as (typeof LX_QUALITIES)[number])
 
   switch (channel) {
+    case IPC.sourcesUpdateApply:
+      if(args.length>3||!str(args[0],256)||!str(args[1],4*1024*1024)||
+        (args[2]!==undefined&&(typeof args[2]!=='string'||!/^[a-f0-9]{64}$/i.test(args[2]))))bad()
+      break
+    case IPC.playlistRefreshPreview:
+      if(args.length>2||!str(args[0],256)||!request(args[1]))bad()
+      break
+    case IPC.playlistRefreshApply:
+    case IPC.playlistRefreshDiscard:
+      if(args.length!==1||typeof args[0]!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(args[0]))bad()
+      break
+    case IPC.playlistImportPreview:
+      if(args.length>3||!source(args[0])||!str(args[1],4096)||!request(args[2]))bad()
+      break
+    case IPC.musicHotWords:
+      if (args.length > 2 || !source(args[0]) || !request(args[1])) bad()
+      break
+    case IPC.onlineDiagnosticsExport:
+    case IPC.onlineDiagnosticsClear:
+    case IPC.onlineCacheClear:
+      if (args.length !== 0) bad()
+      break
     case IPC.updateStatus:
     case IPC.updateCheck:
     case IPC.updateDownload:
@@ -84,7 +106,10 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
         !quality(args[1])) bad()
       break
     case IPC.musicUrl:
-      if (!source(args[0]) || !quality(args[2])) bad()
+      if (args.length>6 || !source(args[0]) || !quality(args[2]) || !request(args[4]) || (args[5]!==undefined&&typeof args[5]!=='boolean')) bad()
+      break
+    case IPC.musicMediaFailure:
+      if(args.length!==1||typeof args[0]!=='string'||!/^jjstream:\/\/audio\/[A-Za-z0-9_-]{1,128}$/.test(args[0]))bad()
       break
     case IPC.musicEnrich:
       if (args.length > 3 || !args[0] || typeof args[0] !== 'object' ||

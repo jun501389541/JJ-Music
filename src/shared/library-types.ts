@@ -17,6 +17,7 @@ export type { LyricSource }
  * explain itself when there is nothing to show.
  */
 export interface ResolvedLyric {
+  reliability?: import('./online-reliability').ResourceStatus
   lyric: string
   tlyric?: string
   rlyric?: string
@@ -57,6 +58,7 @@ export interface ResolvedLyric {
  * builds it, the preload bridge types it, and the renderer lists it.
  */
 export interface LyricCandidate {
+  reliability?: import('./online-reliability').ResourceStatus
   /** Stable handle, reused as the choice's identity in the picker. */
   id: string
   /** Platform the lyric came from (音源 id). */

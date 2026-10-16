@@ -47,6 +47,17 @@ async function installUpdate(): Promise<void> {
   catch (error) { toast.error(error instanceof Error ? error.message : '无法安装更新') }
 }
 const search = ref('')
+async function onlineDataAction(action: 'export' | 'diagnostics' | 'cache'): Promise<void> {
+  try {
+    if (action === 'export') {
+      if (await jj.data.exportOnlineDiagnostics()) toast.success('在线诊断已导出')
+    } else if (action === 'diagnostics') {
+      await jj.data.clearOnlineDiagnostics(); toast.success('在线诊断已清除')
+    } else {
+      await jj.data.clearOnlineCache(); toast.success('在线资料缓存已清除')
+    }
+  } catch { toast.error('操作失败，请稍后重试') }
+}
 const defaultDownloadFolder = ref('系统下载目录 / JJ Music')
 // A rejected IPC must leave the placeholder standing, not an empty label, and an
 // unhandled rejection is what makes the click look like it did nothing.
@@ -234,6 +245,7 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
          as a sibling it rendered outside the group as a detached full-width row. -->
     <div v-if="section === 'playback'" class="setting-row"><span class="setting-label"><strong>睡眠定时</strong><small>{{ player.sleepAt ? `将在 ${new Date(player.sleepAt).toLocaleTimeString()} 停止播放` : '在指定时间后停止播放' }}</small></span><select class="input" aria-label="睡眠定时" @change="player.setSleepMinutes(Number(($event.target as HTMLSelectElement).value))"><option value="0">关闭</option><option v-for="minutes in [15,30,45,60,90]" :key="minutes" :value="minutes">{{ minutes }} 分钟</option></select></div>
     <div v-if="section === 'data' && dataDir" class="setting-row"><span class="setting-label copyable"><strong>数据目录</strong><small>{{ dataDir.dir }} · {{ DATA_DIR_SOURCES[dataDir.source] ?? dataDir.source }}</small></span><button class="btn" :disabled="!dataDir.relocatable" @click="moveDataDir">迁移到其它目录</button></div>
+    <div v-if="section === 'data' && !search" class="setting-row"><span class="setting-label"><strong>在线资料与诊断</strong><small>清理自动缓存会保留歌单、收藏和已保存资源。</small></span><span class="setting-buttons"><button class="btn" @click="onlineDataAction('cache')">清除资料缓存</button><button class="btn" @click="onlineDataAction('diagnostics')">清除诊断</button><button class="btn" @click="onlineDataAction('export')">导出诊断</button></span></div>
     <!-- The 待写入 queue: what the network handed us for a local song and has
          not been written anywhere. Actions live here rather than per-song
          because that is the point of a queue — decide once, for all of them. -->

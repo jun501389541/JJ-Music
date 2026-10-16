@@ -22,6 +22,8 @@
  * Usage:
  *   node tools/package.mjs          # NSIS installer → release/JJ Music-<v>-x64.exe
  *   node tools/package.mjs --dir    # portable folder → release/win-unpacked/JJ Music.exe
+ *   node tools/package.mjs --dir --electron-dist=node_modules/electron/dist
+ *     # reuse an unpacked runtime matching the configured Electron version
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -33,6 +35,9 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const wantDirOnly = process.argv.includes('--dir')
 const outputArg = process.argv.find(arg => arg.startsWith('--output='))
 const releaseDir = resolve(repoRoot, outputArg?.slice('--output='.length) || 'release')
+const electronDistArg = process.argv.find(arg => arg.startsWith('--electron-dist='))
+const electronDistPath = electronDistArg?.slice('--electron-dist='.length).trim()
+if (electronDistArg && !electronDistPath) throw new Error('--electron-dist requires an Electron distribution path')
 
 const ELECTRON_VITE = join(repoRoot, 'node_modules', 'electron-vite', 'bin', 'electron-vite.js')
 const ELECTRON_BUILDER = join(
@@ -101,6 +106,7 @@ run(
     'never',
     '--config',
     'electron-builder.yml',
+    ...(electronDistPath ? [`--config.electronDist=${resolve(repoRoot, electronDistPath)}`] : []),
     `--config.directories.output=${releaseDir}`
   ]
 )

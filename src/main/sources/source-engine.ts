@@ -58,6 +58,30 @@ import { validateSourceBeforeStart, type ValidationReport } from './source-valid
 import { describeScript } from './script-header'
 import { SourceRuntimeHost, type ExitInfo, type RuntimeState } from './source-runtime-host'
 import { MAX_LOG_LINES } from './source-runtime-host'
+import { CapabilityHealth } from '../online/capability-health'
+import { normalizeOnlineError, onlineContext, OnlineRequestError } from '../online/reliability-policy'
+import type { SourceChangeEvent, SourceRuntimeRevision } from '@shared/source-lifecycle'
+import type { OnlineFailure, OnlineErrorCode } from '@shared/online-reliability'
+
+/** Keep agreed machine evidence separate from the existing local detail text. */
+function sourceFailure(message: string, failures: OnlineFailure[], source: SourceId, action: SourceAction, emptyCode: OnlineErrorCode = 'unsupported'): Error {
+  const first = failures[0]
+  const agreed = !!first && failures.every(f => f.code === first.code && f.scope === first.scope)
+  const common = <K extends keyof OnlineFailure>(key: K): OnlineFailure[K] | undefined =>
+    agreed && failures.every(f => f[key] === first[key]) ? first[key] : undefined
+  const waits = failures.map(f => f.retryAfterMs)
+  const retryAfterMs = agreed && first.code === 'rateLimited' && waits.every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0)
+    ? Math.max(...waits as number[]) : undefined
+  const error = new OnlineRequestError({
+    ...onlineContext(source, action), stage: 'resolve',
+    code: !first ? emptyCode : agreed ? first.code : 'unknown',
+    ...(agreed ? { scope: first.scope } : {}),
+    httpStatus: common('httpStatus'), providerId: common('providerId'), providerVersion: common('providerVersion'), retryAfterMs
+  })
+  // Only the local Error displays candidate detail. failure.message stays safe.
+  error.message = message
+  return error
+}
 
 /**
  * The custom-source API version reported to scripts as `lx.version`.
@@ -84,6 +108,8 @@ const START_CONCURRENCY = 4
  * serve and how it is indexed.
  */
 interface ScriptRuntime {
+  generation?: number
+  initialized?: boolean
   api: LoadedApi
   /** The shared host's record for this launch: child, logs, crash reason. */
   host: RuntimeState
@@ -100,6 +126,7 @@ interface ScriptRuntime {
 }
 
 export interface SourceEngineEvents {
+  providerChanged: (event: SourceChangeEvent & {kind:'runtime'}) => void
   /** A script finished init and reported its sources. */
   sourcesChanged: (apiId?: string) => void
   /** A script failed to init or crashed. */
@@ -109,9 +136,12 @@ export interface SourceEngineEvents {
 }
 
 export class SourceEngine {
+  private readonly health: CapabilityHealth
   private readonly runtimes = new Map<string, ScriptRuntime>()
   /** Monotonic lifecycle token; stop/reload invalidates starts still awaiting the host. */
   private readonly lifecycle = new Map<string, number>()
+  private readonly runtimeGenerations = new WeakMap<RuntimeState,number>()
+  private readonly launches = new WeakMap<LoadedApi, { generation: number; transient: boolean }>()
   private readonly pendingStarts = new Map<string, Set<number>>()
   private readonly transientLaunches = new Map<string, Set<number>>()
   private readonly store: SourceStore
@@ -131,7 +161,8 @@ export class SourceEngine {
    */
   private sourceProviders = new Map<SourceId, string[]>()
 
-  constructor(store: SourceStore, hostPath: string, transport: 'auto' | 'file' | 'ipc' = 'auto') {
+  constructor(store: SourceStore, hostPath: string, transport: 'auto' | 'file' | 'ipc' = 'auto', options: { health?: CapabilityHealth } = {}) {
+    this.health = options.health ?? new CapabilityHealth()
     this.store = store
     this.hostPath = hostPath
     this.transport = transport
@@ -364,6 +395,10 @@ export class SourceEngine {
     // handled here, or the script's stored record keeps no trace of why it never
     // came up and the settings page shows a silent failure.
     const host = this.getHost()
+    // The host may report an exit before start() resolves. Bind launch identity
+    // to the exact API object passed to the host, including failed candidates.
+    api = { ...api }
+    this.launches.set(api, { generation, transient })
     let state: RuntimeState
     try {
       state = await host.start(api, api.source)
@@ -390,7 +425,8 @@ export class SourceEngine {
       if (transient) throw new Error('音源候选版本启动已取消')
       return
     }
-    const runtime: ScriptRuntime = { api, host: state, sources: state.sources, transient }
+    this.runtimeGenerations.set(state,generation)
+    const runtime: ScriptRuntime = { api, host: state, sources: state.sources, transient, generation, initialized:false }
     this.runtimes.set(api.meta.id, runtime)
     this.rebuildOwners()
     this.emit('sourcesChanged', api.meta.id)
@@ -408,6 +444,8 @@ export class SourceEngine {
         return
       }
       if (!transient) this.store.setError(api.meta.id, undefined)
+      runtime.initialized=true
+      if(!transient){this.rebuildOwners();this.publishRevision(apiId,'ready');this.emit('sourcesChanged',apiId)}
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // Reap the child. Disabling the source below bypasses `stop()`, so without
@@ -483,7 +521,11 @@ export class SourceEngine {
   private handleHostExit(state: RuntimeState, info: ExitInfo): void {
     const apiId = state.api.meta.id
     const runtime = this.runtimes.get(apiId)
-    if (runtime?.transient) {
+    const launch = this.launches.get(state.api)
+    const generation=this.runtimeGenerations.get(state) ?? launch?.generation
+    if((runtime&&runtime.host!==state)||(generation!==undefined&&!this.isCurrentGeneration(apiId,generation)))return
+    if(!info.intentional)this.nextGeneration(apiId)
+    if (runtime ? runtime.transient : launch?.transient) {
       this.runtimes.delete(apiId)
       this.rebuildOwners()
       this.emit('scriptError', apiId, info.reason)
@@ -534,7 +576,7 @@ export class SourceEngine {
     })
 
     for (const runtime of runtimes) {
-      if (runtime.host.dead) continue
+      if (runtime.host.dead || runtime.transient || (runtime.generation!==undefined&&!this.isCurrentGeneration(runtime.api.meta.id,runtime.generation))) continue
       for (const source of runtime.sources) {
         const list = providers.get(source.id) ?? []
         list.push(runtime.api.meta.id)
@@ -593,8 +635,26 @@ export class SourceEngine {
   private nextGeneration(apiId: string): number {
     const generation = (this.lifecycle.get(apiId) ?? 0) + 1
     this.lifecycle.set(apiId, generation)
+    const api=this.runtimes.get(apiId)?.api??this.store.get(apiId)
+    const providerId=api?.meta.stableId??apiId
+    this.health.forgetProvider(providerId)
+    this.emit('providerChanged',{kind:'runtime',phase:'invalidated',apiId,providerId,providerVersion:this.store.versionOf(apiId),generation})
     return generation
   }
+  /** Invalidate a disk-only change without starting disabled code. */
+  invalidate(apiId:string):void { this.nextGeneration(apiId);this.rebuildOwners() }
+  private publishRevision(apiId:string,phase:'ready'):void {
+    const revision=this.providerRevision(apiId)
+    if(revision)this.emit('providerChanged',{kind:'runtime',phase,...revision})
+  }
+  providerRevision(id:string):SourceRuntimeRevision|undefined {
+    const runtime=this.runtimes.get(id)??[...this.runtimes.values()].find(r=>r.api.meta.stableId===id)
+    if(!runtime||runtime.host.dead||runtime.transient||runtime.initialized===false)return undefined
+    const apiId=runtime.api.meta.id,generation=runtime.generation??this.lifecycle.get(apiId)??0
+    if(runtime.generation!==undefined&&!this.isCurrentGeneration(apiId,generation))return undefined
+    return {apiId,providerId:runtime.api.meta.stableId??apiId,providerVersion:this.store.versionOf(apiId),generation}
+  }
+  isInitialized(id:string):boolean {return !!this.providerRevision(id)}
 
   private isCurrentGeneration(apiId: string, generation: number): boolean {
     return this.lifecycle.get(apiId) === generation
@@ -636,6 +696,7 @@ export class SourceEngine {
    * still tells the truth.
    */
   private async teardown(runtime: ScriptRuntime, reason: Error): Promise<void> {
+    this.health.forgetProvider(runtime.api.meta.stableId ?? runtime.api.meta.id)
     this.runtimes.delete(runtime.api.meta.id)
     await this.getHost().teardown(runtime.host, reason)
   }
@@ -652,11 +713,22 @@ export class SourceEngine {
   }
 
   /** Promote a trial runtime after its bytes have been persisted successfully. */
+  canCommitCandidate(apiId:string):boolean {
+    const runtime=this.runtimes.get(apiId)
+    return !!runtime&&runtime.transient===true&&!runtime.host.dead&&runtime.initialized!==false&&this.isEnabled(apiId)&&
+      (runtime.generation===undefined||this.isCurrentGeneration(apiId,runtime.generation))
+  }
   commitCandidate(apiId: string): void {
     const runtime = this.runtimes.get(apiId)
-    if (!runtime) return
+    if (!runtime || runtime.host.dead || runtime.initialized===false ||
+      (runtime.generation!==undefined&&!this.isCurrentGeneration(apiId,runtime.generation)) || !this.isEnabled(apiId))throw new Error('音源候选已失效，不能提交')
+    const stored=this.store.get(apiId)
+    if(!stored||stored.source!==runtime.api.source)throw new Error('音源内容已变化，不能提交候选')
     runtime.transient = false
-    runtime.api = this.store.get(apiId) ?? runtime.api
+    runtime.api = stored
+    this.rebuildOwners()
+    this.publishRevision(apiId,'ready')
+    this.emit('sourcesChanged',apiId)
   }
 
   /** Every source advertised by every live script, de-duplicated by id. */
@@ -664,7 +736,7 @@ export class SourceEngine {
     const seen = new Set<SourceId>()
     const out: SourceInfo[] = []
     for (const runtime of this.runtimes.values()) {
-      if (runtime.host.dead) continue
+      if (runtime.host.dead || runtime.transient || !this.providerRevision(runtime.api.meta.id)) continue
       for (const source of runtime.sources) {
         if (seen.has(source.id)) continue
         seen.add(source.id)
@@ -675,13 +747,14 @@ export class SourceEngine {
   }
 
   /** Sources grouped by the script that provides them, for the settings UI. */
-  getSourcesByScript(): Array<{ apiId: string; name: string; sources: SourceInfo[] }> {
+  getSourcesByScript(): Array<{ apiId: string; name: string; sources: SourceInfo[]; generation:number }> {
     return [...this.runtimes.values()]
-      .filter((runtime) => !runtime.host.dead)
+      .filter((runtime) => !runtime.host.dead && !runtime.transient && !!this.providerRevision(runtime.api.meta.id))
       .map((runtime) => ({
         apiId: runtime.api.meta.id,
         name: runtime.api.meta.name,
-        sources: runtime.sources
+        sources: runtime.sources,
+        generation:runtime.generation??this.lifecycle.get(runtime.api.meta.id)??0
       }))
   }
 
@@ -719,11 +792,12 @@ export class SourceEngine {
     source: SourceId,
     action: SourceAction,
     info: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    manualRetry = false
   ): Promise<T> {
     if (signal?.aborted) throw new Error('请求已取消')
     const runtime = this.runtimes.get(apiId)
-    if (!runtime || runtime.host.dead) throw new Error(`音源「${source}」已停止`)
+    if (!runtime || runtime.host.dead || runtime.transient || !this.providerRevision(apiId)) throw new Error(`音源「${source}」已停止或正在更新`)
 
     // Bookkeeping and dispatch both live on the host: it is the side that knows
     // which transport this launch took (file handoff vs IPC channel), and the
@@ -736,7 +810,20 @@ export class SourceEngine {
     // `source-host.ts` actually reads — stays byte-identical to what this engine
     // wrote itself.
     const payload = { source, action, info }
-    return this.getHost().request<T>(runtime.host, payload, signal)
+    const context = { ...onlineContext(source, action), stage: 'resolve', providerId: runtime.api.meta.stableId ?? apiId, providerVersion: this.store.versionOf(apiId) }
+    return this.health.run(context, async () => {
+      let result: T
+      try { result = await this.getHost().request<T>(runtime.host, payload, signal) }
+      catch (error) {
+        // LX serializes script failures as text; only its explicit HTTP marker
+        // identifies a rate limit. A bare 403/404 says nothing about expiry.
+        if (error instanceof Error && /\bHTTP\s*429\b/i.test(error.message)) throw new OnlineRequestError({ ...context, code: 'rateLimited', httpStatus: 429, retryAfterMs: 500 })
+        throw error
+      }
+      if (this.runtimes.get(apiId) !== runtime || runtime.host.dead || !this.providerRevision(apiId)) throw new OnlineRequestError({ ...context, code: 'providerUnavailable' })
+      if (action === 'musicUrl' && !isValidMusicUrl(result)) throw new OnlineRequestError({ ...context, code: typeof result==='string'&&!result.trim()?'qualityUnavailable':'schemaChanged' })
+      return result
+    }, { signal, manual: manualRetry })
   }
 
   /**
@@ -785,6 +872,7 @@ export class SourceEngine {
     }
 
     const failures: string[] = []
+    const evidence: OnlineFailure[] = []
     for (const apiId of candidates) {
       if (signal?.aborted) throw new Error('请求已取消')
       const runtime = this.runtimes.get(apiId)
@@ -800,15 +888,16 @@ export class SourceEngine {
         const name = runtime?.api.meta.name ?? apiId
         const reason = error instanceof Error ? error.message : String(error)
         failures.push(`${name}: ${reason}`)
+        evidence.push(normalizeOnlineError(error, { ...onlineContext(source, action), stage: 'resolve', providerId: runtime?.api.meta.stableId ?? apiId, providerVersion: this.store.versionOf(apiId) }))
         // A dead script must not be retried for this request, but the loop
         // already moves on; `runtime.host.dead` is set by the host's exit path.
       }
     }
 
     if (failures.length === 0) {
-      throw new Error(`没有音源支持「${source}」的「${action}」操作`)
+      throw sourceFailure(`没有音源支持「${source}」的「${action}」操作`, evidence, source, action)
     }
-    throw new Error(`所有音源均失败（${failures.join('；')}）`)
+    throw sourceFailure(`所有音源均失败（${failures.join('；')}）`, evidence, source, action)
   }
 
   /**
@@ -836,8 +925,9 @@ export class SourceEngine {
     musicInfo: OnlineMusicInfo,
     preferred: Quality,
     strict = false,
-    signal?: AbortSignal
-  ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string }> {
+    signal?: AbortSignal,
+    manualRetry = false
+  ): Promise<{ url: string; quality: Quality; apiId?: string; providerId?: string; providerName?: string; providerVersion?: string; providerGeneration?: number }> {
     if (signal?.aborted) throw new Error('请求已取消')
     const requestedProviderId = musicInfo.providerId
     const candidates = this.providersFor(source).filter((apiId) => {
@@ -856,12 +946,15 @@ export class SourceEngine {
     }
 
     const errors: string[] = []
+    const evidence: OnlineFailure[] = []
+    let supportsMusicUrl = false
 
     for (const apiId of candidates) {
       if (signal?.aborted) throw new Error('请求已取消')
       const runtime = this.runtimes.get(apiId)
       const declared = runtime?.sources.find((item) => item.id === source)
       if (declared && !declared.actions.includes('musicUrl')) continue
+      supportsMusicUrl = true
 
       // Each script advertises its own qualitys list, so the ladder is built
       // per script rather than once for the platform.
@@ -882,16 +975,18 @@ export class SourceEngine {
               url = await this.requestFrom<unknown>(apiId, source, 'musicUrl', {
                 type: quality,
                 musicInfo: toLegacyOnline(musicInfo)
-              }, signal)
+              }, signal, manualRetry && retry === 0)
               break
             } catch (error) {
               if (signal?.aborted) throw error
               // Only explicitly identified rate limits get one bounded retry.
-              if (!signal || retry > 0 || !(error instanceof Error) || !/\bHTTP\s*429\b/i.test(error.message)) throw error
-              await delay(500, undefined, { signal })
+              const failure = normalizeOnlineError(error, onlineContext(source, 'musicUrl'))
+              if (!signal || retry > 0 || failure.code !== 'rateLimited' || failure.retryAfterMs === undefined) throw error
+              await delay(Math.ceil(failure.retryAfterMs)+1, undefined, { signal })
             }
           }
           if (signal?.aborted) throw new Error('请求已取消')
+          if(this.runtimes.get(apiId)!==runtime||!this.providerRevision(apiId))throw new Error('音源运行版本已变化，请重试')
           if (isValidMusicUrl(url)) {
             return {
               url: url.trim(),
@@ -899,13 +994,16 @@ export class SourceEngine {
               apiId,
               providerId: runtime?.api.meta.stableId ?? apiId,
               providerName: runtime?.api.meta.name ?? apiId,
-              providerVersion: this.store.versionOf(apiId)
+              providerVersion: this.store.versionOf(apiId),
+              providerGeneration:runtime?.generation??this.lifecycle.get(apiId)??0
             }
           }
           scriptErrors.push(`${quality}: 未返回有效播放地址`)
         } catch (error) {
           if (signal?.aborted) throw error
-          scriptErrors.push(`${quality}: ${error instanceof Error ? error.message : String(error)}`)
+          const failure=normalizeOnlineError(error,{...onlineContext(source,'musicUrl'),stage:'resolve',providerId:runtime?.api.meta.stableId??apiId,providerVersion:this.store.versionOf(apiId)})
+          evidence.push(failure)
+          scriptErrors.push(`${quality}: ${error instanceof Error ? error.message : String(error)}${failure.httpStatus?` (HTTP ${failure.httpStatus})`:''}`)
         }
       }
 
@@ -913,9 +1011,9 @@ export class SourceEngine {
     }
 
     if (errors.length === 0) {
-      throw new Error(`没有音源支持「${source}」的播放地址解析`)
+      throw sourceFailure(`没有音源支持「${source}」的播放地址解析`, evidence, source, 'musicUrl', supportsMusicUrl ? 'qualityUnavailable' : 'unsupported')
     }
-    throw new Error(`无法获取播放地址（${errors.join('；')}）`)
+    throw sourceFailure(`无法获取播放地址（${errors.join('；')}）`, evidence, source, 'musicUrl')
   }
 
   /** Fetch lyrics when the source implements the `lyric` action. */

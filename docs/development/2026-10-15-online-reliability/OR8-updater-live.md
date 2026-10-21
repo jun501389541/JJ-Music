@@ -44,3 +44,5 @@ CI artifact `or8-official-updater-<run_id>` 保留 14 天，包含：
 第二轮 [39610138791](https://github.com/jun501389541/JJ-Music/actions/runs/39610138791)：实际旧版check返回available0.4.5，download进入ready并核对官方Setup完整SHA256，生产install调用使旧进程退出0。随后NSIS安装范围选择页被探针直接Next，安装器报“旧版安装目录与新目录不同；请先保持原安装目录完成资料迁移”，未能重启新版。9项前置检查通过，但完整升级失败。artifact12350875137，SHA256 `4332031a440f850ea114ee418af1222626caa136bf537461e267c6d69a89bd83` 已读取。不能把此结果记为更新链路通过。
 
 探针现对严格路径/摘要限定的同一个NSIS窗口先点击与baseline相同的“Only for me”单选项，并通过BM_GETCHECK确认选中，再前进；目录保护保持不变。另补失败后的child.unref，报告落盘后释放控制器句柄，保留应用供runner取证，不终止任何无关进程。两处经独立复核、语法/选择器和零安装句柄回归验证，真实重跑另记。
+
+继续只读核对固定依赖的 `app-builder-lib/templates/nsis/assistedInstaller.nsh`，确认交互安装的instFilesPre会在路径不含APP_FILENAME时追加应用子目录；`--updated`跳过目录页但不跳过该处理。静默`/D=.../Installed`基线没有经过交互目录规范化，与普通安装目录不同。验收基线现明确使用自有`Installed/JJ Music`，Node启动路径同步，使测试覆盖正常命名的旧安装目录；没有设置updater.installDirectory、追加目标安装器参数或修改公开Setup。非标准静默目录的保护拒绝仍作为边界保留。

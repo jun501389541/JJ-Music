@@ -21,7 +21,7 @@ assert.equal(owner.runId, process.env.GITHUB_RUN_ID)
 assert.equal(owner.root, root)
 const profile = resolve(process.env.APPDATA, 'jj-music')
 assert.equal(owner.profile.toLowerCase(), profile.toLowerCase())
-const exe = join(root, 'Installed', 'JJ Music.exe')
+const exe = join(root, 'Installed', 'JJ Music', 'JJ Music.exe')
 const targetHash = '709387aef5fbc0fee15de5a2e24f0824d6e5b7f0ed678e13b8d9a672351cbe2c'
 const report = { kind: 'official-packaged-updater', status: 'running', started: new Date().toISOString(), root,
   oldVersion: '0.4.2', targetVersion: '0.4.5', stages: [], checks: [] }

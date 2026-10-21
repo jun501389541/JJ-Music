@@ -56,7 +56,7 @@ $env:LOCALAPPDATA = Join-Path $root 'LocalAppData'
 New-Item -ItemType Directory -Path $env:TEMP, $env:LOCALAPPDATA | Out-Null
 $env:OR8_UPDATER_ROOT = $root
 $oldSetup = Join-Path $root 'JJ-Music-0.4.2-Setup-x64.exe'
-$installDir = Join-Path $root 'Installed'
+$installDir = Join-Path $root 'Installed/JJ Music'
 $appExe = Join-Path $installDir 'JJ Music.exe'
 $targetHash = '709387aef5fbc0fee15de5a2e24f0824d6e5b7f0ed678e13b8d9a672351cbe2c'
 try {

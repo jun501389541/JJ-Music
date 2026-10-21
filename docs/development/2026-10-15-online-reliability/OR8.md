@@ -2,7 +2,7 @@
 
 2026-10-16。首批平台为用户选定的网易云（wy）与 QQ 音乐（tx）。OR0–OR7 代码和离线证据已交付；随后用户明确授权“每个音源都试试吧，你自定义来测试就行”。21份源已逐项静态检查，允许者已实际运行，并对地址成功项补充音频首字节抓取。本文件保留失败与人工未验收项，**不将 OR8 整体标为通过**。
 
-2026-10-21 整批交付状态见 [交付总表](OR8-delivery-status.md)，其中记录最新自动验收与发布门禁；下列矩阵保留各证据的适用边界。
+2026-10-21：[v0.4.5](https://github.com/jun501389541/JJ-Music/releases/tag/v0.4.5) 已公开，完整CI、安装升级及远程资产核验通过，详情见 [交付总表](OR8-delivery-status.md)；下列矩阵保留各证据的适用边界。
 
 ## RR01–RR20
 
@@ -22,7 +22,7 @@
 | RR10 歌词失败/缓存/取消 | local-lyric-cache、online-asset-cache、online-capability-health | 待实际歌词服务 |
 | RR11 半开/手动限频 | online-capability-health、capability-health-integration、OR6 合成 UI | 无后台扫平台，未人工制造429 |
 | RR12 更新失败/停用/回退 | source-revision、source-updater、OR6 合成 UI，10 个运行版本回归 | HYW真实更新检查返回非脚本，无候选；实际更新/回退未执行 |
-| RR13 适配器修订/schema | catalog-reliability、online-resource-cache，旧修订不冒充新成功 | 未发布新版本 |
+| RR13 适配器修订/schema | catalog-reliability、online-resource-cache，旧修订不冒充新成功 | 0.4.5已发布；适配器新修订的真实缓存迁移未专门验收 |
 | RR14 敏感错误/报告 | online-diagnostics、diagnostic-check、diagnostic-cli、diagnostic-default；白名单重建 | 无上传，真实私有错误未采集 |
 | RR15 默认与显式真实模式 | diagnostic-default 进程守卫、diagnostic-cli 参数准入；默认不读日常源、不联网 | 用户扩大授权后，显式运行20份实际源，1份静态拒绝不执行 |
 | RR16 本地/手工/待写入 | local-lyric-cache、online-asset-cache、asset-export、OR6 合成 UI | 隔离生产UI66项、生成四格式54项通过，见[交付总表](OR8-delivery-status.md)；日常资料操作未验收 |

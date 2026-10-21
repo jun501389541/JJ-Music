@@ -62,3 +62,9 @@ node tools/probe/or8-delivery-package.mjs --old-zip=.cache/or8-delivery/official
 - `nsisInstallationTested=false`、`onlineUpdaterTested=false`。Portable 解包与复制 profile 只证明相应资料连续性，不证明 NSIS 注册表/快捷方式/旧卸载器迁移，也不证明两个公开版本之间的在线更新安装流程。
 - 签名发布工作流中的受保护密钥、Environment 和 U0 门禁保持原状，未读取、替换或绕过。公开版本可用性与既有仓库权限不等于发布门禁已通过。
 - 本演练没有解码、播放或人工听感验证；人工听感由用户明确保留待验。
+
+## 最终 CI NSIS 结果（0.4.5）
+
+后续 [CI 39550013388](https://github.com/jun501389541/JJ-Music/actions/runs/39550013388) 在一次性GitHub-hosted Windows实际执行首次安装、保留合成资料卸载、官方0.4.2安装及同路径升级0.4.5，均退出0，版本/marker和三份合成资料逐文件摘要通过。已读取artifact `12323481319` 的report，`status=passed`。这补齐当前用户模式相应NSIS路径，不扩张为全用户安装、其他账户迁移或在线更新入口到安装完成的证据；日常宿主未安装/卸载应用。详情见 [整批交付](OR8-delivery-status.md)。
+
+公开发布前已下载远程0.4.5全部资产、匹配API长度与摘要、通过清单签名和资产集合检查，并用远程ZIP完成22项官方0.4.2→0.4.5便携升级；报告 `601a8ee5-369d-4281-9b0e-91527f348958-portable-report.json`。旧资料/哨兵不变、正常关闭、自有根已删除。[v0.4.5](https://github.com/jun501389541/JJ-Music/releases/tag/v0.4.5) 现已公开，匿名API核对同一六资产通过。上面的本地0.4.3/0.4.4候选摘要仅为历史验收，不用作公开包校验值。

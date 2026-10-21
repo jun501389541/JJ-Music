@@ -32,11 +32,14 @@ async function record(name, value) {
   stage = name; report.stages.push({ stage, time: new Date().toISOString(), value }); await persist()
 }
 function check(name, condition) { assert.ok(condition, name); report.checks.push(name) }
-const port = JSON.parse(await readFile(join(root, 'debug-port.json'), 'utf8').then(text => text.replace(/^\uFEFF/, '')))
-assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535, 'Owned supervisor selected a valid debug port')
-async function connect(timeout = 60_000) {
+const { old: oldPort, restart: restartPort } = JSON.parse(await readFile(join(root, 'debug-port.json'), 'utf8').then(text => text.replace(/^\uFEFF/, '')))
+for (const port of [oldPort, restartPort]) {
+  assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535, 'Owned supervisor selected a valid debug port')
+}
+assert.notEqual(oldPort, restartPort, 'Restart must not reuse the old Windows CDP listener port')
+async function connect(timeout = 60_000, port = oldPort) {
   const deadline = Date.now() + timeout
-  const observation = { timeout, attempts: 0, states: [] }
+  const observation = { port, timeout, attempts: 0, states: [] }
   ;(report.connections ??= []).push(observation)
   const observe = state => {
     observation.attempts++
@@ -133,12 +136,12 @@ try {
     child = spawn(exe, ['--disable-background-networking'], {
       cwd: dirname(exe), windowsHide: true, stdio: ['ignore', log, log],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, NODE_OPTIONS: undefined,
-        JJ_ALLOW_DEBUG_PORT: '1', JJ_DEBUG_PORT: String(port) }
+        JJ_ALLOW_DEBUG_PORT: '1', JJ_DEBUG_PORT: String(oldPort) }
     })
     child.on('error', error => { report.launchError = error.message })
   } finally { closeSync(log) }
   const oldPid = child.pid
-  await record('old-launched', { pid: oldPid, port })
+  await record('old-launched', { pid: oldPid, port: oldPort, restartPort })
   let command = await connect()
   check('default synthetic profile selected', resolve((await evaluate('window.jj.data.location()')).dir).toLowerCase() === profile.toLowerCase())
   check('no source scripts loaded', (await evaluate('window.jj.sources.list()')).length === 0)
@@ -181,7 +184,7 @@ try {
   check('old process exited after production install request', child.exitCode !== null || child.signalCode !== null)
   await record('old-exited', { pid: oldPid, code: child.exitCode })
   stage = 'restart'
-  command = await connect(240_000)
+  command = await connect(240_000, restartPort)
   const after = await evaluate('window.jj.updates.status()')
   await record('restarted-status', after)
   check('installer restarted actual version 0.4.5', after.currentVersion === '0.4.5')

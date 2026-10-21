@@ -115,15 +115,19 @@ public static class Or8Windows {
   # environment variables. Opt in only this disposable runner user, restoring
   # the previously absent values in finally. Never change product debug gates.
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+  $oldListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
   $listener.Start()
+  $oldListener.Start()
   $debugPort = $listener.LocalEndpoint.Port
+  $oldDebugPort = $oldListener.LocalEndpoint.Port
   $listener.Stop()
+  $oldListener.Stop()
   $runnerDebugConfigured = $true
   [Environment]::SetEnvironmentVariable('JJ_ALLOW_DEBUG_PORT', '1', 'User')
   [Environment]::SetEnvironmentVariable('JJ_DEBUG_PORT', [string]$debugPort, 'User')
   [Or8Windows]::RefreshEnvironment()
-  Set-Content -LiteralPath (Join-Path $root 'debug-port.json') -Encoding utf8 -Value ([string]$debugPort)
-  Record 'disposable-user-debug-opt-in' @{ port = $debugPort; restoredOnExit = $true }
+  @{ old = $oldDebugPort; restart = $debugPort } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'debug-port.json') -Encoding utf8
+  Record 'disposable-user-debug-opt-in' @{ oldPort = $oldDebugPort; restartPort = $debugPort; restoredOnExit = $true }
   # Hosted runners can expose both setup-node and preinstalled Node entries.
   $node = (Get-Command node -CommandType Application | Select-Object -First 1).Source
   if ($node -isnot [string] -or -not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'A single Node executable is required' }

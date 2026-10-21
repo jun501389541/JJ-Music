@@ -1,0 +1,27 @@
+# OR8 发布后按项验收
+
+2026-10-21，按用户授权继续上轮五项待办。人工听感保持待验；不修改原始源、日常资料或公开发布资产。
+
+| 事项 | 当前实际结果 |
+| --- | --- |
+| 合并main | 原main与交付分支无分叉，已快进并推送main6093c75；后续工作在codex/online-reliability-followup |
+| 完整应用内更新 | 已实现一次性Windows CI专用探针，静态/拒绝检查通过；真实执行结果待CI，见[更新验收](OR8-updater-live.md) |
+| QQ歌单真实UI | 官方公开目录选取10首歌单，生产UI导入→IPC移除一首→预览9→10→取消保持9→再次预览→确认应用恢复10，errors为空，自有profile移除 |
+| 可信源更新回退 | 21原始文件哈希均保持；1份准入阻止，18份无显式更新URL，两个真实显式入口均notAScript，无合格候选；真实更新/回退仍未执行，见[源检查](OR8-source-updates.md) |
+| 缓存故障/快速控制/绑定 | 受控生产集成14项通过，详见下节；实际外部服务故障与作者日常操作不据此通过 |
+| 人工听感 | 按用户选择保留待验 |
+
+QQ运行报告 `.cache/or8-delivery/live/or8-live-ui-tx-acceptance.json`。此模式只支持显式wy/tx，沿用原网易流程，分平台保存结果；选取样本来自真实官方目录，不编造歌曲或歌单ID。
+
+## 受控故障和绑定检查
+
+新工具 `tools/probe/or8-controlled-interactions.mjs` 启动已有生产Electron主程序、preload、renderer，自有profile预置有效但已过期的艺术家缓存。仅在Node上游fetch边界制造503和返回生成WAV；其余外部请求拒绝，渲染侧外部请求阻止。没有替换生产业务IPC或播放store方法；自动平台抽测单独返回明确unknown，防止测试扩大到真实平台。
+
+运行 `2bab6a47-f5fc-43c4-82d1-ce2984aece6e`，14项通过，两个受控503、三个生成媒体响应、意外Node上游请求0，正常退出和profile回收成功。报告 `.cache/or8-controlled-interactions/report.json`。
+
+- 503刷新失败后，实际艺术家详情页保留缓存标题/曲目并显示“资料较旧，已保留上次成功结果”；生产IPC返回stale及失败状态，旧曲目内容一致。
+- 导入两个作者生成的固定URL源A/B，实际SourceEngine启动；生产解析分别保留请求providerId。
+- 实际DOM下一首→上一首→下一首后，最终条目和解析provider均为B；同一歌曲身份显式更改providerId后使用B的结果，不复用A的地址租约。
+- 停用A后，绑定A的请求明确失败，B仍可解析；所有源停用后正常关闭应用。
+
+当前产品没有单独的逐源绑定选择器；绑定检查覆盖生产条目metadata、IPC和播放store，未声称存在并点击了该选择器。快速运输操作是真实DOM按钮；不覆盖物理拖拽、随机长时间使用或真实录音听感。

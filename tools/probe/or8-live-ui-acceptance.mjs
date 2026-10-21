@@ -1,5 +1,5 @@
 /**
- * Production Electron UI acceptance for one public Netease playlist.
+ * Production Electron UI acceptance for one public Netease or QQ playlist.
  *
  * This starts the already-built app with an owned --user-data-dir and uses the
  * renderer's visible controls for import, refresh preview, discard, and apply.
@@ -15,18 +15,20 @@ import { build } from 'esbuild'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+const platform = process.argv.find(arg => arg.startsWith('--source='))?.slice(9) ?? 'wy'
+if (!['wy', 'tx'].includes(platform)) throw new Error('Only --source=wy or --source=tx is supported')
 const outputRoot = join(root, '.cache/or8-delivery/live')
 const runId = `${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}-${randomUUID().slice(0, 8)}`
 const runRoot = join(outputRoot, `ui-${runId}`)
 const profile = join(runRoot, 'user-data')
 const bundle = join(runRoot, 'url-guard.mjs')
-const reportFile = join(outputRoot, 'or8-live-ui-acceptance.json')
+const reportFile = join(outputRoot, platform === 'wy' ? 'or8-live-ui-acceptance.json' : 'or8-live-ui-tx-acceptance.json')
 const report = {
   runId,
   startedAt: new Date().toISOString(),
   status: 'running',
   scope: 'production Electron renderer controls and preload/main IPC; isolated userData',
-  source: 'wy',
+  source: platform,
   remoteCount: null,
   localSeededViaPreloadIpc: false,
   preview: 'not-run',
@@ -71,6 +73,26 @@ async function compileGuard() {
 }
 
 async function discoverSample(guard) {
+  if (platform === 'tx') {
+    const url = new URL('https://c.y.qq.com/soso/fcgi-bin/client_music_search_songlist')
+    url.search = new URLSearchParams({remoteplace:'txt.yqq.playlist',format:'json',page_no:'0',num_per_page:'20',query:'10首歌'}).toString()
+    const result = await guard.safeFetchBytes(url, {
+      timeoutMs:12_000,maxBytes:512*1024,allowedHosts:['c.y.qq.com'],
+      init:{headers:{Referer:'https://y.qq.com/','User-Agent':'Mozilla/5.0'}}
+    })
+    const text = result.body.toString('utf8')
+    const data = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1))
+    const rows = data?.data?.songlist?.list ?? data?.data?.list ?? data?.songlist?.list ?? data?.list ?? []
+    ensure(Array.isArray(rows), 'schema')
+    const candidates = rows.flatMap(row => {
+      const id = String(row?.dissid ?? row?.diss_id ?? row?.tid ?? row?.id ?? '')
+      const count = Number(row?.song_count ?? row?.songnum ?? row?.total_song_num)
+      return /^\d{1,20}$/.test(id) && Number.isSafeInteger(count) && count >= 3 && count <= 30
+        ? [{id,expectedCount:count,origin:'official-platform-public-list'}] : []
+    })
+    ensure(candidates.length > 0, 'playlist-no-small-public-sample')
+    return candidates[0]
+  }
   const url = new URL('https://music.163.com/api/search/get')
   url.search = new URLSearchParams({ type: '1000', s: '轻音乐', limit: '20', offset: '0' }).toString()
   const checked = guard.assertPublicHttpUrl(url, ['music.163.com'])
@@ -234,7 +256,7 @@ try {
   await evaluate(cdp, 'Array.from(document.querySelectorAll("a")).find((a)=>a.getAttribute("href")?.endsWith("/playlist-import")).click()')
   await waitUntil(cdp, '!!document.querySelector(".import-form select") && !!document.querySelector(".import-form input")')
   stage = 'import-public-sample'
-  await evaluate(cdp, `(()=>{const s=document.querySelector('.import-form select');s.value='wy';s.dispatchEvent(new Event('change',{bubbles:true}));const i=document.querySelector('.import-form input');i.value=${JSON.stringify(sample.id)};i.dispatchEvent(new Event('input',{bubbles:true}));return true})()`)
+  await evaluate(cdp, `(()=>{const s=document.querySelector('.import-form select');s.value=${JSON.stringify(platform)};s.dispatchEvent(new Event('change',{bubbles:true}));const i=document.querySelector('.import-form input');i.value=${JSON.stringify(sample.id)};i.dispatchEvent(new Event('input',{bubbles:true}));return true})()`)
   await waitUntil(cdp, '!document.querySelector(".import-form button").disabled')
   await evaluate(cdp, 'document.querySelector(".import-form button").click()')
   const preview = await waitUntil(cdp, 'document.querySelector("section.preview") && !document.querySelector(".import-form button").disabled ? document.querySelector(".preview__title p")?.innerText : null', 50_000)
@@ -246,7 +268,7 @@ try {
   await evaluate(cdp, 'document.querySelector(".preview__buttons button.btn--primary").click()')
   await waitUntil(cdp, 'location.href.includes("/playlist/") && !!document.querySelector(".refresh-panel button")', 30_000)
   stage = 'seed-local-difference'
-  const playlist = await evaluate(cdp, 'window.jj.playlists.list().then((items)=>items.filter((item)=>item.source==="wy"&&item.sourceListId).map((item)=>({id:item.id,count:item.trackCount})))')
+  const playlist = await evaluate(cdp, `window.jj.playlists.list().then((items)=>items.filter((item)=>item.source===${JSON.stringify(platform)}&&item.sourceListId).map((item)=>({id:item.id,count:item.trackCount})))`)
   ensure(Array.isArray(playlist) && playlist.length === 1, 'imported-playlist-not-found')
   listId = playlist[0].id
   const beforeItems = await evaluate(cdp, `window.jj.playlists.items(${JSON.stringify(listId)})`)

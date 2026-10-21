@@ -199,6 +199,10 @@ public static class Or8Windows {
   $ownedProcesses = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $appExe } |
     ForEach-Object { @{ pid = $_.ProcessId; parentPid = $_.ParentProcessId; version = [Diagnostics.FileVersionInfo]::GetVersionInfo($_.ExecutablePath).ProductVersion; commandLine = $_.CommandLine } })
   $report.events += @{ stage = 'final-owned-app-processes'; time = (Get-Date -Format o); value = $ownedProcesses }
+  if ($runnerDebugConfigured) {
+    $listeners = @(Get-NetTCPConnection -LocalPort $debugPort -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress, LocalPort, OwningProcess)
+    $report.events += @{ stage = 'final-debug-listeners'; time = (Get-Date -Format o); value = $listeners }
+  }
   $report.finished = Get-Date -Format o
   $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $reportPath -Encoding utf8
   foreach ($name in @('jj-music-u0-installer.log', 'jj-music-u0-init.log')) {

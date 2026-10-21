@@ -36,13 +36,26 @@ const port = JSON.parse(await readFile(join(root, 'debug-port.json'), 'utf8').th
 assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535, 'Owned supervisor selected a valid debug port')
 async function connect(timeout = 60_000) {
   const deadline = Date.now() + timeout
+  const observation = { timeout, attempts: 0, states: [] }
+  ;(report.connections ??= []).push(observation)
+  const observe = state => {
+    observation.attempts++
+    const key = JSON.stringify(state)
+    if (observation.last !== key) {
+      observation.last = key
+      observation.states.push({ time: new Date().toISOString(), ...state })
+      if (observation.states.length > 12) observation.states.shift()
+    }
+  }
   let target
   while (Date.now() < deadline) {
     try {
-      target = (await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json())
-        .find(item => item.type === 'page' && item.url.startsWith('file:'))
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })
+      const targets = await response.json()
+      observe({ status: response.status, targets: targets.map(item => ({ type: item.type, url: item.url })) })
+      target = targets.find(item => item.type === 'page' && item.url.startsWith('file:'))
       if (target?.webSocketDebuggerUrl) break
-    } catch {}
+    } catch (error) { observe({ error: error.message, code: error.cause?.code }) }
     await sleep(300)
   }
   assert.ok(target?.webSocketDebuggerUrl, 'Packaged renderer CDP target available')

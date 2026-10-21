@@ -52,3 +52,5 @@ CI artifact `or8-official-updater-<run_id>` 保留 14 天，包含：
 第三轮 [39612630667](https://github.com/jun501389541/JJ-Music/actions/runs/39612630667) 确认“Only for me”点击前后均为选中，但旧基线仍在`Installed`，同样在目录保护处拒绝，9项前置通过、重启未通过。artifact12350972184，SHA256 `0005d43c8b02606202835a3168b24c4b681324713232aff6fbb9a52de33032c9` 已下载核对并读取；此结果支持继续修正基线目录，不能记为完整升级通过。
 
 第四轮 [39614397601](https://github.com/jun501389541/JJ-Music/actions/runs/39614397601) 使用正常命名目录，安装器明确显示Installation Complete并由探针点击Finish，未再触发目录保护；控制器仍在等待重启CDP处失败，不能据安装成功认定新版资料核验通过。artifact12352491172，SHA256 `96cc0a1c16c0fd25326cc840ec5687df772849c6b47cdd17659b3b2e94d049fe` 已核对读取。基于固定NSIS源码的Shell启动路径补充上述临时账户调试观测；这是一项待重跑验证的原因判断。
+
+第五轮 [39616546568](https://github.com/jun501389541/JJ-Music/actions/runs/39616546568) 仍在连接重启CDP处失败，但严格安装路径的进程快照确认0.4.5.0主进程带`--updated`自动启动，renderer采用原默认资料目录且携带预期调试端口。因此实际安装/进程重启已有证据，生产API资料核验仍未完成。artifact12353266356，SHA256 `7b8aeeb1c14df6019aab6d849073a8fa7008cd73e135d9fcab7e41fcbf038ba1` 已读取；不能再把缺少CDP笼统归为“未启动”。连接诊断现保留有界HTTP目标/错误变化及最终监听进程，以定位剩余观测问题。

@@ -103,7 +103,9 @@ public static class Or8Windows {
   public static IntPtr[] Children(IntPtr hwnd) { var a=new List<IntPtr>(); EnumChildWindows(hwnd,(h,d)=>{ a.Add(h); return true; },IntPtr.Zero); return a.ToArray(); }
 }
 '@
-  $node = (Get-Command node -CommandType Application).Source
+  # Hosted runners can expose both setup-node and preinstalled Node entries.
+  $node = (Get-Command node -CommandType Application | Select-Object -First 1).Source
+  if ($node -isnot [string] -or -not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'A single Node executable is required' }
   $probe = Join-Path $workspace 'tools/probe/or8-ci-updater.mjs'
   $runner = Start-Process -FilePath $node -ArgumentList ('"' + $probe + '"') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'probe.stdout.log') -RedirectStandardError (Join-Path $root 'probe.stderr.log')
   $deadline = (Get-Date).AddMinutes(12)

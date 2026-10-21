@@ -25,11 +25,13 @@
 
 ## 交付门禁
 
-当前分支 `codex/online-reliability-delivery`，版本 0.4.3。提交不包含 `.cache`、`.graphflow`、真实源脚本、用户资料或凭据。
+当前分支 `codex/online-reliability-delivery`。`a6f4041` 和 `v0.4.3` 已推送；首次 CI 完整验证在 scratch 清理套件失败，签名和 Release 已被门禁阻止，没有公开 0.4.3。保持标签不可变，修复后使用 0.4.4。提交不包含 `.cache`、`.graphflow`、真实源脚本、用户资料或凭据。
 
 NSIS 真正安装/卸载/同路径升级验收放在一次性 GitHub-hosted Windows runner，在签名前执行。工具在日常主机和 self-hosted runner 上先拒绝，不改账户、不停止其他进程。失败阻止签名/发布；保留既有 U0、Environment 和签名密钥门禁。
 
 提交推送、CI 安装结果、远程六资产签名/摘要和公开发布结果尚待实际执行后记录。便携资料升级不代表在线更新安装完成。
+
+CI 修复：原始临时路径与 realpath 直接比较会拒绝根路径别名（包括 Windows 8.3 拼写）。已先添加路径别名回归并观察失败，再将临时根与目录均规范化；原始入口和规范路径反复核验，仍拒绝 scratch 根及其后代链接。11/11 局部检查通过；日志 `.cache/or8-delivery/scratch-ci-{red,green}.log`。失败 CI [39548384414](https://github.com/jun501389541/JJ-Music/actions/runs/39548384414) 保留，不绕过门禁。
 
 ## 保留边界
 

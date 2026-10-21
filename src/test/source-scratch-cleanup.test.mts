@@ -133,3 +133,24 @@ test('scratch cleanup removes exact owned directory only when both processes are
     assert.equal(existsSync(owner.directory), false)
   })
 })
+
+test('scratch cleanup accepts a canonical temp root reached through a spelling alias', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'jj-scratch-temp-'))
+  const alias = base + 'Alias'
+  const previous = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR }
+  try {
+    symlinkSync(base, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    process.env.TEMP = alias; process.env.TMP = alias; process.env.TMPDIR = alias
+    await scratchFixture(async owner => {
+      assert.equal(await reapOwnedScratch(owner, { probe: () => 'dead' }), true)
+      assert.equal(existsSync(owner.directory), false)
+    })
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(alias, { recursive: true, force: true })
+    rmSync(base, { recursive: true, force: true })
+  }
+})

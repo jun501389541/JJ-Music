@@ -24,9 +24,16 @@ export async function reapOwnedScratch(
     if (![owner.ownerPid, owner.childPid].every(pid => Number.isSafeInteger(pid) && pid > 0) ||
       owner.ownerPid === owner.childPid || !/^[a-f0-9-]{36}$/i.test(owner.token)) return false
     const root = await fs.realpath(os.tmpdir())
-    const dir = path.resolve(owner.directory)
+    const supplied = path.resolve(owner.directory)
+    // Windows runner TEMP may use an 8.3 spelling. Canonicalize both sides,
+    // while still refusing a linked scratch directory itself.
+    const suppliedInfo = await fs.lstat(supplied)
+    if (!suppliedInfo.isDirectory() || suppliedInfo.isSymbolicLink()) return false
+    const dir = await fs.realpath(supplied)
     if (path.dirname(dir) !== root || !/^jj-source-[A-Za-z0-9]+$/.test(path.basename(dir))) return false
     const valid = async (): Promise<boolean> => {
+      const original = await fs.lstat(supplied)
+      if (!original.isDirectory() || original.isSymbolicLink() || await fs.realpath(supplied) !== dir) return false
       const info = await fs.lstat(dir)
       if (!info.isDirectory() || info.isSymbolicLink() || await fs.realpath(dir) !== dir) return false
       const marker = path.join(dir, '.jj-owner.json')

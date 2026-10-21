@@ -54,6 +54,7 @@ export interface SourceMediaProxyOptions {
  */
 export class SourceMediaProxy {
   private readonly tokens = new Map<string, AudioToken>()
+  private readonly active = new Set<{ identity?: SourceMediaIdentity; revoke: () => void }>()
   private readonly fetchResponse: typeof safeFetchResponse
   private readonly fetchBytes: typeof safeFetchBytes
   private readonly maxAudioBytes: number
@@ -96,6 +97,7 @@ export class SourceMediaProxy {
     for (const [token, item] of this.tokens) {
       if (item.identity?.providerId === providerId) this.tokens.delete(token)
     }
+    for (const request of this.active) if (request.identity?.providerId === providerId) request.revoke()
   }
   /** Local evidence only; never expose the relay URL, headers or raw error. */
   failure(url: string): MediaFailure | undefined {
@@ -110,6 +112,7 @@ export class SourceMediaProxy {
     url: string
     method: string
     headers?: Headers | Record<string, string | string[] | undefined>
+    signal?: AbortSignal
   }): Promise<Response> {
     const token = this.readToken(request.url)
     const item = token ? this.tokens.get(token) : undefined
@@ -135,21 +138,59 @@ export class SourceMediaProxy {
     }
     if (ifRange && range && ifRange.length <= 256) headers['If-Range'] = ifRange
 
-    let upstream: Response
+    if (request.signal?.aborted) { item.failure={code:'cancelled'};return response('媒体请求已取消',499) }
+    let upstream: Response | undefined
     const requestController = new AbortController()
+    let stopped: MediaFailure | undefined
+    const stop = (failure: MediaFailure, reason: unknown): void => {
+      if (requestController.signal.aborted) return
+      stopped=failure;item.failure=failure;requestController.abort(reason)
+    }
+    const revoke = (): void => stop({code:'providerUnavailable'},new Error('媒体来源已停用或版本已变化'))
+    const active = {identity:item.identity,revoke}
+    this.active.add(active)
+    const cancel = (): void => stop({code:'cancelled'},new Error('媒体请求已取消'))
+    request.signal?.addEventListener('abort',cancel,{once:true})
+    const finish = (): void => { this.active.delete(active);request.signal?.removeEventListener('abort',cancel) }
+    const current = (): boolean => {
+      try { return !item.identity || this.isProviderCurrent(item.identity) } catch { return false }
+    }
     const headerTimeout = setTimeout(() => {
-      requestController.abort(new DOMException('媒体响应头超时', 'TimeoutError'))
+      stop({code:'network'},new DOMException('媒体响应头超时', 'TimeoutError'))
     }, this.headerTimeoutMs)
+    let abortHeader: (()=>void) | undefined
     try {
-      upstream = await this.fetchResponse(item.url, {
+      const aborted = new Promise<never>((_resolve,reject)=>{
+        abortHeader=()=>reject(requestController.signal.reason)
+        requestController.signal.addEventListener('abort',abortHeader,{once:true})
+      })
+      const loading = this.fetchResponse(item.url, {
         init: { method, headers, signal: requestController.signal }
       })
+      void loading.then(late=>{
+        if(requestController.signal.aborted && late!==upstream)void late.body?.cancel().catch(()=>undefined)
+      },()=>undefined)
+      upstream = await Promise.race([loading,aborted])
+      if(requestController.signal.aborted)throw requestController.signal.reason
     } catch (error) {
       const failure=normalizeOnlineError(error,onlineContext('unknown','musicUrl'))
-      item.failure={code:requestController.signal.aborted||failure.code==='network'||failure.code==='timeout'?'network':'unknown'}
-      return response('媒体地址请求失败', 502)
+      item.failure=stopped??{code:failure.code==='network'||failure.code==='timeout'?'network':'unknown'}
+      void upstream?.body?.cancel().catch(()=>undefined)
+      finish()
+      if(stopped?.code==='providerUnavailable')return response('媒体来源已停用或版本已变化',410)
+      if(stopped?.code==='cancelled')return response('媒体请求已取消',499)
+      return response('媒体地址请求失败',502)
     } finally {
       clearTimeout(headerTimeout)
+      if(abortHeader)requestController.signal.removeEventListener('abort',abortHeader)
+    }
+    const changed=!current(),expired=item.expiresAt<=this.now()
+    if(changed || this.tokens.get(token!)!==item || expired){
+      if(changed)revoke()
+      else stop({code:expired?'urlExpired':'unknown'},new Error('媒体地址已过期或不存在'))
+      void upstream.body?.cancel().catch(()=>undefined)
+      finish()
+      return response(changed?'媒体来源已停用或版本已变化':'媒体地址已过期',changed?410:404)
     }
 
     const length = parseSize(upstream.headers.get('content-length'))
@@ -157,7 +198,8 @@ export class SourceMediaProxy {
     const total = parseRangeTotal(upstream.headers.get('content-range'))
     if ((length !== undefined && length > this.maxAudioBytes) ||
         (total !== undefined && total > this.maxAudioBytes)) {
-      await upstream.body?.cancel().catch(() => undefined)
+      finish();requestController.abort(new Error('音频超过大小限制'))
+      void upstream.body?.cancel().catch(() => undefined)
       return response('音频超过大小限制', 413)
     }
 
@@ -169,12 +211,16 @@ export class SourceMediaProxy {
     addCorsHeaders(responseHeaders)
 
     if (method === 'HEAD' || !upstream.body) {
+      finish()
       requestController.abort(new Error('媒体请求不再需要响应体'))
       await upstream.body?.cancel().catch(() => undefined)
       return new Response(null, { status: safeStatus(upstream.status), headers: responseHeaders })
     }
 
-    return new Response(capBody(upstream.body, this.maxAudioBytes, requestController, this.streamIdleTimeoutMs), {
+    return new Response(capBody(upstream.body, this.maxAudioBytes, requestController, this.streamIdleTimeoutMs, {
+      finish, current, revoke,
+      failed: failure=>{if(!stopped&&upstream.ok)item.failure=failure}
+    }), {
       status: safeStatus(upstream.status),
       headers: responseHeaders
     })
@@ -256,43 +302,69 @@ function capBody(
   body: ReadableStream<Uint8Array>,
   limit: number,
   requestController: AbortController,
-  idleTimeoutMs: number
+  idleTimeoutMs: number,
+  lifecycle: { finish:()=>void; current:()=>boolean; revoke:()=>void; failed:(failure:MediaFailure)=>void }
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader()
   let received = 0
+  let ended = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let downstream: ReadableStreamDefaultController<Uint8Array>
+  const finish = (): void => {
+    if(timer)clearTimeout(timer)
+    requestController.signal.removeEventListener('abort',abort)
+    lifecycle.finish()
+  }
+  const abort = (): void => {
+    if(ended)return
+    ended=true;finish()
+    void reader.cancel(requestController.signal.reason).catch(()=>undefined)
+    downstream.error(new Error('媒体请求已终止'))
+  }
   return new ReadableStream<Uint8Array>({
+    start(controller){
+      downstream=controller
+      requestController.signal.addEventListener('abort',abort,{once:true})
+      if(requestController.signal.aborted)abort()
+    },
     async pull(controller) {
-      let timer: ReturnType<typeof setTimeout> | undefined
+      if(ended)return
+      if(!lifecycle.current()){lifecycle.revoke();return}
       try {
-        const result = await Promise.race([
-          reader.read(),
-          new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => {
-              const error = new Error('音频数据流空闲超时')
-              requestController.abort(error)
-              void reader.cancel(error).catch(() => undefined)
-              reject(error)
-            }, idleTimeoutMs)
-          })
-        ])
+        timer=setTimeout(()=>{
+          lifecycle.failed({code:'network'})
+          requestController.abort(new Error('音频数据流空闲超时'))
+        },idleTimeoutMs)
+        const result = await reader.read()
+        if(ended)return
+        if(!lifecycle.current()){lifecycle.revoke();return}
         if (result.done) {
+          ended=true;finish()
           controller.close()
           return
         }
         received += result.value.byteLength
         if (received > limit) {
-          await reader.cancel().catch(() => undefined)
+          ended=true;finish();lifecycle.failed({code:'unknown'})
+          requestController.abort(new Error('音频超过大小限制'))
+          void reader.cancel().catch(() => undefined)
           controller.error(new Error('音频超过大小限制'))
           return
         }
         controller.enqueue(result.value)
       } catch (error) {
+        if(ended)return
+        ended=true;finish();lifecycle.failed({code:'network'})
+        requestController.abort(new Error('音频数据流读取失败'))
+        void reader.cancel().catch(()=>undefined)
         controller.error(error)
       } finally {
         if (timer) clearTimeout(timer)
       }
     },
     cancel(reason) {
+      if(ended)return
+      ended=true;finish();lifecycle.failed({code:'cancelled'})
       requestController.abort(reason)
       return reader.cancel(reason)
     }

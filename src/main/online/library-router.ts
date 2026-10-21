@@ -7,6 +7,7 @@ import type {
   SourceId
 } from '@shared/types'
 import type { OnlinePlatformRegistry } from './platform-registry'
+import { ONLINE_CACHE_BYTES } from './cache-budget'
 import { importPlaylist, parsePlaylistId } from './playlist-import'
 import { join } from 'node:path'
 import type { OnlineFailure, ResourceEnvelope, ResourceStatus } from '@shared/online-reliability'
@@ -43,7 +44,7 @@ export class LibraryRouter {
     this.importBuiltin = options.importBuiltin ?? ((source, input, assertAllowed, signal, onFailure, beforeAttempt) =>
       importPlaylist(source, input, fetch, assertAllowed, { signal, onFailure, beforeAttempt }))
     this.cache = options.cache ?? new ResourceCache({
-      ...(options.dataDir ? { file: join(options.dataDir,'cache/online/v1/playlists.json') } : {}), maxBytes: 8*1024*1024,
+      ...(options.dataDir ? { file: join(options.dataDir,'cache/online/v1/playlists.json') } : {}), maxBytes: ONLINE_CACHE_BYTES.playlists,
       validateStored: (key, value) => {
         try { const [schema,cap,source,id,,revision]=JSON.parse(key); return schema===1 && cap==='playlistImport' && revision===ADAPTER_REVISIONS[source] && this.valid(value,source,id) && (value as ImportedPlaylist).complete===true }
         catch { return false }

@@ -31,11 +31,8 @@ export function pendingKey(trackId: string, kind: PendingAsset['kind']): string 
 }
 
 /**
- * How many entries are kept.
- *
- * The file holds lyric text, so an unbounded queue is an unbounded data
- * directory. Oldest-first eviction is the right end to trim: a year-old staged
- * lyric for a song that has not been played since is not going to be written.
+ * Admission limit. Pending choices belong to the user, so reaching this cap
+ * must reject the incoming change rather than evict an older choice.
  */
 const MAX_ENTRIES = 500
 
@@ -61,48 +58,71 @@ const MAX_LYRIC_CHARS = 200_000
 
 export class PendingAssetStore {
   private readonly filePath: string
-  private readonly items = new Map<string, PendingAsset>()
+  private items = new Map<string, PendingAsset>()
   /**
    * Lyrics the user discarded, by fingerprint. Keyed `track\0kind\0hash` so a
    * repeat of the *same* suggestion can be recognised while a different one for
    * the same song still gets offered — the first match may well have been the
    * wrong song, which is the whole reason these are suggestions.
    */
-  private readonly dismissed = new Map<string, DismissedRecord>()
-  private loaded = false
+  private dismissed = new Map<string, DismissedRecord>()
+  private loading?: Promise<void>
+  private changes: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.filePath = join(dataDir, 'library', 'pending-assets.json')
   }
 
   async load(): Promise<PendingAsset[]> {
-    if (this.loaded) return this.list()
-    this.loaded = true
-    try {
-      const stored = parseJsonLoose<unknown>(await readFile(this.filePath, 'utf8'))
-      // Two shapes: this file used to be a bare array of entries, and it still
-      // reads as one, so a queue written by the previous build is not lost.
-      const entries = Array.isArray(stored) ? stored : (stored as { entries?: unknown[] })?.entries
-      const remembered = (stored as { dismissed?: unknown[] })?.dismissed
-      for (const entry of Array.isArray(entries) ? entries : []) {
-        if (usable(entry)) this.items.set(pendingKey(entry.trackId, entry.kind), entry)
-      }
-      for (const record of Array.isArray(remembered) ? remembered : []) {
-        if (!record || typeof record !== 'object') continue
-        const value = record as Partial<DismissedRecord>
-        if (typeof value.trackId !== 'string' || !value.trackId) continue
-        if (value.kind !== 'lyric' && value.kind !== 'cover') continue
-        if (typeof value.hash !== 'string' || !/^[0-9a-f]{16,64}$/.test(value.hash)) continue
-        if (typeof value.at !== 'number' || !Number.isFinite(value.at)) continue
-        this.dismissed.set(dismissKey(value.trackId, value.kind, value.hash), {
-          trackId: value.trackId, kind: value.kind, hash: value.hash, at: value.at
-        })
-      }
-    } catch {
-      // No file, or an unreadable one: an empty queue is the honest state, and a
-      // staged lyric is by definition recoverable by fetching it again.
+    const loading = this.loading ??= this.read()
+    try { await loading }
+    catch (error) {
+      if (this.loading === loading) this.loading = undefined
+      throw error
     }
     return this.list()
+  }
+
+  /** An auxiliary queue failure must not prevent the player from starting. */
+  async loadForStartup(report: (message: string) => void): Promise<void> {
+    try { await this.load() }
+    catch (error) { report(error instanceof Error ? error.message : '待写入资料读取失败，原文件已保留') }
+  }
+
+  private async read(): Promise<void> {
+    let text: string
+    try {
+      text = await readFile(this.filePath, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw new Error('待写入资料读取失败，原文件已保留；请检查文件后重试', { cause: error })
+    }
+    const stored = parseJsonLoose<unknown>(text)
+    const record = stored as { entries?: unknown; dismissed?: unknown } | null
+    if (!Array.isArray(stored) && (!record || typeof record !== 'object' || !Array.isArray(record.entries) ||
+      (record.dismissed !== undefined && !Array.isArray(record.dismissed)))) {
+      throw new Error('待写入资料已损坏或格式不受支持，原文件已保留；请修复或还原后重试')
+    }
+    const items = new Map<string, PendingAsset>(), dismissed = new Map<string, DismissedRecord>()
+    // Both the legacy bare array and the current object retain their format.
+    const entries = Array.isArray(stored) ? stored : record!.entries as unknown[]
+    const remembered = Array.isArray(stored) ? [] : record!.dismissed
+    for (const entry of entries) {
+      if (usable(entry)) items.set(pendingKey(entry.trackId, entry.kind), entry)
+    }
+    for (const row of Array.isArray(remembered) ? remembered : []) {
+      if (!row || typeof row !== 'object') continue
+      const value = row as Partial<DismissedRecord>
+      if (typeof value.trackId !== 'string' || !value.trackId) continue
+      if (value.kind !== 'lyric' && value.kind !== 'cover') continue
+      if (typeof value.hash !== 'string' || !/^[0-9a-f]{16,64}$/.test(value.hash)) continue
+      if (typeof value.at !== 'number' || !Number.isFinite(value.at)) continue
+      dismissed.set(dismissKey(value.trackId, value.kind, value.hash), {
+        trackId: value.trackId, kind: value.kind, hash: value.hash, at: value.at
+      })
+    }
+    this.items = items
+    this.dismissed = dismissed
   }
 
   list(): PendingAsset[] {
@@ -115,59 +135,78 @@ export class PendingAssetStore {
   }
 
   /** Add or replace one entry. Fetching a better lyric must not pile up. */
-  async add(entry: PendingAsset): Promise<void> {
-    await this.load()
+  async add(entry: PendingAsset, options: { explicitChoice?: boolean } = {}): Promise<void> {
+    if (entry?.kind === 'lyric' && lyricChars(entry) > MAX_LYRIC_CHARS) {
+      throw new Error('待写入歌词超过单条容量上限，未加入队列；原有条目已保留')
+    }
     if (!usable(entry)) return
-    this.items.set(pendingKey(entry.trackId, entry.kind), entry)
-    await this.trimAndPersist()
+    // Own each staging version, even when a caller reuses an old snapshot.
+    const staged = { ...entry, ...(entry.image ? { image: { ...entry.image } } : {}) }
+    const explicitChoice = options.explicitChoice === true
+    await this.change((items, dismissed) => {
+      items.set(pendingKey(staged.trackId, staged.kind), staged)
+      const total = [...items.values()].reduce((sum, item) => sum + lyricChars(item), 0)
+      if (items.size > MAX_ENTRIES || total > MAX_TOTAL_CHARS) {
+        throw new Error('待写入资源已达容量上限，请先写入或丢弃部分条目后重试；原有条目已保留')
+      }
+      // Reconsidering one choice must be durable with its new pending entry;
+      // admission or disk failure leaves the previous decision intact.
+      if (explicitChoice && staged.kind === 'lyric' && staged.lyric?.trim()) {
+        dismissed.delete(dismissKey(staged.trackId, 'lyric', lyricFingerprint(staged.lyric)))
+      }
+    })
   }
 
   /**
    * Forget whatever the queue holds for these kinds of one track.
    *
    * Keyed, not scanned: the caller has just written the asset into a file, so
-   * the entries to forget are exactly this track's. Deleting by key also cannot
-   * sweep away a second entry that was staged while the write was running — that
-   * one is still pending, and the next 全部写入 must still see it.
+   * the entries to forget are exactly this track's requested kinds.
    */
   async dropFor(trackId: string, kinds: AssetKind[]): Promise<number> {
-    await this.load()
-    let dropped = 0
-    for (const kind of kinds) if (this.items.delete(pendingKey(trackId, kind))) dropped += 1
-    if (dropped) await this.persist()
-    return dropped
+    return this.change((items) => {
+      let dropped = 0
+      for (const kind of kinds) if (items.delete(pendingKey(trackId, kind))) dropped += 1
+      return dropped
+    })
   }
 
   /**
-   * Drop exactly these entries, in one write.
+   * Drop exactly these snapshots from this store's load/list, in one write.
    *
    * A bulk 全部写入 would otherwise persist the queue once per song, and a batch
    * of three hundred tracks is three hundred rewrites of the same file.
    */
   async removeEntries(entries: PendingAsset[]): Promise<void> {
     if (!Array.isArray(entries) || entries.length === 0) return
-    await this.load()
-    for (const entry of entries) this.items.delete(pendingKey(entry.trackId, entry.kind))
-    await this.persist()
+    await this.change((items) => {
+      this.takeSnapshots(items, entries)
+    })
+  }
+
+  /** Apply a discard decision only to versions that are still current. */
+  async discardEntries(entries: PendingAsset[]): Promise<PendingAsset[]> {
+    if (!Array.isArray(entries) || entries.length === 0) return []
+    return this.change((items, dismissed) => {
+      const removed = this.takeSnapshots(items, entries)
+      this.rememberDismissed(dismissed, removed)
+      return removed
+    })
+  }
+
+  private takeSnapshots(items: Map<string, PendingAsset>, entries: PendingAsset[]): PendingAsset[] {
+    const removed: PendingAsset[] = []
+    for (const entry of entries) {
+      const key = pendingKey(entry.trackId, entry.kind)
+      if (items.get(key) !== entry) continue
+      items.delete(key)
+      removed.push(entry)
+    }
+    return removed
   }
 
   async clear(): Promise<void> {
-    await this.load()
-    if (this.items.size === 0) return
-    this.items.clear()
-    await this.persist()
-  }
-
-  /** Drop the oldest entries past either cap, then write. */
-  private async trimAndPersist(): Promise<void> {
-    const ordered = [...this.items.values()].sort((a, b) => a.at - b.at)
-    let total = ordered.reduce((sum, entry) => sum + (entry.lyric?.length ?? 0), 0)
-    for (const entry of ordered) {
-      if (this.items.size <= MAX_ENTRIES && total <= MAX_TOTAL_CHARS) break
-      this.items.delete(pendingKey(entry.trackId, entry.kind))
-      total -= entry.lyric?.length ?? 0
-    }
-    await this.persist()
+    await this.change(items => { items.clear() })
   }
 
   /**
@@ -179,22 +218,24 @@ export class PendingAssetStore {
    */
   async dismissEntries(entries: PendingAsset[]): Promise<void> {
     if (!Array.isArray(entries) || entries.length === 0) return
-    await this.load()
+    await this.change((_items, dismissed) => {
+      this.rememberDismissed(dismissed, entries)
+    })
+  }
+
+  private rememberDismissed(dismissed: Map<string, DismissedRecord>, entries: PendingAsset[]): void {
     const at = Date.now()
     for (const entry of entries) {
-      // Covers are not staged today; the shape is here so the day they are does
-      // not need this function rewritten.
       const text = entry.kind === 'lyric' ? entry.lyric : undefined
       if (typeof text !== 'string' || !text.trim()) continue
       const hash = lyricFingerprint(text)
-      this.dismissed.set(dismissKey(entry.trackId, entry.kind, hash), {
+      dismissed.set(dismissKey(entry.trackId, entry.kind, hash), {
         trackId: entry.trackId, kind: entry.kind, hash, at
       })
     }
-    if (this.dismissed.size > MAX_DISMISSED) {
-      for (const key of [...this.dismissed.keys()].slice(0, this.dismissed.size - MAX_DISMISSED)) this.dismissed.delete(key)
+    if (dismissed.size > MAX_DISMISSED) {
+      for (const key of [...dismissed.keys()].slice(0, dismissed.size - MAX_DISMISSED)) dismissed.delete(key)
     }
-    await this.persist()
   }
 
   /** Has this exact text already been thrown away for this track? */
@@ -204,8 +245,33 @@ export class PendingAssetStore {
     return this.dismissed.has(dismissKey(trackId, kind, lyricFingerprint(text)))
   }
 
-  private async persist(): Promise<void> {
-    await writeJsonAtomic(this.filePath, { entries: this.list(), dismissed: [...this.dismissed.values()] })
+  /** Drain queued changes before shutdown or copying the data directory. */
+  async flush(): Promise<void> {
+    let tail: Promise<void>
+    do {
+      tail = this.changes
+      await tail
+    } while (tail !== this.changes)
+  }
+
+  /** Publish only durable snapshots; a failed change must not leak into later writes. */
+  private change<T>(work: (items: Map<string, PendingAsset>, dismissed: Map<string, DismissedRecord>) => T): Promise<T> {
+    const operation = this.changes.then(async () => {
+      await this.load()
+      const items = new Map(this.items), dismissed = new Map(this.dismissed)
+      const result = work(items, dismissed)
+      const changed = <V>(before: Map<string, V>, after: Map<string, V>): boolean =>
+        before.size !== after.size || [...after].some(([key, value]) => before.get(key) !== value)
+      if (!changed(this.items, items) && !changed(this.dismissed, dismissed)) return result
+      await writeJsonAtomic(this.filePath, {
+        entries: [...items.values()].sort((a, b) => a.at - b.at), dismissed: [...dismissed.values()]
+      })
+      this.items = items
+      this.dismissed = dismissed
+      return result
+    })
+    this.changes = operation.then(() => undefined, () => undefined)
+    return operation
   }
 }
 
@@ -239,6 +305,12 @@ export function lyricFingerprint(text: string): string {
  * file is JSON written by an older version of the app at worst, and the queue is
  * never worth trusting blindly.
  */
+const LYRIC_FIELDS = ['lyric', 'tlyric', 'rlyric', 'lxlyric'] as const
+
+function lyricChars(entry: Partial<PendingAsset>): number {
+  return LYRIC_FIELDS.reduce((sum, field) => sum + (typeof entry[field] === 'string' ? entry[field].length : 0), 0)
+}
+
 function usable(entry: unknown): entry is PendingAsset {
   if (!entry || typeof entry !== 'object') return false
   const value = entry as Partial<PendingAsset>
@@ -246,7 +318,9 @@ function usable(entry: unknown): entry is PendingAsset {
   if (value.kind !== 'lyric' && value.kind !== 'cover') return false
   if (typeof value.path !== 'string' || !value.path) return false
   if (typeof value.at !== 'number' || !Number.isFinite(value.at)) return false
-  if (value.kind === 'lyric' && (typeof value.lyric !== 'string' || value.lyric.length > MAX_LYRIC_CHARS)) return false
+  if (value.kind === 'lyric' && (typeof value.lyric !== 'string' ||
+    LYRIC_FIELDS.some(field => value[field] !== undefined && typeof value[field] !== 'string') ||
+    lyricChars(value) > MAX_LYRIC_CHARS)) return false
   if (value.kind === 'cover' && (!value.image || typeof value.image.path !== 'string')) return false
   return true
 }

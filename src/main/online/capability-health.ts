@@ -41,7 +41,8 @@ export class CapabilityHealth {
       retryAfterMs: Math.max(0, (rate ? entry.rateUntil : entry.until) - this.now()) })
   }
   async run<T>(context: OnlineContext, work: (observe: (failure: OnlineFailure) => void, beforeAttempt:()=>void) => Promise<T>, options: { signal?: AbortSignal; manual?: boolean; isSuccess?: (value:T)=>boolean } = {}): Promise<T> {
-    if (options.signal?.aborted) throw new OnlineRequestError({ ...context, code: 'cancelled' })
+    const abortCode = (): 'timeout' | 'cancelled' => options.signal?.reason?.name === 'TimeoutError' ? 'timeout' : 'cancelled'
+    if (options.signal?.aborted) throw new OnlineRequestError({ ...context, code: abortCode() })
     if (this.options.enabled?.() === false) return work(()=>undefined,()=>undefined)
     const key = healthKey(context), now = this.now()
     let entry = this.entries.get(key)
@@ -78,20 +79,21 @@ export class CapabilityHealth {
       }
     }
     const beforeAttempt=():void=>{
-      if(this.entries.get(key)!==state||options.signal?.aborted)throw new OnlineRequestError({...context,code:'cancelled'})
+      if(this.entries.get(key)!==state)throw new OnlineRequestError({...context,code:'cancelled'})
+      if(options.signal?.aborted)throw new OnlineRequestError({...context,code:abortCode()})
       if(this.now()<state.rateUntil||(state.probe&&state.probe!==probe)||
         (state.generation!==generation&&(state.level>0||state.rateUntil>0)))throw this.blocked(context,state)
     }
     let abort:(()=>void)|undefined
     try {
       const cancelled = new Promise<never>((_,reject)=>{
-        abort=()=>reject(new OnlineRequestError({...context,code:'cancelled'}))
+        abort=()=>reject(new OnlineRequestError({...context,code:abortCode()}))
         options.signal?.addEventListener('abort',abort,{once:true})
         if(options.signal?.aborted)abort()
       })
-      if(options.signal?.aborted)throw new OnlineRequestError({...context,code:'cancelled'})
+      if(options.signal?.aborted)throw new OnlineRequestError({...context,code:abortCode()})
       const result = await Promise.race([work(observe,beforeAttempt),cancelled])
-      if (options.signal?.aborted) throw new OnlineRequestError({ ...context, code: 'cancelled' })
+      if (options.signal?.aborted) throw new OnlineRequestError({ ...context, code: abortCode() })
       if (current()&&options.isSuccess?.(result)!==false) {
         state.failures = 0; state.level = 0; state.until = 0; state.rateUntil = 0; state.probe = undefined
         // Invalidate other requests admitted before this authoritative success.
@@ -100,7 +102,9 @@ export class CapabilityHealth {
       return result
     } catch (error) {
       if (current()) {
-        const failure = options.signal?.aborted ? undefined : normalizeOnlineError(error, context)
+        const failure = options.signal?.aborted
+          ? abortCode() === 'timeout' ? normalizeOnlineError({ name: 'TimeoutError' }, context) : undefined
+          : normalizeOnlineError(error, context)
         if(failure?.code!=='rateLimited'||!reportedRate)this.failed(state, failure, !!probe)
       }
       throw error

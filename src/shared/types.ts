@@ -758,6 +758,10 @@ export interface PendingAsset {
   path: string
   /** Lyrics only: the LRC text. */
   lyric?: string
+  /** Supplemental display text belonging to the same pending choice. */
+  tlyric?: string
+  rlyric?: string
+  lxlyric?: string
   /** Lyrics only: the text carries per-line timestamps. */
   synced?: boolean
   /** Covers only: the cached image to embed or copy. */

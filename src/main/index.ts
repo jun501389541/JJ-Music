@@ -34,12 +34,14 @@ import { fail, ok, isLocalTrack, type AppSettings, type AssetKind, type AssetRef
 import { SourceStore } from './sources/source-store'
 import { applySourceUpdate, checkDailySourceUpdates, checkForUpdate, looksLikeScript, rollbackSourceUpdate, summarizeUpdateCheck } from './sources/source-updater'
 import { SourceMediaProxy } from './online/source-media-proxy'
+import { registerSourceMediaProtocol } from './online/source-media-protocol'
 import { probePlatform } from './sources/platform-probe'
 import { SourceEngine } from './sources/source-engine'
 import { MusicLibrary } from './library/music-library'
 import { PlaylistStore, SettingsStore } from './store/settings-store'
 import { CapabilityHealth } from './online/capability-health'
-import { searchProviders, fetchNeteaseDetails } from './online/search'
+import { AuxiliaryRequests } from './online/auxiliary-requests'
+import { searchProviders, fetchNeteaseDetails, searchOnline } from './online/search'
 import { HotWordSource } from './online/hot-words'
 import { SearchRouter } from './online/search-router'
 import { ADAPTER_REVISIONS, CatalogReliability } from './online/catalog-reliability'
@@ -52,7 +54,7 @@ import { LibraryRouter } from './online/library-router'
 import { PlaylistRefreshService } from './online/playlist-refresh'
 import { PlaybackRouter } from './sources/playback-router'
 import { fetchOnlineLyric } from './online/lyrics'
-import { fetchCoverUrl, shouldFetchCover, type CoverBytes } from './online/cover-fetch'
+import { applyMatchCoverPolicyAtCommit, fetchCoverUrl, hasLocalCover, shouldFetchCover, type CoverBytes } from './online/cover-fetch'
 import {
   clearLyricCache,
   clearAutomaticLyricCache,
@@ -68,9 +70,11 @@ import {
   type SearchOnlineForMatch
 } from './library/lyric-service'
 import { matchMetadata, lyricsForMatch } from './library/metadata-match'
-import { exportAssets, mergeAssets } from './library/asset-export'
+import { exportAssets, flushAssetWrites, mergeAssets } from './library/asset-export'
+import { PathTaskQueue, TaskGroup } from './library/path-task-queue'
 import { imageMimeFor } from './library/asset-files'
 import { PendingAssetStore, pendingKey } from './library/pending-assets'
+import { withPendingAssetWrite } from './library/pending-asset-write'
 import type { TagPatch } from './library/tag-writer'
 import type { AssetExportInput, AssetExportResult, ChosenLyric, MatchApplyOptions, ResolvedLyric } from '@shared/library-types'
 import { DesktopLyrics } from './desktop-lyrics'
@@ -365,6 +369,7 @@ interface Services {
   searchRouter: SearchRouter
   catalogReliability: CatalogReliability
   capabilityHealth: CapabilityHealth
+  auxiliaryRequests: AuxiliaryRequests
   onlineAssets: OnlineAssetCache
   platformCover: (music: Pick<OnlineMusicInfo, 'source' | 'picUrl'>, signal?: AbortSignal) => Promise<CoverBytes | null>
   scriptCover: (music: OnlineMusicInfo, signal?: AbortSignal) => Promise<{ dataUrl: string; asset?: AssetRef }>
@@ -467,11 +472,12 @@ async function createServices(): Promise<Services> {
       ? onlinePlatforms.allows(source, 'artistImage')
       : onlinePlatforms.platforms('artistImage').length > 0,
     resolveArtistImage: (async (name, http) => {
-      return resolveArtistImage(name, http, () => onlinePlatforms.platforms('artistImage'))
+      return resolveArtistImage(name, http, () => onlinePlatforms.platforms('artistImage'), auxiliaryRequests)
     }) as ArtistImageResolver
   })
   await settings.load()
   const catalogReliability = new CatalogReliability({ dataDir, health: capabilityHealth, enabled: () => settings.get().onlineReliability !== false })
+  const auxiliaryRequests = new AuxiliaryRequests({ health: capabilityHealth, diagnostics: catalogReliability.diagnostics, revision: source => ADAPTER_REVISIONS[source] ?? 'unknown' })
   await catalogReliability.load()
   await catalogReliability.diagnostics.load()
   catalogReliability.diagnostics.setEnabled(settings.get().onlineDiagnostics !== false)
@@ -495,6 +501,7 @@ async function createServices(): Promise<Services> {
     return { ...(data ?? { lyric: '' }), reliability }
   }
   const searchRouter = new SearchRouter({
+    searchOne: (source, query, page, signal) => searchOnline(source, query, page, signal, auxiliaryRequests),
     reliability: catalogReliability,
     hotWords,
     registry: onlinePlatforms
@@ -538,7 +545,8 @@ async function createServices(): Promise<Services> {
   await libraryRouter.load()
   const playlistRefresh=new PlaylistRefreshService({playlists,readSnapshot:(source,input,signal,force)=>libraryRouter.readSnapshot(source,input,signal,force)})
 
-  await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(), pendingAssets.load(), hotWords.load()])
+  await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(),
+    pendingAssets.loadForStartup(message => console.warn(message)), hotWords.load()])
   sourceStore.load()
 
   /**
@@ -616,6 +624,7 @@ async function createServices(): Promise<Services> {
   }
 
   const downloads = new DownloadManager(dataDir, {
+    auxiliary: auxiliaryRequests,
     settings: () => settings.get(), defaultFolder: join(app.getPath('downloads'), 'JJ Music'),
     resolve: (track, quality) => playbackRouter.musicUrl(track, quality, true),
     lyrics: async (track) => (await onlineLyric(track)).lyric,
@@ -651,7 +660,7 @@ async function createServices(): Promise<Services> {
     }
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, capabilityHealth, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -1149,40 +1158,47 @@ function assetWriteTargets(): { to: AssetWriteTarget[]; writableFormats: string[
  * all three have to leave the same three things behind — the file, the
  * provenance record, and a lyric cache that no longer describes what is on disk.
  */
+const assetCommits = new PathTaskQueue()
+const assetOperations = new TaskGroup()
+
 async function commitAssetWrite(
   track: LocalMusicInfo,
   patch: TagPatch,
-  overrides: Partial<AssetExportInput> = {}
+  overrides: Partial<AssetExportInput> = {},
+  pendingSnapshot?: readonly PendingAsset[],
+  matchCoverPolicy?: Pick<MatchApplyOptions, 'overwriteCover'>
 ): Promise<AssetExportResult> {
-  const { library } = requireServices()
-  const result = await exportAssets({
-    audioPath: track.path,
-    patch,
-    ...assetWriteTargets(),
-    ...overrides
-  })
-  // A 试运行 asked what *would* happen; nothing changed on disk, so the index, the
-  // lyric cache and the 待写入 queue must all stay as they were. `written` is true
-  // for a preview by design — it means "this would land".
-  if (!result.written || overrides.dryRun) return result
+  const { library, pendingAssets } = requireServices()
+  const writeOptions = { ...assetWriteTargets(), ...overrides }
+  // Capture cleanup authority now, before waiting for an earlier file write.
+  const snapshot = pendingSnapshot ? Promise.resolve(pendingSnapshot) : pendingAssets.load()
+  // A failed read may settle while this task is queued. The awaited original
+  // still rejects the operation; this handler only prevents a premature
+  // unhandled-rejection event while another task holds the path.
+  void snapshot.catch(() => undefined)
+  return assetCommits.run([track.path], async () => {
+    const chosen = await snapshot
+    const currentTrack = library.get(track.id) ?? track
+    const effectivePatch = matchCoverPolicy
+      ? applyMatchCoverPolicyAtCommit(patch, matchCoverPolicy, hasLocalCover(currentTrack))
+      : patch
+    const kinds = (['lyric', 'cover'] as const).filter(kind =>
+      kind === 'lyric' ? Boolean(effectivePatch.lyrics?.trim()) : Boolean(effectivePatch.cover)
+    )
+    return withPendingAssetWrite(pendingAssets, track.id, kinds, async () => {
+      const result = await exportAssets({ audioPath: track.path, patch: effectivePatch, ...writeOptions })
+      // A preview changes neither index, cache nor pending choices.
+      if (!result.written || writeOptions.dryRun) return result
 
-  // An embedded write changed the tags themselves, so the entry has to be
-  // re-read. A sidecar changed nothing about the audio file, and re-reading it
-  // for that would mean a `music-metadata` pass over a file that never moved —
-  // so only the provenance is folded in.
-  const next = result.embeddedWritten
-    ? await library.readTrack(track.path)
-    : { ...track, assets: mergeAssets(track.assets, result.assets) }
-  await library.updateTrack(next)
-  clearLyricCache(track.id)
-  // Anything the queue was holding for this track is now in a file, so it stops
-  // being pending. Without this the 菜单写入 path leaves the entry behind, and
-  // 「全部写入」 would write the same lyric a second time.
-  const kinds = (['lyric', 'cover'] as const).filter((kind) =>
-    kind === 'lyric' ? Boolean(patch.lyrics?.trim()) : Boolean(patch.cover)
-  )
-  if (kinds.length) await requireServices().pendingAssets.dropFor(track.id, kinds)
-  return result
+      // Re-read changed tags; a sidecar only needs its provenance folded in.
+      const next = result.embeddedWritten
+        ? await library.readTrack(currentTrack.path)
+        : { ...currentTrack, assets: mergeAssets(currentTrack.assets, result.assets) }
+      await library.updateTrack(next)
+      clearLyricCache(track.id)
+      return result
+    }, { snapshot: chosen, dryRun: overrides.dryRun })
+  })
 }
 
 /**
@@ -1199,9 +1215,10 @@ async function commitAssetWrite(
  * does, because the first match may have been the wrong recording. The lyric
  * itself keeps playing either way: this queue is about writing files.
  */
-async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric): Promise<ResolvedLyric> {
+async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric, explicitChoice = false): Promise<ResolvedLyric> {
+  if (resolved.asset?.pending) return resolved
   if (resolved.source !== 'online' || !resolved.lyric.trim()) return resolved
-  if (await requireServices().pendingAssets.isDismissed(track.id, 'lyric', resolved.lyric)) return resolved
+  if (!explicitChoice && await requireServices().pendingAssets.isDismissed(track.id, 'lyric', resolved.lyric)) return resolved
   const asset: AssetRef = { ...(resolved.asset ?? { origin: 'remote' }), pending: true }
   await requireServices().pendingAssets.add({
     trackId: track.id,
@@ -1210,11 +1227,14 @@ async function stageFetchedLyric(track: LocalMusicInfo, resolved: ResolvedLyric)
     singer: track.singer,
     path: track.path,
     lyric: resolved.lyric,
+    ...(resolved.tlyric ? { tlyric: resolved.tlyric } : {}),
+    ...(resolved.rlyric ? { rlyric: resolved.rlyric } : {}),
+    ...(resolved.lxlyric ? { lxlyric: resolved.lxlyric } : {}),
     synced: resolved.synchronized,
     origin: asset.origin,
     ...(asset.provider ? { provider: asset.provider } : {}),
     at: Date.now()
-  })
+  }, { explicitChoice })
   const decorated = { ...resolved, asset }
   // Re-prime the resolver's cache with the decorated record. The service cached
   // the undecorated one while resolving, so a second read of the same track —
@@ -1293,7 +1313,11 @@ function pendingSelection<Entry extends { trackId: string }>(staged: Entry[], id
  * over the library would rewrite thousands of files that did not change, and
  * `backupOnce` would leave a `.bak` beside each one.
  */
-async function writeTrackAssets(trackIds: Set<string>, kinds: AssetKind[]): Promise<AssetExportResult[]> {
+function writeTrackAssets(trackIds: Set<string>, kinds: AssetKind[]): Promise<AssetExportResult[]> {
+  return assetOperations.run(() => writeTrackAssetsNow(trackIds, kinds))
+}
+
+async function writeTrackAssetsNow(trackIds: Set<string>, kinds: AssetKind[]): Promise<AssetExportResult[]> {
   const { pendingAssets } = requireServices()
   // One pass over the queue, keyed the same way the store keys it. Looking each
   // track up with a scan of the list would be O(tracks × queue) on a 全选 over a
@@ -1340,7 +1364,7 @@ async function writeTrackAssets(trackIds: Set<string>, kinds: AssetKind[]): Prom
       }
 
       out.push(
-        await commitAssetWrite(track, patch, { to: wanted, writableFormats, noClobber: !entry })
+        await commitAssetWrite(track, patch, { to: wanted, writableFormats, noClobber: !entry }, entry ? [entry] : [])
       )
     }
   }
@@ -1389,11 +1413,7 @@ function registerMediaProtocol(): void {
 
 /** Stream script audio from main after validating every URL/redirect hop. */
 function registerSourceAudioProtocol(): void {
-  protocol.handle(SOURCE_STREAM_SCHEME, (request) => sourceMediaProxy.handleRequest({
-    url: request.url,
-    method: request.method,
-    headers: request.headers
-  }))
+  registerSourceMediaProtocol(protocol, session.defaultSession.webRequest, sourceMediaProxy)
 }
 
 /* ------------------------------------------------------------------ *
@@ -1797,6 +1817,10 @@ function registerIpc(): void {
     if (response !== 0) return { moved: false, reason: 'cancelled' }
     // Anything still buffered would be missing from the copy, and the next write
     // after this would go to the old directory until the app restarts.
+    await assetOperations.flush()
+    await assetCommits.flush()
+    await flushAssetWrites()
+    await requireServices().pendingAssets.flush()
     await flushJsonWrites()
     await cp(current, target, {
       recursive: true,
@@ -2519,7 +2543,7 @@ function registerIpc(): void {
     const numbers = wanted.map((entry) => entry.num)
     // 分批 100 个 id 是 `fetchNeteaseDetails` 自己的事，这里不再套一层循环：
     // 上限放在唯一的那个入口，才不会出现"某条调用路径忘了切"的情况。
-    const details = await fetchNeteaseDetails(numbers)
+    const details = await fetchNeteaseDetails(numbers, undefined, requireServices().auxiliaryRequests)
     const found: Array<{ id: string; qualitys: Array<{ type: string; size?: string }> }> = []
     for (const [num, detail] of details) {
       if (detail.qualitys.length) found.push({ id: `wy_${num}`, qualitys: detail.qualitys })
@@ -2565,13 +2589,23 @@ function registerIpc(): void {
   // renderer chose.
   handle(IPC.lyricResolve, async (trackId: string, allowOnline?: boolean) => {
     const track = indexedTrack(trackId)
-    const deps = requireServices().lyricDeps
+    const { lyricDeps: deps, pendingAssets } = requireServices()
+    // Queue failures remain visible in settings without blocking local lyrics.
+    const saved = (await pendingAssets.load().catch(() => [])).find(entry =>
+      entry.trackId === track.id && entry.path === track.path && entry.kind === 'lyric' && entry.lyric?.trim())
+    const pendingLyric: ResolvedLyric | undefined = saved ? {
+      lyric: saved.lyric!, source: 'online', synchronized: saved.synced ?? looksSynchronized(saved.lyric!),
+      ...(saved.tlyric ? { tlyric: saved.tlyric } : {}),
+      ...(saved.rlyric ? { rlyric: saved.rlyric } : {}),
+      ...(saved.lxlyric ? { lxlyric: saved.lxlyric } : {}),
+      asset: { origin: saved.origin, pending: true, ...(saved.provider ? { provider: saved.provider } : {}) }
+    } : undefined
     return stageFetchedLyric(
       track,
       await resolveLocalLyric(
         track,
         { allowOnline: allowOnline !== false },
-        { ...deps, provider: deps.provider?.() }
+        { ...deps, provider: deps.provider?.(), pendingLyric }
       )
     )
   })
@@ -2629,9 +2663,8 @@ function registerIpc(): void {
    * stays the only way to put a matched lyric into a file without pressing 全部写入.
    *
    * `source: 'online'` is what makes `stageFetchedLyric` accept the record at all;
-   * the translations ride along because the queue stores a single body while the
-   * cache holds the whole resolution — dropping them here would make 翻译 and 音译
-   * vanish from the pane the moment the choice is applied.
+   * the translations ride along in both the pending queue and the cache, so
+   * 翻译 and 音译 remain available when the choice is applied or reopened.
    */
   handle(IPC.lyricStageCandidate, async (trackId: string, chosen: ChosenLyric) => {
     const lyric = typeof chosen?.lyric === 'string' ? chosen.lyric : ''
@@ -2642,12 +2675,15 @@ function registerIpc(): void {
     const rlyric = extra(chosen.rlyric)
     return stageFetchedLyric(indexedTrack(trackId), {
       lyric,
+      // A manual choice bypasses searchLyricOnline, so stamp the same cache
+      // revision used by normal resolution before priming the pending result.
+      provider: requireServices().lyricDeps.provider?.(),
       ...(tlyric ? { tlyric } : {}),
       ...(rlyric ? { rlyric } : {}),
       source: 'online',
       synchronized: looksSynchronized(lyric),
       asset: { origin: 'remote', provider: 'search', at: Date.now() }
-    })
+    }, true)
   })
 
   /**
@@ -2685,8 +2721,10 @@ function registerIpc(): void {
     const picked = result.filePaths[0]
     // This path never round-trips through the renderer, so it is trusted for
     // the duration of this call rather than added to the standing list.
-    const text = await readLyricFile(picked)
-    return { text, saved: await saveChosenLyric(track.path, text) }
+    return assetOperations.run(async () => {
+      const text = await readLyricFile(picked)
+      return { text, saved: await saveChosenLyric(track.path, text) }
+    })
   })
 
   handle(IPC.lyricSave, async (trackId: string, text: string) => {
@@ -2726,7 +2764,7 @@ function registerIpc(): void {
    * plugged in today stays pending instead of being quietly forgotten. An entry
    * whose track has left the index is dropped, since nothing can write it.
    */
-  handle(IPC.assetsWritePending, async (trackIds?: unknown) => {
+  handle(IPC.assetsWritePending, (trackIds?: unknown) => assetOperations.run(async () => {
     const { pendingAssets, library } = requireServices()
     const staged = await pendingAssets.load()
     // An id list filters what is queued; it never names things to invent.
@@ -2748,7 +2786,7 @@ function registerIpc(): void {
         done.push(entry)
         continue
       }
-      const result = await commitAssetWrite(indexedTrack(entry.trackId), patch, { noClobber: false })
+      const result = await commitAssetWrite(indexedTrack(entry.trackId), patch, { noClobber: false }, [entry])
       if (result.written) {
         written += 1
         done.push(entry)
@@ -2758,17 +2796,16 @@ function registerIpc(): void {
     }
     await pendingAssets.removeEntries(done)
     return { written, notes, remaining: (await pendingAssets.load()).length }
-  })
+  }))
 
   /** Throw away staged assets without writing them. */
   handle(IPC.assetsDiscardPending, async (trackIds?: unknown) => {
     const { pendingAssets } = requireServices()
     const staged = await pendingAssets.load()
-    const dropped = pendingSelection(staged, bulkTrackIds(trackIds))
-    await pendingAssets.removeEntries(dropped)
-    // Remember what was refused, so the next play of that song does not offer the
-    // very same text again.
-    await pendingAssets.dismissEntries(dropped)
+    const selected = pendingSelection(staged, bulkTrackIds(trackIds))
+    // Compare, remove and remember together, so an old discard cannot reject a
+    // newly staged choice with identical text.
+    const dropped = await pendingAssets.discardEntries(selected)
     // The badge reads the resolver's cache, not the queue: a discarded lyric
     // stays decorated as 「待写入」 there until it is re-resolved, so 全部丢弃
     // looked like it had done nothing until the user played the song again.
@@ -2809,11 +2846,11 @@ function registerIpc(): void {
    */
   handle(
     IPC.matchApply,
-    async (
+    (
       track: LocalMusicInfo,
       patch: TagPatch,
       options?: MatchApplyOptions
-    ) => {
+    ) => assetOperations.run(async () => {
       // `track` arrives as a renderer-built object, so nothing about its `path` is
       // taken on trust: the id selects the index record, and that record owns the
       // file. Writing tags is the one channel that mutates the user's originals,
@@ -2831,7 +2868,7 @@ function registerIpc(): void {
       /*
        * The cover rides the same shape as the branch above, and the two stay
        * independent: a file whose cover must not be touched still gets its
-       * lyrics. `Boolean(target.coverPath)` is the index's fact rather than the
+       * lyrics. `hasLocalCover(target)` is the index's fact rather than the
        * dialog's snapshot — that is why the switch is honoured here and not
        * simply trusted from the renderer.
        *
@@ -2844,15 +2881,21 @@ function registerIpc(): void {
        * `assetsExport` and are unaffected.)
        */
       delete effective.cover
-      if (shouldFetchCover(options ?? {}, Boolean(target.coverPath))
+      if (shouldFetchCover(options ?? {}, hasLocalCover(target))
         && options?.coverFrom
         && requireServices().onlinePlatforms.allows(options.coverFrom.source, 'cover')) {
         const cover = await requireServices().platformCover(options.coverFrom)
         if (cover) effective.cover = cover
       }
 
-      return commitAssetWrite(target, effective, { dryRun: options?.dryRun === true })
-    }
+      return commitAssetWrite(
+        target,
+        effective,
+        { dryRun: options?.dryRun === true },
+        undefined,
+        options ? { overwriteCover: options.overwriteCover } : undefined
+      )
+    })
   )
 
   /** Fetch a cover image for a matched track, returned as a data URL. */
@@ -2986,8 +3029,13 @@ if (!app.requestSingleInstanceLock()) {
       current.libraryRouter.flush(),
       current.hotWords.flush(),
       current.playlists.flush(),
+      current.pendingAssets.flush(),
+      assetOperations.flush(),
+      assetCommits.flush(),
       current.sourceEngine.stopAll()
     ])
+      .then(() => flushAssetWrites())
+      .then(() => current.pendingAssets.flush())
       .then(() => flushJsonWrites())
       .finally(() => {
         destroyTray()

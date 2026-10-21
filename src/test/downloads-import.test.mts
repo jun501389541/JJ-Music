@@ -34,7 +34,7 @@ async function settled(manager,id) {
 }
 test('download writes audio, merged lyrics and embedded FLAC cover; duplicate names never overwrite',async()=>{
   const {manager,dir}=await setup()
-  const [id]=manager.add([track],'flac');const result=await settled(manager,id)
+  const [id]=manager.add([track],'flac');await settled(manager,id);const result=await lyricRecorded(manager,id)
   assert.equal(result.status,'completed',result.error);assert.deepEqual(result.warnings,[])
   const meta=await parseFile(result.path)
   assert.equal(meta.common.title,track.name);assert.equal(meta.common.picture[0].format,'image/png')

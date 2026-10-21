@@ -24,7 +24,8 @@
  * same serve-stale-then-revalidate shape `stale-while-revalidate` gives CDNs, and
  * the reason the row never has to wait on a host that is hanging.
  */
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
+import { ONLINE_CACHE_BYTES } from './cache-budget'
 import type { HotWord, SourceId } from '@shared/types'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 import { safeFetchText } from './url-guard'
@@ -221,6 +222,7 @@ export class HotWordSource {
     if (!this.options.file) return
     const current = this.version()
     try {
+      if ((await stat(this.options.file)).size > ONLINE_CACHE_BYTES.hotWords) return
       const stored = parseJsonLoose<Record<string, Partial<HotWordEntry>>>(await readFile(this.options.file, 'utf8'))
       if (!stored || typeof stored !== 'object') return
       for (const [source, entry] of Object.entries(stored)) {
@@ -414,7 +416,9 @@ export class HotWordSource {
   async flush(): Promise<void> { await this.writing }
   private persist(): Promise<void> {
     if (!this.options.file) return Promise.resolve()
-    this.writing=writeJsonAtomic(this.options.file, Object.fromEntries(this.entries)).catch(error=>{
+    const snapshot = Object.fromEntries(this.entries)
+    if (Buffer.byteLength(JSON.stringify(snapshot, null, 2)) > ONLINE_CACHE_BYTES.hotWords) return Promise.resolve()
+    this.writing=writeJsonAtomic(this.options.file, snapshot).catch(error=>{
       console.error('热门搜索词缓存保存失败', error)
     })
     return this.writing

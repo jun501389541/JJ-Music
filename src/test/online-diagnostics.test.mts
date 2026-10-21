@@ -2,6 +2,13 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { OnlineDiagnostics } from './online/online-diagnostics.js'
 
+test('auxiliary capability and internal aliases are retained without opening the field whitelist', () => {
+  const log = new OnlineDiagnostics()
+  for (const capability of ['artistImage','trackDetail','downloadCover','lyrics','playlistImport']) log.record({capability,url:'secret',message:'secret'})
+  assert.deepEqual(log.export().events.map(event=>event.capability), ['artistImage','trackDetail','downloadCover','lyric','playlist'])
+  assert.equal(JSON.stringify(log.export()).includes('secret'),false)
+})
+
 test('diagnostic export uses a strict whitelist and bounded identifiers', async () => {
   let stored
   const log = new OnlineDiagnostics({ write: async v => { stored = v } })

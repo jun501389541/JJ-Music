@@ -1,5 +1,7 @@
 import type { SourceId } from '@shared/types'
 import { readBounded } from './read-bounded'
+import type { AuxiliaryRequests } from './auxiliary-requests'
+import { onlineContext, onlineHttpFailure, OnlineRequestError } from './reliability-policy'
 
 /**
  * Artist portraits.
@@ -24,6 +26,22 @@ import { readBounded } from './read-bounded'
  */
 
 type Row = Record<string, any>
+
+function isRecord(value: unknown): value is Row {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function responseRecord(value: unknown, endpoint: string): Row {
+  if (!isRecord(value)) throw new SyntaxError(`artist image response has invalid ${endpoint} shape`)
+  return value
+}
+
+function responseRows(value: unknown, endpoint: string): Row[] {
+  if (!Array.isArray(value) || value.some(row => !isRecord(row))) {
+    throw new SyntaxError(`artist image response has invalid ${endpoint} shape`)
+  }
+  return value
+}
 
 export interface ArtistImage {
   url: string
@@ -69,30 +87,36 @@ function absoluteMgImage(value: string): string {
  * signal would let that one hang end the whole chain — so every artist would come
  * back with no portrait because of the first platform that was asked.
  *
- * `null` therefore means "someone answered and had no photo", never "nothing
- * could be reached": when every platform threw, the last error is thrown instead.
+ * `null` means every consulted platform completed without finding a photo.
+ * A partial failure cannot prove a miss: the failed platform may have a photo,
+ * so preserve its error unless another platform supplies a positive result.
  */
 export async function resolveArtistImage(
   name: string,
   http: typeof fetch = fetch,
-  allowed: SourceId[] | (() => SourceId[]) = ['mg', 'tx', 'wy', 'kg']
+  allowed: SourceId[] | (() => SourceId[]) = ['mg', 'tx', 'wy', 'kg'],
+  auxiliary?: AuxiliaryRequests
 ): Promise<ArtistImage | null> {
   const query = name.trim()
   if (!query || query.length > 60) return null
   const deadline = AbortSignal.timeout(20_000)
   const allowedNow = (source: SourceId): boolean =>
     (typeof allowed === 'function' ? allowed() : allowed).includes(source)
-  async function json(source: SourceId, url: string, referer: string, origin?: string): Promise<Row> {
+  async function json(source: SourceId, url: string, referer: string, origin?: string): Promise<unknown> {
     if (!allowedNow(source)) throw new Error('source admission revoked')
     const res = await http(url, {
       headers: { Referer: referer, ...(origin ? { Origin: origin } : {}), 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.any([deadline, AbortSignal.timeout(8_000)])
     })
+    if (!res.ok) {
+      try { await res.body?.cancel() } catch { /* releasing a failed response is best-effort */ }
+      throw onlineHttpFailure(res, onlineContext(source, 'artistImage'))
+    }
     const text = (await readBounded(res, 2 * 1024 * 1024)).toString('utf8')
     try {
-      return JSON.parse(text) as Row
+      return JSON.parse(text) as unknown
     } catch {
-      return {}
+      throw new OnlineRequestError({ ...onlineContext(source, 'artistImage'), code: 'schemaChanged' })
     }
   }
 
@@ -101,13 +125,13 @@ export async function resolveArtistImage(
       // 一次请求就够，而且从本机看它答得最快。
       source: 'mg',
       async find() {
-        const rows = await json(
+        const rows = responseRows(await json(
           'mg',
           `https://app.u.nf.migu.cn/pc/resource/song/item/search/v1.0?${new URLSearchParams({ text: query, pageNo: '1', pageSize: '10' })}`,
           'https://music.migu.cn/',
           'https://music.migu.cn'
-        )
-        for (const song of Array.isArray(rows) ? rows : []) {
+        ), 'Migu search')
+        for (const song of rows) {
           for (const singer of song?.singerList ?? []) {
             const img = typeof singer?.img === 'string' ? singer.img : ''
             if (img && artistNameMatches(query, String(singer?.name ?? ''))) return { url: absoluteMgImage(img), source: 'mg' }
@@ -120,12 +144,15 @@ export async function resolveArtistImage(
       // 同样一次就够：QQ 的歌曲行本身就带歌手 mid，头像是按 mid 拼出来的公开地址。
       source: 'tx',
       async find() {
-        const data = await json(
+        const payload = responseRecord(await json(
           'tx',
           `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?${new URLSearchParams({ w: query, p: '1', n: '10', cr: '1', new_json: '1', format: 'json', t: '0' })}`,
           'https://y.qq.com/'
-        )
-        for (const song of data?.data?.song?.list ?? []) {
+        ), 'QQ search')
+        const data = responseRecord(payload.data, 'QQ search data')
+        const songResult = responseRecord(data.song, 'QQ search songs')
+        const songs = responseRows(songResult.list, 'QQ search list')
+        for (const song of songs) {
           for (const singer of song?.singer ?? []) {
             const mid = typeof singer?.mid === 'string' ? singer.mid : ''
             if (mid && artistNameMatches(query, String(singer?.name ?? ''))) {
@@ -140,16 +167,23 @@ export async function resolveArtistImage(
       // 网易云的搜索行只有 id，头像要再问一次详情端点。
       source: 'wy',
       async find() {
-        const data = await json(
+        const payload = responseRecord(await json(
           'wy',
           `https://music.163.com/api/search/get/web?${new URLSearchParams({ s: query, type: '1', offset: '0', limit: '10' })}`,
           'https://music.163.com/'
-        )
-        for (const song of data?.result?.songs ?? []) {
+        ), 'Netease search')
+        const result = responseRecord(payload.result, 'Netease search result')
+        const songs = responseRows(result.songs, 'Netease search songs')
+        for (const song of songs) {
           for (const artist of song?.artists ?? []) {
             if (!artist?.id || !artistNameMatches(query, String(artist?.name ?? ''))) continue
-            const detail = await json('wy', `https://music.163.com/api/artist/${artist.id}`, 'https://music.163.com/')
-            const pic = typeof detail?.artist?.picUrl === 'string' ? detail.artist.picUrl : ''
+            const detail = responseRecord(await json('wy', `https://music.163.com/api/artist/${artist.id}`, 'https://music.163.com/'), 'Netease artist detail')
+            const detailArtist = responseRecord(detail.artist, 'Netease artist')
+            const rawPic = detailArtist.picUrl
+            if (rawPic !== undefined && rawPic !== null && typeof rawPic !== 'string') {
+              throw new Error('artist image response has invalid Netease artist picture')
+            }
+            const pic = typeof rawPic === 'string' ? rawPic : ''
             // `?param=` 不是装饰：去掉它拿到的是 1.4MB 原图。
             if (pic) return { url: `${pic}?param=320y320`, source: 'wy' }
           }
@@ -160,21 +194,28 @@ export async function resolveArtistImage(
     {
       source: 'kg',
       async find() {
-        const data = await json(
+        const payload = responseRecord(await json(
           'kg',
           `https://songsearch.kugou.com/song_search_v2?${new URLSearchParams({ keyword: query, page: '1', pagesize: '10' })}`,
           'https://www.kugou.com/'
-        )
-        for (const song of data?.data?.lists ?? []) {
+        ), 'Kugou search')
+        const data = responseRecord(payload.data, 'Kugou search data')
+        const songs = responseRows(data.lists, 'Kugou search list')
+        for (const song of songs) {
           const raw = song?.SingerId
           const singerId = Array.isArray(raw) ? raw[0] : raw
           if (!singerId || !artistNameMatches(query, String(song?.SingerName ?? ''))) continue
-          const info = await json(
+          const infoPayload = responseRecord(await json(
             'kg',
             `https://mobilecdnbj.kugou.com/api/v3/singer/info?${new URLSearchParams({ singerid: String(singerId), version: '9108', plat: '0' })}`,
             'https://www.kugou.com/'
-          )
-          const template = typeof info?.data?.imgurl === 'string' ? info.data.imgurl : ''
+          ), 'Kugou singer detail')
+          const info = responseRecord(infoPayload.data, 'Kugou singer data')
+          const rawTemplate = info.imgurl
+          if (rawTemplate !== undefined && rawTemplate !== null && typeof rawTemplate !== 'string') {
+            throw new Error('artist image response has invalid Kugou singer picture')
+          }
+          const template = typeof rawTemplate === 'string' ? rawTemplate : ''
           if (template) return { url: template.replace(/\{size\}/g, '320'), source: 'kg' }
         }
         return null
@@ -182,23 +223,22 @@ export async function resolveArtistImage(
     }
   ]
 
-  let answered = 0
+  let failed = false
   let lastError: unknown
   for (const lookup of lookups) {
     if (!allowedNow(lookup.source)) continue
     try {
-      const found = await lookup.find()
-      answered++
+      const found = auxiliary
+        ? await auxiliary.run(lookup.source, 'artistImage', () => lookup.find(), { signal: deadline })
+        : await lookup.find()
       if (found) return found
     } catch (error) {
+      failed = true
       lastError = error
       // 这一家没答上，换下一家。
     }
   }
-  // 一家都没答上时，"这位歌手没有头像"是无从得知的——断网和真没照片是两回事。
-  //  Returning `null` for both would let the caller cache the outage as a
-  //  permanent miss, so a fully failed chain throws and only a completed lookup
-  //  ends up as an answer either way.
-  if (!answered && lastError) throw lastError
+  // 任何一家失败都不能证明没有头像，避免把不完整查询永久记成未命中。
+  if (failed) throw lastError
   return null
 }

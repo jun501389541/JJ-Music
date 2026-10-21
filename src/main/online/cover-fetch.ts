@@ -1,5 +1,5 @@
-import type { OnlineMusicInfo, SourceId } from '@shared/types'
-import type { MatchApplyOptions } from '@shared/library-types'
+import type { LocalMusicInfo, OnlineMusicInfo, SourceId } from '@shared/types'
+import type { MatchApplyOptions, TagPatch } from '@shared/library-types'
 import { safeFetchBytes } from './url-guard'
 
 /**
@@ -137,4 +137,34 @@ export function shouldFetchCover(
   // write, but neither of those is what would stop this request. Only this line does.
   if (options.dryRun) return false
   return !hasCurrentCover || options.overwriteCover === true
+}
+
+/**
+ * Whether the current library record describes a local, user-owned cover.
+ *
+ * `coverPath` is the serving path when the index has completed its normal
+ * discovery. A sidecar write can update provenance before that path is filled
+ * on the next scan, so local origins in the current record must also count.
+ */
+export function hasLocalCover(track: Pick<LocalMusicInfo, 'coverPath' | 'assets'>): boolean {
+  return Boolean(track.coverPath) || Boolean(track.assets?.cover?.some(({ origin }) =>
+    origin === 'embedded' || origin === 'sidecar' || origin === 'user'
+  ))
+}
+
+/**
+ * Apply the match dialog's cover choice against the latest indexed state.
+ *
+ * The network fetch happens before the same-file write is queued. Rechecking
+ * here prevents a cover written while that request was in flight from being
+ * replaced by the stale decision made when the dialog started.
+ */
+export function applyMatchCoverPolicyAtCommit(
+  patch: TagPatch,
+  options: Pick<MatchApplyOptions, 'overwriteCover'>,
+  hasCurrentCover: boolean
+): TagPatch {
+  if (!patch.cover || !hasCurrentCover || options.overwriteCover === true) return patch
+  const { cover: _cover, ...metadata } = patch
+  return metadata
 }

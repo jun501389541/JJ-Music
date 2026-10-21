@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { ONLINE_CACHE_BYTES } from './cache-budget'
 import type { OnlineEntityPage, OnlineMusicInfo, SourceId } from '@shared/types'
 import type { OnlineContext, ResourceEnvelope } from '@shared/online-reliability'
 import type { SearchPage } from './search'
@@ -44,7 +45,7 @@ export class CatalogReliability {
     this.revision = options.revision ?? (source => ADAPTER_REVISIONS[source] ?? 'unknown')
     const make = (capability: 'artistDetail' | 'albumDetail'): ResourceCache => options.detailCache ?? new ResourceCache({
       ...(options.dataDir ? { file: join(options.dataDir, `cache/online/v1/${capability}.json`) } : {}),
-      maxBytes: 24 * 1024 * 1024,
+      maxBytes: ONLINE_CACHE_BYTES[capability],
       validateStored: (key, value) => {
         try { const [schema, cap, source, , , revision] = JSON.parse(key); return schema === 1 && cap === capability && revision === this.revision(source) && validEntity(value) && (value as OnlineEntityPage<unknown>).truncated !== true }
         catch { return false }

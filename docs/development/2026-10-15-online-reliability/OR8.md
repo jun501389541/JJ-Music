@@ -2,6 +2,8 @@
 
 2026-10-16。首批平台为用户选定的网易云（wy）与 QQ 音乐（tx）。OR0–OR7 代码和离线证据已交付；随后用户明确授权“每个音源都试试吧，你自定义来测试就行”。21份源已逐项静态检查，允许者已实际运行，并对地址成功项补充音频首字节抓取。本文件保留失败与人工未验收项，**不将 OR8 整体标为通过**。
 
+2026-10-21 整批交付状态见 [交付总表](OR8-delivery-status.md)，其中记录最新自动验收与发布门禁；下列矩阵保留各证据的适用边界。
+
 ## RR01–RR20
 
 “离线覆盖”仅表示所列受控路径，不能代替真实服务或人工操作。
@@ -10,30 +12,30 @@
 | --- | --- | --- |
 | RR01 有旧值后超时/结构错误 | catalog-reliability、online-resource-cache，旧值带 stale 与安全错误 | 两平台目录各一次真实搜索通过；真实故障后的缓存UI未验收 |
 | RR02 首次失败与合法空 | catalog-reliability、diagnostic-cli，miss/空结果不混淆 | 未验证实时空结果 |
-| RR03 远程歌单空/部分分页 | playlist-snapshot、playlist-refresh、OR6 合成 UI；完整候选才确认，空不自动清列表 | 待选真实歌单 |
+| RR03 远程歌单空/部分分页 | playlist-snapshot、playlist-refresh、OR6 合成 UI；完整候选才确认，空不自动清列表 | 真实网易22/22、QQ10/10生产模块预览/取消/应用通过，见[真实记录](OR8-live-delivery.md)；真实空/部分仍未制造 |
 | RR04 服务失败与单资源缺失 | online-capability-health、capability-health-integration，资源/档位不冷却整个平台 | 未制造真实限流/故障 |
 | RR05 429/共享预算 | online-reliability-policy、capability-health-integration、player-regression、diagnostic-check | 实时 Retry-After 未验证 |
-| RR06 共享请求取消 | online-resource-cache，独立取消与最后订阅终止 | 待真实 UI 快速切换 |
+| RR06 共享请求取消 | online-resource-cache，独立取消与最后订阅终止 | 隔离产品UI连续切歌及上游取消通过，见[交互记录](OR8-ui-playback.md)；多消费者共享取消仍以离线回归为证据 |
 | RR07 旧请求/源变更 | source-revision、source-cache-invalidation、playlist-refresh，代次和 CAS 阻止迟到回填 | 待可信实际源更新 |
 | RR08 损坏/写失败/配额 | online-resource-cache、cover-byte-store、online-asset-cache、playlist-refresh | 主机离线文件路径覆盖，未做真实磁盘耗尽 |
-| RR09 地址/格式/拒绝/低档 | playback-reliability、source-media-proxy、player-regression，双时钟和原预算只恢复一次 | 实际遇到403、抓取失败及再次解析失败；全曲解码/恢复和听感未验收 |
+| RR09 地址/格式/拒绝/低档 | playback-reliability、source-media-proxy、player-regression，双时钟和原预算只恢复一次 | 实际遇到403、抓取失败及再次解析失败；HYW 两平台固定样本新增完整传输与严格FFmpeg解码通过，详见[全曲解码](OR8-full-decode.md)；16份历史媒体头通过源的24个平台组合完成8秒隔离Electron静音播放与流清理，详见[扩展播放复验](OR8-bulk-playback-attempt.md)；产品UI错误恢复、听感未验收 |
 | RR10 歌词失败/缓存/取消 | local-lyric-cache、online-asset-cache、online-capability-health | 待实际歌词服务 |
 | RR11 半开/手动限频 | online-capability-health、capability-health-integration、OR6 合成 UI | 无后台扫平台，未人工制造429 |
-| RR12 更新失败/停用/回退 | source-revision、source-updater、OR6 合成 UI，10 个运行版本回归 | 实际源初始化和解析见下表；实际更新/回退未执行 |
+| RR12 更新失败/停用/回退 | source-revision、source-updater、OR6 合成 UI，10 个运行版本回归 | HYW真实更新检查返回非脚本，无候选；实际更新/回退未执行 |
 | RR13 适配器修订/schema | catalog-reliability、online-resource-cache，旧修订不冒充新成功 | 未发布新版本 |
 | RR14 敏感错误/报告 | online-diagnostics、diagnostic-check、diagnostic-cli、diagnostic-default；白名单重建 | 无上传，真实私有错误未采集 |
 | RR15 默认与显式真实模式 | diagnostic-default 进程守卫、diagnostic-cli 参数准入；默认不读日常源、不联网 | 用户扩大授权后，显式运行20份实际源，1份静态拒绝不执行 |
-| RR16 本地/手工/待写入 | local-lyric-cache、online-asset-cache、asset-export、OR6 合成 UI | 待作者实际资源操作 |
+| RR16 本地/手工/待写入 | local-lyric-cache、online-asset-cache、asset-export、OR6 合成 UI | 隔离生产UI66项、生成四格式54项通过，见[交付总表](OR8-delivery-status.md)；日常资料操作未验收 |
 | RR17 回拨/无效时间 | online-resource-cache、playback-reliability、player-regression | 用注入时钟验证，不修改系统时间 |
-| RR18 合成与真实分级 | diagnostic-check/default、source-update-state、OR6 UI；真实初始化/解析/音频头另计 | 真实首字节见下表，不代表全曲/身份/实际音质或听感通过 |
-| RR19 切歌/绑定/收藏 | player-regression、online-resolver、playback-router、provenance-persistence、scan-concurrency | 待作者日常快速操作 |
+| RR18 合成与真实分级 | diagnostic-check/default、source-update-state、OR6 UI；真实初始化/解析/音频头另计 | 真实首字节见下表；HYW 网易/QQ固定样本各完成全曲FFmpeg解码，24个组合的隔离Electron8秒短播通过；其他源全曲解码、身份/实际音质及听感仍未验收，见[全曲记录](OR8-full-decode.md)和[短播复验](OR8-bulk-playback-attempt.md) |
+| RR19 切歌/绑定/收藏 | player-regression、online-resolver、playback-router、provenance-persistence、scan-concurrency | 两平台固定样本在生产UI连续切歌、生产队列移动保持身份及停用后禁止新播放通过，见[交互记录](OR8-ui-playback.md)；混合收藏、单条移除和DOM拖拽另有66项隔离生产UI检查，见[混合记录](OR8-mixed-queue-favorites-ui.md)；跨源重绑定、物理拖拽与作者日常操作仍待验收 |
 | RR20 关闭/清除/用户资料 | online-diagnostics、online-asset-cache、OR6 合成 UI；关闭保护仍保留基础路径 | 待实际资料验收 |
 
 ## 人工验收顺序
 
 1. 已按用户授权完成目录样本选取、21源静态与允许源的初始化/解析，另做音频首字节抓取。复测时仍用独立配置与显式模式，不能将合成结果或音频头成功当作全曲播放。
-2. 在应用中对两平台各试听所选歌曲，核对条目身份、实际平台、目标/实际音质和音频是否正常；分别记录媒体加载与人工听感，不能仅据地址成功打勾。
-3. 快速切歌、取消、重排队列和切换绑定源，检查旧曲不续播、不把成功计入另一条目；混合本地/在线收藏仍保持原条目身份。
+2. HYW 源网易/QQ固定样本已完成严格 FFmpeg 全曲解码；原有两平台8秒隔离 Electron 静音播放及获批宿主中的24个组合短播均已通过。仍需实际试听所选歌曲，核对条目身份、实际平台、目标/实际音质和主观听感；分别记录解码、媒体加载与人工听感。详情见[全曲解码](OR8-full-decode.md)、[短时解码](OR8-short-decode.md)及[扩展播放复验](OR8-bulk-playback-attempt.md)；后者保留沙箱首轮阻断与随后通过的两个观察。
+3. 隔离生产UI的下一首/上一首连续控制、生产队列移动保持当前条目和源停用后新播放拒绝已有自动化证据。仍需作者日常快速操作、拖拽重排、切换绑定源与混合本地/在线收藏确认；停用后缓冲音频仍可能继续，不能将上游撤销等同立即静音。见[交互记录](OR8-ui-playback.md)。
 4. 对已保存测试歌单查看刷新差异，先取消、再明确应用；部分获取与合法空结果须给出可理解反馈，不能自动覆盖列表。
 5. 用测试资源确认本地歌词/手工封面优先，待写入选择在清普通缓存后保留，关闭诊断和可靠性策略后仍能使用基础播放。
 6. 对明确可信测试源执行更新和回退，核对稳定身份、保持停用、初始化反馈及播放未验证；之后再单独试听，不以初始化成功代替播放验收。
@@ -42,9 +44,9 @@
 
 ## 保留边界
 
-- 现有在线辅助路径尚非全部纳入新健康策略，例如艺术家图片、下载内部抓取、质量徽标补全；没有宣称全链路诊断均有完整关联 ID。
+- 艺术家图片、歌曲详情补全及下载封面已接入辅助健康策略与诊断；下载音频保留原有调度，没有宣称全链路诊断均有完整关联 ID。
 - 缓存沿用按桶和二进制 LRU 配额，没有新增跨所有历史辅助缓存的全局磁盘仲裁器。普通缓存损坏不删除用户资源。
-- 实际源/平台目录/地址/音频头证据见下节；仍无全曲解码、人工听感、发布安装/升级验收。不扩展第三个平台，不提交推送、打包安装或发布。
+- 实际源/平台目录/地址/音频头证据见下节；HYW两平台固定样本全曲解码已通过，其他源全曲解码及人工听感仍未验收。授权后的候选打包、便携升级及提交发布进度见交付总表；不扩展第三个平台。
 - 既有历史阶段文档的“后续阶段待实施”是当时快照；以本文件和 OR6/OR7 的更新状态为准。
 
 ## 本轮最终检查
@@ -59,7 +61,39 @@
 | 差异保护 | OR6 `preservation.json` 30份tracked、40份untracked；OR7 44份tracked、49份untracked；unexpected均为空。 |
 | 静态检查 | `git diff --check` 及三个新/改诊断入口 `node --check` 通过；GraphFlow增量索引已执行。 |
 
-尚未执行：全曲解码和实际应用播放、人工听感、日常交互确认、安装/升级/发布。不以历史实际profile E2E、合成成功或音频首字节补齐这些项。
+后续全曲检查：HYW 两平台固定样本严格解码与完整传输 2/2 通过，详见[全曲解码](OR8-full-decode.md)；本轮只运行生产模块构建、探针语法和显式真实检查，未新增完整 verify 运行。
+
+尚未执行：其余源完整曲目解码、产品UI日常播放与错误恢复、人工听感、日常交互确认、真实源更新回退、安装/升级/发布。不以隔离Electron短播、历史实际profile E2E、合成成功或音频首字节补齐这些项。
+
+后续产品UI检查：HYW两平台固定样本的有限连续切歌、队列动作与源停用场景已在全新profile验证，详见[交互记录](OR8-ui-playback.md)。它补充局部自动化集成证据，不能把上面的日常使用和完整错误恢复整体勾为完成。
+
+后续硬退出修复：受限文件宿主现检查真正的应用 ownerPid，仅确认进程不存在后自退；零网络回归先失败后通过，并验证生产 Electron 宿主入口，详见[宿主生命周期](OR8-owner-lifecycle.md)。异常退出后的 scratch 清扫、宿主事件循环卡死与人工验收仍保留边界。
+
+后续待写入保护：修复队列满时自动淘汰旧选择、首次并发加载覆盖以及写盘失败污染内存的问题；保持原容量参数，超额明确拒绝，写盘成功后才发布内存状态；退出和迁移先排空队列。受控回归9/9通过，见[待写入容量记录](OR8-pending-capacity.md)；不据此宣称所有损坏资料恢复或批量写标签竞态已解决。
+
+后续旧快照保护：单次/批量写入与丢弃现只清理原快照，不误删或标记拒绝后来暂存的歌词/封面，包括同文本同时间重选。新增14项和既有容量9项局部回归23/23通过，见[快照保护记录](OR8-pending-snapshot.md)。它补齐旧任务清理新选择的边界；多个任务同时写同一歌曲文件的先后顺序及损坏文件恢复仍未覆盖。
+
+后续读取故障保护：待写入文件首次读取损坏或不可读时保留原字节并拒绝后续覆盖，修复后可同实例重试，启动隔离附属队列失败。新增10项加既有回归33/33通过，见[读取保护记录](OR8-pending-read-recovery.md)。不自动恢复损坏内容，也不宣称任意磁盘故障、已加载文件的外部修改或多实例竞争已解决。
+
+后续同文件写入保护：资源导出按全部共享路径排队，防止noClobber双写及标签临时文件争用；主进程同曲导出与索引提交也按顺序完成，退出/迁移先等待已启动操作的准备阶段和后续写入。三项旧行为先失败，新增七项生产模块回归通过，见[写入串行记录](OR8-asset-write-serialization.md)。它不等于外部程序互斥、跨进程锁或物理文件别名识别。
+
+后续标签匹配封面保护：远程封面抓取期间，同曲手动写入的封面现在会在串行提交边界按最新索引重新判定；默认保留新写入的封面，明确启用“覆盖已有封面”仍会替换。封面侧车即使暂时只有 `sidecar` 来源记录、尚无 `coverPath` 也受保护；匹配标题等元数据照常提交。新增竞态回归3/3通过，`npm run verify` 90/90套件、门禁5/5通过，见[封面并发记录](OR8-match-apply-cover-race.md)。这属于离线证据，不替代真实素材操作或人工封面验收。
+
+后续头像部分失败保护：当一部分准入平台合法返回空、另一部分请求失败时，不再持久化为永久无头像；完整合法空结果仍可缓存，成功头像仍可跨平台回退。生产头像套件24/24通过，详见[部分失败记录](OR8-artist-partial-failure.md)。历史负缓存需沿用显式刷新重新查询，不据此宣称所有头像路径已接入健康策略。
+
+后续头像准入复核：搜索空结果、图片下载和保存完成后重新检查当前平台准入，撤销后的迟到结果不再替换原头像或写负缓存。三项回归先失败，修复后头像套件27/27通过，详见[准入边界记录](OR8-artist-admission.md)。不删除已保存共享字节，不据此宣称实现主动取消或准入代次隔离。
+
+后续损坏队列界面验收：新增隔离生产Electron探针，15项检查通过并核对截图，确认损坏资料不阻止启动，错误不冒充空队列、操作禁用、原字节保留，同实例修复后显示队列并可丢弃落盘。测试profile已回收，详见[生产界面记录](OR8-pending-ui.md)。这是合成集成证据，真实资料及人工验收边界保留。
+
+后续候选与确认写入验收：扩展隔离生产UI探针，发现候选歌词暂存未携带解析缓存版本，导致选择后回读未命中；候选入口已对齐版本键。生成WAV场景28项通过，确认清缓存保留选择、真实“全部写入”生成LRC并清队列、音频字节不变和本地侧车回读，详见[写入记录](OR8-pending-write-ui.md)。不替代所有标签格式与人工日常验收。
+
+后续写入失败验收：在自有合成资料目录制造LRC输出目录冲突，经生产按钮验证失败提示、待写入选择与音频保留、临时文件清理及排除冲突后重试成功，36项通过，见[失败与重试记录](OR8-pending-write-failure-ui.md)。不代表真实磁盘耗尽、所有权限和标签格式均已通过。
+
+后续跨重启恢复：发现队列落盘但歌词解析未读取它的接线缺陷，已恢复持久化选择的回读，并保持本地文件优先、回读不重写队列。正常退出后同profile新进程生产UI断言46项通过，完整verify为90/90套件、5/5门禁，见[跨重启记录](OR8-pending-restart-ui.md)。第二隐藏窗口截图不可用已显式记录，不冒充视觉验收或跨重启翻译完整恢复。
+
+后续附加歌词恢复：已将翻译、音译及扩展歌词文本纳入待写入持久化，全部文本共同计入原单条/总容量；旧记录兼容，导出规则保持主歌词。生产UI跨重启翻译/音译47项、容量模块10项通过，见[附加文本记录](OR8-pending-supplemental-lyrics.md)，不替代真实源或翻译合并导出验收。
+
+后续明确重选修复：丢弃后的拒绝记录此前也拦住用户主动重选同一歌词；现仅明确候选入口可将新选择与该指纹拒绝清除一起原子提交，自动建议抑制保持。生产UI51项、容量/事务模块12项通过，见[重选记录](OR8-pending-reselection.md)。
 
 ## 授权后的21份实际源检查
 

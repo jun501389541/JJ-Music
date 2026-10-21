@@ -302,6 +302,8 @@ export async function resolveLocalLyric(
      * cache the app had before isolation.
      */
     provider?: string
+    /** Durable user choice, supplied by the indexed-track IPC boundary. */
+    pendingLyric?: ResolvedLyric
   } = {}
 ): Promise<ResolvedLyric> {
   const allowOnline = options.allowOnline !== false
@@ -327,7 +329,8 @@ export async function resolveLocalLyric(
     const until = allowOnline ? state.expiresAt : state.staleUntil
     if (state.fetchedAt === undefined || until === undefined || now < state.fetchedAt || now >= until) cached = undefined
   }
-  if (cached?.localVersion === localVersion && cached.value.source !== 'sidecar') return cached.value
+  if (cached?.localVersion === localVersion && cached.value.source !== 'sidecar' &&
+    (!deps.pendingLyric || cached.value.source === 'embedded')) return cached.value
 
   // A rescan is not required to notice freshly written embedded tags. A cache
   // primed by the picker has no file stamp, so probe local sources first too.
@@ -339,6 +342,13 @@ export async function resolveLocalLyric(
     }
     cacheSet(key, resolved, localVersion)
     return resolved
+  }
+  // A saved choice is user data, independent of volatile caches and provider
+  // revisions. Local files still win; a read must not re-stage or cache it.
+  if (deps.pendingLyric?.asset?.pending && deps.pendingLyric.lyric.trim()) {
+    // Keep supplemental text still available in this instance's chosen result.
+    if (cached?.value.asset?.pending && cached.value.lyric === deps.pendingLyric.lyric) return cached.value
+    return deps.pendingLyric
   }
   if (cached && cached.localVersion === undefined && cached.value.source !== 'sidecar' && cached.value.source !== 'embedded') {
     cacheSet(key, cached.value, localVersion)

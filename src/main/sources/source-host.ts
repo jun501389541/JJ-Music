@@ -31,12 +31,17 @@ import { installBrowserShims } from './browser-shims'
 import { describeScript } from './script-header'
 import { readFileSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { getSystemErrorName } from 'node:util'
+import { scheduleScratchReap } from './source-scratch'
 
 /* ------------------------------------------------------------------ *
  * Worker payload
  * ------------------------------------------------------------------ */
 
 interface HostInit {
+  /** Actual app process, independent of the detached runas wrapper's parent. */
+  ownerPid?: number
+  scratchToken?: string
   script: string
   env: 'desktop' | 'mobile'
   /** The custom-source API version scripts branch on. */
@@ -670,6 +675,16 @@ target.console = {
  * the user's privileges. What it removes is the easy, common path — and it
  * turns a machine-killing action into a logged, contained failure.
  */
+// Retain private native operations before lockdown. Capturing process.kill or
+// process.exit alone is insufficient: those wrappers call the process._kill /
+// reallyExit properties that lockdown subsequently replaces with denied stubs.
+const nativeProcess = process as typeof process & {
+  _kill(pid: number, signal: number): number
+  reallyExit(code: number): never
+}
+const probeOwner = nativeProcess._kill.bind(process)
+const exitHost = nativeProcess.reallyExit.bind(process)
+
 function lockDownProcess(): void {
   const denied = (name: string) => (): never => {
     throw new Error(`音源已被禁止访问 ${name}（安全限制）`)
@@ -862,6 +877,28 @@ function handleRequest(message: { type: string; id?: number; payload?: unknown }
 }
 
 if (scratchDir) {
+  const ownerPid = init.ownerPid
+  if (Number.isInteger(ownerPid) && ownerPid! > 0 && ownerPid !== process.pid) {
+    const checkOwner = (): void => {
+      try {
+        // Signal 0 only queries existence. In particular EPERM is not death,
+        // and neither event-loop stalls nor clock jumps can expire a lease.
+        const status = probeOwner(ownerPid!, 0)
+        // libuv's Windows errno numbers differ from os.constants.errno.
+        if (status < 0 && getSystemErrorName(status) === 'ESRCH') {
+          if (typeof init.scratchToken === 'string') scheduleScratchReap({
+            directory: scratchDir, token: init.scratchToken, ownerPid: ownerPid!, childPid: process.pid
+          })
+          exitHost(0)
+        }
+      } catch {
+        // An unsupported probe must never terminate a healthy source.
+      }
+    }
+    checkOwner()
+    const ownerTimer = setInterval(checkOwner, 1000)
+    ownerTimer.unref()
+  }
   // File mode: the parent cannot push messages over IPC, so requests arrive as
   // `req-<id>.json` files. `fs.watch` on the directory is one watch for all
   // requests; each event is debounced by re-reading the directory and tracking

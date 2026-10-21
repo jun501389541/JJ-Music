@@ -41,6 +41,10 @@ import { coverSidecarPathFor, sidecarPathFor } from './asset-files'
 import { writeFileAtomic } from '../store/json-file'
 import { releaseFileForWrite } from '../media/file-release'
 import { saveSidecar } from './lyric-service'
+import { PathTaskQueue } from './path-task-queue'
+
+const writes = new PathTaskQueue()
+export async function flushAssetWrites(): Promise<void> { await writes.flush() }
 
 const EMBEDDED_LABEL = '文件内嵌'
 const SIDECAR_LABEL = '同目录文件'
@@ -83,6 +87,13 @@ function hasMetadataFields(patch: TagPatch): boolean {
  * has not been published under its final name yet.
  */
 export async function exportAssets(input: AssetExportInput): Promise<AssetExportResult> {
+  const paths = [input.audioPath, sidecarPathFor(input.audioPath)]
+  if (input.stagingPath) paths.push(input.stagingPath)
+  if (input.patch.cover) paths.push(coverSidecarPathFor(input.audioPath, input.patch.cover.mimeType))
+  return writes.run(paths, () => exportAssetsNow(input))
+}
+
+async function exportAssetsNow(input: AssetExportInput): Promise<AssetExportResult> {
   const { audioPath, patch } = input
   const targets = input.to?.length ? input.to : DEFAULT_TARGETS
   const assets: TrackAssets = {}

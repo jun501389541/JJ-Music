@@ -39,6 +39,24 @@ test('automatic cache maintenance preserves a pending choice', async () => {
     assert.equal((await resolveLocalLyric(track, { allowOnline: false })).lyric, '[00:01]chosen')
   })
 })
+
+test('durable pending choice resolves without cache or network and current local files still win', async () => {
+  await fixture(async track => {
+    const pendingLyric = { lyric: '[00:01]durable choice', source: 'online', synchronized: true, asset: { origin: 'remote', pending: true } }
+    let searched = 0
+    const deps = { pendingLyric, search: async () => { searched++; return [] } }
+    assert.equal((await resolveLocalLyric(track, { allowOnline: false }, deps)).lyric, pendingLyric.lyric)
+    primeLyricCache(track.id, { lyric: '[00:01]automatic cache', source: 'online', synchronized: true })
+    assert.equal((await resolveLocalLyric(track, {}, deps)).lyric, pendingLyric.lyric)
+    assert.equal(searched, 0)
+    primeLyricCache(track.id, { ...pendingLyric, tlyric: '[00:01]chosen translation' })
+    assert.equal((await resolveLocalLyric(track, {}, deps)).tlyric, '[00:01]chosen translation')
+    assert.equal((await writeTags(track.path, { lyrics: '[00:01]local tags' })).written, true)
+    assert.equal((await resolveLocalLyric(track, {}, deps)).source, 'embedded')
+    await writeFile(sidecarPathFor(track.path), '[00:01]local sidecar')
+    assert.equal((await resolveLocalLyric(track, {}, deps)).source, 'sidecar')
+  })
+})
 test('source lifecycle invalidation preserves platform auto lyrics and confirmed pending choices',async()=>{
   for(const kind of ['platform','script','pending'])await fixture(async track=>{
     primeLyricCache(track.id,{lyric:'[00:01]kept',source:'online',synchronized:true,asset:{origin:'remote',provider:kind==='pending'?'script':kind,pending:kind==='pending'}})

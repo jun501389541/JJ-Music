@@ -32,6 +32,7 @@
  */
 
 import { fork } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -342,7 +343,9 @@ export class SourceRuntimeHost {
     const scriptPath = join(scratchDir, 'script.js')
     writeFileSync(scriptPath, scriptSource, 'utf8')
     const initPath = join(scratchDir, 'init.json')
-    writeFileSync(initPath, JSON.stringify(this.callbacks.buildInit(api)), 'utf8')
+    const scratchToken = randomUUID()
+    writeFileSync(join(scratchDir, '.jj-owner.json'), JSON.stringify({ schema: 1, directory: scratchDir, token: scratchToken, ownerPid: process.pid }), { flag: 'wx' })
+    writeFileSync(initPath, JSON.stringify({ ...this.callbacks.buildInit(api), ownerPid: process.pid, scratchToken }), 'utf8')
 
     const restricted = this.transport === 'auto' ? supportsRestrictedLaunch() : this.transport === 'file'
     const state: RuntimeState = {

@@ -9,6 +9,8 @@ import { canWriteTags } from '../library/tag-writer'
 import { exportAssets } from '../library/asset-export'
 import { readBounded } from '../online/read-bounded'
 import { COVER_HOSTS } from '../online/cover-fetch'
+import type { AuxiliaryRequests } from '../online/auxiliary-requests'
+import { onlineContext, onlineHttpFailure, OnlineRequestError } from '../online/reliability-policy'
 import { parseJsonLoose, writeJsonAtomic } from '../store/json-file'
 
 export function audioExtension(container: string, codec: string): string {
@@ -59,6 +61,7 @@ export function mergeLyrics(lyrics: LyricResult, translation: boolean, romanizat
 }
 
 interface Dependencies {
+  auxiliary?: AuxiliaryRequests
   settings: () => AppSettings
   defaultFolder: string
   resolve: (track: OnlineMusicInfo, quality: Quality) => Promise<{
@@ -172,6 +175,12 @@ export class DownloadManager {
     const task = this.tasks.find(item => item.id === id)
     if (!task || task.status !== 'completed' || !task.path) throw Error('只有已完成的下载文件可以入库')
     if (!this.deps.importFile) throw Error('曲库入库服务暂不可用')
+    // completed commits the audio, while its LRC may still be publishing. Let
+    // run() finish assets and its automatic import before scanning on demand.
+    await this.settled.get(id)
+    if (this.closing) throw Error('播放器正在退出')
+    if (this.removing.has(id)) throw Error('下载记录正在移除，请稍后重试入库')
+    if (!this.tasks.includes(task)) throw Error('这条下载记录已经不存在了')
     await this.importCompleted(task)
     if (task.libraryStatus === 'failed') throw Error(task.libraryError || '曲库入库失败')
   }
@@ -457,11 +466,18 @@ export class DownloadManager {
           if (!allowedHosts) throw Error('该平台没有可钉的封面域名')
           const url=await abortable(this.deps.cover(task.track),signal)
           if (!/^https?:\/\//i.test(url)) throw Error('无封面')
-          const res=await http(url,{signal:AbortSignal.any([signal,AbortSignal.timeout(15000)]),allowedHosts})
-          const data=await readBounded(res,10*1024*1024)
-          const mimeType=data[0]===0xff && data[1]===0xd8 ? 'image/jpeg' : data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? 'image/png' : ''
-          if (!mimeType) throw Error('封面格式不支持')
-          cover={data,mimeType}
+          const coverSignal = AbortSignal.any([signal,AbortSignal.timeout(15000)])
+          const load = async (requestSignal: AbortSignal): Promise<{ data: Buffer; mimeType: string }> => {
+            const res=await http(url,{signal:requestSignal,allowedHosts})
+            if (!res.ok) { await res.body?.cancel(); throw onlineHttpFailure(res, onlineContext(task.track.source, 'downloadCover')) }
+            const data=await readBounded(res,10*1024*1024)
+            const mimeType=data[0]===0xff && data[1]===0xd8 ? 'image/jpeg' : data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? 'image/png' : ''
+            if (!mimeType) throw new OnlineRequestError({ ...onlineContext(task.track.source, 'downloadCover'), code: 'schemaChanged' })
+            return {data,mimeType}
+          }
+          cover = this.deps.auxiliary
+            ? await this.deps.auxiliary.run(task.track.source, 'downloadCover', load, { signal: coverSignal })
+            : await load(coverSignal)
         } catch { task.warnings.push('封面获取失败或格式不支持') }
       }
       signal.throwIfAborted()

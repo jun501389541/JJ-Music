@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { writeFileAtomic } from '../store/json-file'
 import type { CoverBytes } from './cover-fetch'
 import { rasterMime } from './image-content'
+import { ONLINE_CACHE_BYTES } from './cache-budget'
 
 export interface CoverRef { hash: string; size: number; mimeType: string }
 export function validCoverRef(value: unknown): value is CoverRef {
@@ -63,8 +64,8 @@ export class CoverByteStore {
   }
   private async trim(incoming: number): Promise<void> {
     const used = (): number => [...this.files.values()].reduce((n, v) => n + v.size, 0)
-    while (this.files.size && used() + incoming > (this.options.maxBytes ?? 192 * 1024 * 1024)) await this.remove(this.files.keys().next().value!)
-    if (incoming > (this.options.maxBytes ?? 192 * 1024 * 1024)) throw new Error('封面超过缓存容量')
+    while (this.files.size && used() + incoming > (this.options.maxBytes ?? ONLINE_CACHE_BYTES.coverBytes)) await this.remove(this.files.keys().next().value!)
+    if (incoming > (this.options.maxBytes ?? ONLINE_CACHE_BYTES.coverBytes)) throw new Error('封面超过缓存容量')
   }
   async put(image: CoverBytes): Promise<CoverRef> {
     const bytes = new Uint8Array(image.data)

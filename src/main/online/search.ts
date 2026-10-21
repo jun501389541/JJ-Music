@@ -141,7 +141,7 @@ export interface SearchPage {
 export interface SearchProvider {
   id: SourceId
   name: string
-  search(keyword: string, page: number, signal?: AbortSignal): Promise<SearchPage>
+  search(keyword: string, page: number, signal?: AbortSignal, auxiliary?: import('./auxiliary-requests').AuxiliaryRequests): Promise<SearchPage>
 }
 
 /* ------------------------------------------------------------------ *
@@ -322,17 +322,23 @@ const NETEASE_TIERS: Array<readonly [string, Quality]> = [
  */
 const NETEASE_DETAIL_BATCH = 100
 
-export async function fetchNeteaseDetails(ids: number[], signal?: AbortSignal): Promise<Map<number, NeteaseDetail>> {
+export async function fetchNeteaseDetails(ids: number[], signal?: AbortSignal, auxiliary?: import('./auxiliary-requests').AuxiliaryRequests): Promise<Map<number, NeteaseDetail>> {
   const out = new Map<number, NeteaseDetail>()
   const unique = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))]
   for (let offset = 0; offset < unique.length; offset += NETEASE_DETAIL_BATCH) {
-    const batch = await fetchNeteaseDetailBatch(unique.slice(offset, offset + NETEASE_DETAIL_BATCH), signal)
+    let batch: Map<number, NeteaseDetail>
+    try {
+      const ids = unique.slice(offset, offset + NETEASE_DETAIL_BATCH)
+      batch = auxiliary
+        ? await auxiliary.run('wy', 'trackDetail', s => fetchNeteaseDetailBatch(ids, s, true), { signal })
+        : await fetchNeteaseDetailBatch(ids, signal)
+    } catch { if (signal?.aborted) break; else continue }
     for (const [id, detail] of batch) out.set(id, detail)
   }
   return out
 }
 
-async function fetchNeteaseDetailBatch(ids: number[], signal?: AbortSignal): Promise<Map<number, NeteaseDetail>> {
+async function fetchNeteaseDetailBatch(ids: number[], signal?: AbortSignal, reportFailure = false): Promise<Map<number, NeteaseDetail>> {
   const out = new Map<number, NeteaseDetail>()
   if (ids.length === 0) return out
 
@@ -349,7 +355,8 @@ async function fetchNeteaseDetailBatch(ids: number[], signal?: AbortSignal): Pro
         album?: { picUrl?: string }
       } & Partial<Record<string, { size?: number | string } | null>>>
     }
-    for (const song of json.songs ?? []) {
+    if (!Array.isArray(json.songs)) throw new SyntaxError('Invalid song detail response')
+    for (const song of json.songs) {
       if (!song.id) continue
       const pic = song.album?.picUrl
       const sizes: Partial<Record<Quality | 'hires', number>> = {}
@@ -364,7 +371,8 @@ async function fetchNeteaseDetailBatch(ids: number[], signal?: AbortSignal): Pro
         qualitys: buildQualitys(sizes)
       })
     }
-  } catch {
+  } catch (error) {
+    if (reportFailure) throw error
     /* A failed detail lookup is not an error the UI should surface. */
   }
   return out
@@ -373,7 +381,7 @@ async function fetchNeteaseDetailBatch(ids: number[], signal?: AbortSignal): Pro
 const neteaseProvider: SearchProvider = {
   id: 'wy',
   name: '网易云音乐',
-  async search(keyword, page, signal) {
+  async search(keyword, page, signal, auxiliary) {
     const offset = (page - 1) * 20
     const url =
       'https://music.163.com/api/search/get/web?' +
@@ -402,7 +410,7 @@ const neteaseProvider: SearchProvider = {
     // has. Both used to be guessed here — covers because the search response omits
     // them, qualities because availability is per-track only.
     const details = await fetchNeteaseDetails(
-      songs.map((s) => Number(s.id)).filter((id) => Number.isFinite(id) && id > 0), signal
+      songs.map((s) => Number(s.id)).filter((id) => Number.isFinite(id) && id > 0), signal, auxiliary
     )
 
     return {
@@ -767,7 +775,8 @@ export async function searchOnline(
   source: SourceId,
   keyword: string,
   page = 1,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  auxiliary?: import('./auxiliary-requests').AuxiliaryRequests
 ): Promise<SearchPage> {
   const provider = PROVIDERS.find((item) => item.id === source)
   if (!provider) {
@@ -775,7 +784,7 @@ export async function searchOnline(
   }
   const trimmed = keyword.trim()
   if (!trimmed) return { list: [], total: 0, allPage: 0 }
-  return provider.search(trimmed, page, signal)
+  return provider.search(trimmed, page, signal, auxiliary)
 }
 
 /** Search every provider in parallel; failed platforms are reported, not fatal. */

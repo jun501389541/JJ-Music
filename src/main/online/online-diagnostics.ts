@@ -1,10 +1,11 @@
 import { writeJsonAtomic } from '../store/json-file'
 import { readFile, stat } from 'node:fs/promises'
+import { ONLINE_CACHE_BYTES } from './cache-budget'
 
 type EventInput = Record<string, unknown>
 const enumFields: Record<string, readonly string[]> = {
   platform: ['wy', 'tx', 'kw', 'kg', 'mg', 'all'],
-  capability: ['search', 'hotWords', 'artistDetail', 'albumDetail', 'lyric', 'cover', 'playlist', 'musicUrl'],
+  capability: ['search', 'hotWords', 'artistDetail', 'albumDetail', 'lyric', 'cover', 'playlist', 'musicUrl', 'artistImage', 'trackDetail', 'downloadCover'],
   stage: ['catalog', 'cache', 'resolve', 'media', 'initialize', 'manual'],
   code: ['cancelled', 'network', 'timeout', 'rateLimited', 'cooling', 'authRequired', 'forbidden', 'notFound', 'qualityUnavailable', 'unsupported', 'schemaChanged', 'providerUnavailable', 'urlExpired', 'cacheIO', 'unknown'],
   cacheState: ['fresh', 'stale', 'miss'],
@@ -12,6 +13,7 @@ const enumFields: Record<string, readonly string[]> = {
 }
 /** Rebuild every record on capture AND export. No arbitrary message or URL ever survives. */
 function safeEvent(input: EventInput): EventInput {
+  input = { ...input, capability: input.capability === 'lyrics' ? 'lyric' : input.capability === 'playlistImport' ? 'playlist' : input.capability }
   const out: EventInput = {}
   for (const [key, allowed] of Object.entries(enumFields)) if (allowed.includes(String(input[key]))) out[key] = input[key]
   for (const key of ['requestId', 'intentId', 'providerId']) {
@@ -41,7 +43,7 @@ export class OnlineDiagnostics {
   async load(): Promise<void> {
     if (!this.options.file) return
     try {
-      if ((await stat(this.options.file)).size > 2 * 1024 * 1024) return
+      if ((await stat(this.options.file)).size > ONLINE_CACHE_BYTES.diagnostics) return
       const value = JSON.parse(await readFile(this.options.file, 'utf8'))
       if (value.schema === 1 && Array.isArray(value.events)) this.events = value.events.slice(-500).filter((e: unknown) => e && typeof e === 'object').map(safeEvent)
     } catch { /* Missing/corrupt diagnostic data never prevents startup. */ }
@@ -49,7 +51,7 @@ export class OnlineDiagnostics {
   record(input: EventInput): void {
     if (!this.enabled) return
     this.events.push(safeEvent({ ...input, at: (this.options.now ?? Date.now)() }))
-    while (this.events.length > 500 || Buffer.byteLength(JSON.stringify(this.events)) > 2 * 1024 * 1024) this.events.shift()
+    while (this.events.length > 500 || Buffer.byteLength(JSON.stringify(this.events)) > ONLINE_CACHE_BYTES.diagnostics - 128) this.events.shift()
     this.save()
   }
   export(): { schema: 1; events: EventInput[] } { return { schema: 1, events: this.events.map(safeEvent) } }

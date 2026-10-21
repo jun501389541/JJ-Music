@@ -187,10 +187,10 @@ export class ArtistImageStore {
       console.warn('艺术家头像获取失败', name, error instanceof Error ? error.message : error)
       throw error
     }
-    if (!found) return this.remember(name, null)
-    if (this.deps.allowsArtistImage && !this.deps.allowsArtistImage(found.source)) {
+    if (this.deps.allowsArtistImage && !this.deps.allowsArtistImage(found?.source)) {
       throw new Error('source admission revoked')
     }
+    if (!found) return this.remember(name, null)
 
     // `found.url` is a string out of a platform's JSON, so it is pinned to that
     // platform's own CDN the way `online/cover-fetch.ts` pins a search result's:
@@ -210,6 +210,9 @@ export class ArtistImageStore {
         allowedHosts,
         headers: { Referer: platformSite[found.source] ?? '', 'User-Agent': 'Mozilla/5.0' }
       })
+      if (this.deps.allowsArtistImage && !this.deps.allowsArtistImage(found.source)) {
+        throw new Error('source admission revoked')
+      }
       saved = await this.deps.saveCover(new Uint8Array(body), contentType ?? '')
     } catch (error) {
       console.warn('艺术家头像图片下载失败', name, error instanceof Error ? error.message : error)
@@ -218,6 +221,9 @@ export class ArtistImageStore {
     // A portrait the platforms pointed at but that could not be written is not
     // "this artist has no photo" either, so it is a failure and not a miss.
     if (!saved) throw new Error('头像保存失败')
+    if (this.deps.allowsArtistImage && !this.deps.allowsArtistImage(found.source)) {
+      throw new Error('source admission revoked')
+    }
     return this.remember(name, saved, found.source)
   }
 

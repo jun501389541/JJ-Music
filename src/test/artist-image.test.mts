@@ -18,6 +18,15 @@ function fake(routes) {
   return { http, seen }
 }
 
+function emptyArtistResponse(url) {
+  const address = String(url)
+  if (address.includes('migu.cn')) return new Response('[]')
+  if (address.includes('client_search_cp')) return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+  if (address.includes('search/get/web')) return new Response(JSON.stringify({ result: { songs: [] } }))
+  if (address.includes('song_search_v2')) return new Response(JSON.stringify({ data: { lists: [] } }))
+  throw new Error('unexpected artist endpoint')
+}
+
 test('艺术家名字匹配：拼写差异要认，两个字的同名近似不能认', () => {
   assert.equal(artistNameMatches('周杰伦', '周杰伦'), true)
   assert.equal(artistNameMatches('周杰伦', 'Jay Chou 周杰伦'), true)
@@ -49,7 +58,7 @@ test('歌手头像只会查询允许的平台', async () => {
   const seen = []
   const http = async (input) => {
     seen.push(String(input))
-    return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+    return new Response(JSON.stringify({ data: { lists: [] } }))
   }
 
   assert.equal(await resolveArtistImage('周杰伦', http, ['kg']), null)
@@ -136,7 +145,7 @@ test('酷狗的头像模板要填尺寸；平台都没有结果时返回空而�
   assert.equal(found.url, 'http://singerimg.kugou.com/uploadpic/softhead/320/x.jpg')
 
   const none = fake([['client_search_cp', { data: { song: { list: [{ singer: [{ mid: 'x', name: '路人' }] }] } } }]])
-  assert.equal(await resolveArtistImage('周杰伦', none.http), null)
+  assert.equal(await resolveArtistImage('周杰伦', none.http, ['tx']), null)
   assert.ok(none.seen.length >= 1, '未命中也要真的问过平台')
 
   // 空白与超长名字不发任何请求：前者没意义，后者是给平台喂垃圾。
@@ -176,7 +185,7 @@ test('头像按名字落盘、记住命中也记住没命中，刷新才会再�
 
   // 没找到的也要记住，否则每次进这页都会替平台重跑一遍搜索。
   const miss = fake([])
-  const missed = await setup({ fetch: async () => { miss.seen.push('x'); return new Response(JSON.stringify({ data: { song: { list: [] } } })) }, getBytes: async () => ({ body: Buffer.from(''), contentType: '' }) })
+  const missed = await setup({ fetch: async url => { miss.seen.push('x'); return emptyArtistResponse(url) }, getBytes: async () => ({ body: Buffer.from(''), contentType: '' }) })
   assert.equal(await missed.store.image('查无此人'), null)
   const afterFirst = miss.seen.length
   assert.equal(await missed.store.image('查无此人'), null)
@@ -204,11 +213,55 @@ test('四家平台全都答不上时抛错，而不是把故障写成"这位歌�
   await assert.rejects(() => resolveArtistImage('周杰伦', http), /connect timeout/)
   assert.equal(seen.length, 4, '每家都问过了才叫没答上')
 
-  // 只要有一家真的答了，"没有"就是可信结论而不是故障。
+  // 一家合法返回空结果，不能掩盖另一家失败：未查询完的平台也可能有头像。
   const partly = async (url) => (String(url).includes('migu.cn')
     ? Promise.reject(new Error('connect timeout'))
     : new Response(JSON.stringify({ data: { song: { list: [] } } })))
-  assert.equal(await resolveArtistImage('周杰伦', partly), null)
+  await assert.rejects(() => resolveArtistImage('周杰伦', partly, ['mg', 'tx']), /connect timeout/)
+})
+
+test('所有启用平台都成功返回合法空结果时仍是可信未命中', async () => {
+  const seen = []
+  const http = async url => {
+    seen.push(String(url))
+    if (String(url).includes('migu.cn')) return new Response(JSON.stringify([]))
+    return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+  }
+  assert.equal(await resolveArtistImage('周杰伦', http, ['mg', 'tx']), null)
+  assert.equal(seen.length, 2)
+})
+
+test('部分平台失败不写入永久无头像缓存；恢复后仍可找到并保存头像', async () => {
+  for (const failingSource of ['mg', 'tx']) {
+    let restored = false
+    const calls = []
+    const { dir, store } = await setup({
+      resolveArtistImage: (name, http) => resolveArtistImage(name, http, ['mg', 'tx']),
+      fetch: async url => {
+        calls.push(String(url))
+        const source = String(url).includes('migu.cn') ? 'mg' : 'tx'
+        if (source !== failingSource) return emptyArtistResponse(url)
+        if (!restored) throw new Error('connect timeout')
+        if (source === 'mg') {
+          return new Response(JSON.stringify([{ singerList: [{ name: '周杰伦', img: 'https://d.musicapp.migu.cn/p.jpg' }] }]))
+        }
+        return new Response(JSON.stringify({ data: { song: { list: [{ singer: [{ name: '周杰伦', mid: 'restored' }] }] } } }))
+      },
+      getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' })
+    })
+
+    try {
+      await assert.rejects(() => store.image('周杰伦'), /connect timeout/)
+      assert.equal(store.peek('周杰伦'), undefined, '部分失败不能写入负缓存')
+
+      restored = true
+      assert.equal(await store.image('周杰伦'), join(dir, 'covers', 'abc.jpg'))
+      assert.equal(store.peek('周杰伦'), join(dir, 'covers', 'abc.jpg'))
+      assert.equal(calls.length, failingSource === 'mg' ? 3 : 4, '恢复后应重新查找，而不是命中先前缓存的空结果')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
 })
 
 test('艺术家搜索返回后若准入已撤销，就不再下载头像图片', async () => {
@@ -229,6 +282,68 @@ test('艺术家搜索返回后若准入已撤销，就不再下载头像图片',
   assert.equal(imageRequests, 0)
   assert.equal(store.peek('周杰伦'), undefined, 'a revoked lookup must not be cached as a miss')
   await rm(dir, { recursive: true, force: true })
+})
+
+test('头像空结果返回时若准入已撤销，刷新保留原头像而不写负缓存', async () => {
+  let admitted = true
+  let refresh = false
+  const { dir, store } = await setup({
+    allowsArtistImage: () => admitted,
+    resolveArtistImage: async () => {
+      if (refresh) { admitted = false; return null }
+      return { url: 'https://y.gtimg.cn/portrait.jpg', source: 'tx' }
+    },
+    getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' })
+  })
+  try {
+    const original = await store.image('周杰伦')
+    refresh = true
+    await assert.rejects(() => store.image('周杰伦', true), /source admission revoked/)
+    assert.equal(store.peek('周杰伦'), original)
+    const persisted = JSON.parse(await readFile(join(dir, 'artist-images.json'), 'utf8'))
+    assert.equal(persisted['周杰伦'].path, original)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('头像下载完成时指定平台准入已撤销，不保存字节且不缓存结果', async () => {
+  let admitted = true
+  const { dir, store, saved } = await setup({
+    allowsArtistImage: source => source !== 'tx' || admitted,
+    resolveArtistImage: async () => ({ url: 'https://y.gtimg.cn/portrait.jpg', source: 'tx' }),
+    getBytes: async () => {
+      admitted = false
+      return { body: Buffer.from('jpegdata'), contentType: 'image/jpeg' }
+    }
+  })
+  try {
+    await assert.rejects(() => store.image('周杰伦'), /source admission revoked/)
+    assert.equal(saved.length, 0)
+    assert.equal(store.peek('周杰伦'), undefined)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('头像保存完成时指定平台准入已撤销，不发布迟到结果并允许重试', async () => {
+  let admitted = true
+  let revoke = true
+  const { dir, store } = await setup({
+    allowsArtistImage: source => source !== 'tx' || admitted,
+    resolveArtistImage: async () => ({ url: 'https://y.gtimg.cn/portrait.jpg', source: 'tx' }),
+    getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' }),
+    saveCover: async () => {
+      if (revoke) admitted = false
+      const file = join(dir, 'saved.jpg')
+      await writeFile(file, 'jpegdata')
+      return file
+    }
+  })
+  try {
+    await assert.rejects(() => store.image('周杰伦'), /source admission revoked/)
+    assert.equal(store.peek('周杰伦'), undefined)
+    assert.equal(await readFile(join(dir, 'saved.jpg'), 'utf8'), 'jpegdata', '不删除可能共享的已保存文件')
+    admitted = true
+    revoke = false
+    assert.equal(await store.image('周杰伦'), join(dir, 'saved.jpg'))
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 test('查询失败的头像不会记成永久未命中，网络恢复后还能拿到', async () => {
@@ -252,14 +367,104 @@ test('查询失败的头像不会记成永久未命中，网络恢复后还能�
   await rm(dir, { recursive: true, force: true })
 })
 
+test('HTTP拒绝和无效JSON不会记成永久未命中；有效响应恢复后还能拿到头像', async () => {
+  let attempts = 0
+  const { dir, store } = await setup({
+    fetch: async () => {
+      attempts += 1
+      if (attempts <= 4) return new Response('{"error":"forbidden"}', { status: 403 })
+      if (attempts <= 8) return new Response('<html>service unavailable</html>', { status: 200 })
+      return new Response(JSON.stringify([{ singerList: [{ name: '周杰伦', img: 'https://d.musicapp.migu.cn/p.jpg' }] }]))
+    },
+    getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' })
+  })
+
+  try {
+    await assert.rejects(() => store.image('周杰伦'), error => error.failure?.httpStatus === 403)
+    assert.equal(store.peek('周杰伦'), undefined, 'HTTP拒绝不能写入永久负缓存')
+    await assert.rejects(() => store.image('周杰伦'), error => error.failure?.code === 'schemaChanged')
+    assert.equal(store.peek('周杰伦'), undefined, '无效JSON不能写入永久负缓存')
+
+    assert.equal(await store.image('周杰伦'), join(dir, 'covers', 'abc.jpg'))
+    assert.equal(attempts, 9, '故障恢复后应重新查询并保存头像')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('200错误信封或缺失平台结果数组不会被缓存成没有头像', async () => {
+  let attempts = 0
+  const { dir, store } = await setup({
+    fetch: async () => {
+      attempts += 1
+      if (attempts <= 4) return new Response(JSON.stringify({ code: -1, message: 'upstream error' }))
+      return new Response(JSON.stringify([{ singerList: [{ name: '周杰伦', img: 'https://d.musicapp.migu.cn/p.jpg' }] }]))
+    },
+    getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' })
+  })
+
+  try {
+    await assert.rejects(() => store.image('周杰伦'))
+    assert.equal(attempts, 4, '四家平台的 200 错误信封都应按结构失败处理')
+    assert.equal(store.peek('周杰伦'), undefined, '服务错误不能落成永久负缓存')
+
+    assert.equal(await store.image('周杰伦'), join(dir, 'covers', 'abc.jpg'))
+    assert.equal(attempts, 5, '下一次查询应重新访问平台，并能在恢复后保存头像')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+async function assertDetailErrorDoesNotBecomeMiss(item) {
+  let detailCalls = 0
+  const { dir, store } = await setup({
+    resolveArtistImage: (name, http) => resolveArtistImage(name, http, [item.source]),
+    fetch: async url => {
+      if (String(url).includes(item.searchPath)) return new Response(JSON.stringify(item.search))
+      detailCalls += 1
+      return new Response(JSON.stringify(detailCalls === 1 ? item.failedDetail : item.goodDetail))
+    },
+    getBytes: async () => ({ body: Buffer.from('jpegdata'), contentType: 'image/jpeg' })
+  })
+
+  try {
+    await assert.rejects(() => store.image('周杰伦'), `${item.source}详情错误不能作为无头像成功`)
+    assert.equal(detailCalls, 1)
+    assert.equal(store.peek('周杰伦'), undefined, '详情失败不能落盘负缓存')
+
+    assert.equal(await store.image('周杰伦'), join(dir, 'covers', 'abc.jpg'))
+    assert.equal(detailCalls, 2, '详情恢复后必须重新查询并保存头像')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('网易云歌手详情错误不会写成永久无头像；恢复后仍可拿到', async () => {
+  await assertDetailErrorDoesNotBecomeMiss({
+    source: 'wy', searchPath: '/api/search/get/web',
+    search: { result: { songs: [{ artists: [{ id: 6452, name: '周杰伦' }] }] } },
+    failedDetail: { code: -1, message: 'upstream error' },
+    goodDetail: { artist: { picUrl: 'https://p1.music.126.net/abc/1099.jpg' } }
+  })
+})
+
+test('酷狗歌手详情错误不会写成永久无头像；恢复后仍可拿到', async () => {
+  await assertDetailErrorDoesNotBecomeMiss({
+    source: 'kg', searchPath: 'song_search_v2',
+    search: { data: { lists: [{ SingerId: 3520, SingerName: '周杰伦' }] } },
+    failedDetail: { error: 'upstream error' },
+    goodDetail: { data: { imgurl: 'https://singerimg.kugou.com/{size}/x.jpg' } }
+  })
+})
+
 test('指向已被删除文件的头像记录作废，而不是继续返回死路径', async () => {
   // `reloaded` needs the same fakes as the first store: it re-resolves, and a
   // missing `fetch` there used to send this suite out to the real platforms —
   // which passed or failed depending on what 周杰伦 happened to have that day.
   let answered = 0
-  const fetchNone = async () => {
+  const fetchNone = async url => {
     answered += 1
-    return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+    return emptyArtistResponse(url)
   }
   const getBytes = async () => ({ body: Buffer.from(''), contentType: '' })
   const { dir, store } = await setup({ fetch: fetchNone, getBytes })
@@ -313,13 +518,13 @@ test('批量预读一次网络都不发；预取只问没记录过的名字，�
   let peak = 0
   const { dir, store } = await setup({
     // 每家平台都"答了但没匹配"，于是这条被记成没头像——预取要的就是这种一次性结论。
-    fetch: async () => {
+    fetch: async url => {
       asks += 1
       inFlight += 1
       peak = Math.max(peak, inFlight)
       await new Promise(resolve => setTimeout(resolve, 20))
       inFlight -= 1
-      return new Response(JSON.stringify({ data: { song: { list: [] } } }))
+      return emptyArtistResponse(url)
     }
   })
   await store.image('已知歌手')
@@ -341,7 +546,7 @@ test('批量预读一次网络都不发；预取只问没记录过的名字，�
 test('一轮预取有上限，剩下的下一轮接着问', async () => {
   let asks = 0
   const { dir, store } = await setup({
-    fetch: async () => { asks += 1; return new Response(JSON.stringify({ data: { song: { list: [] } } })) }
+    fetch: async url => { asks += 1; return emptyArtistResponse(url) }
   })
   const many = Array.from({ length: 30 }, (_, index) => `歌手${index}`)
   await store.image('探针')

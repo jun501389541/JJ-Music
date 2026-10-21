@@ -61,6 +61,19 @@ jobs:
           }
       - run: npm ci
       - run: npm run dist
+      - name: Real NSIS fresh install and same-path upgrade on disposable runner
+        id: installer
+        shell: pwsh
+        run: ./tools/probe/or8-ci-installer.ps1
+      - name: Retain NSIS acceptance evidence
+        if: always() && steps.installer.outputs.report-dir != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: or8-ci-installer-${{ github.run_id }}
+          path: |
+            ${{ steps.installer.outputs.report-dir }}/report.json
+            ${{ steps.installer.outputs.report-dir }}/*.log
+          if-no-files-found: error
       - name: Sign and check the complete asset set
         shell: pwsh
         env:

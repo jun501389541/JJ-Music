@@ -9,6 +9,7 @@ import { OnlineDiagnostics } from './online-diagnostics'
 import { normalizeOnlineError, onlineContext, OnlineRequestError, runOnlineRequest, type RequestPolicyOptions } from './reliability-policy'
 import { CapabilityHealth } from './capability-health'
 import { rasterMime } from './image-content'
+import { ONLINE_CACHE_BYTES } from './cache-budget'
 
 const DAY = 86400_000, FRESH = 30 * DAY, MAX_AGE = 180 * DAY
 export interface AssetRequestOptions {
@@ -48,9 +49,9 @@ export class OnlineAssetCache {
     this.diagnostics = options.diagnostics ?? new OnlineDiagnostics()
     const file = (name: string): string | undefined => options.dataDir ? join(options.dataDir, 'cache/online/v1', name) : undefined
     const onIOError = (): void => this.diagnostics.record({ stage: 'cache', code: 'cacheIO' })
-    this.lyrics = new ResourceCache({ file: file('lyrics.json'), now: options.now, maxBytes: (options.lyricMaxBytes ?? 16 * 1024 * 1024) - 128,
+    this.lyrics = new ResourceCache({ file: file('lyrics.json'), now: options.now, maxBytes: (options.lyricMaxBytes ?? ONLINE_CACHE_BYTES.lyrics) - 128,
       validateStored: (key, value) => this.validKey(key, 'lyrics') && !!normalizeLyric(value) && JSON.stringify(normalizeLyric(value)) === JSON.stringify(value), onIOError })
-    this.covers = new ResourceCache({ file: file('covers.json'), now: options.now, maxBytes: 2 * 1024 * 1024 - 128,
+    this.covers = new ResourceCache({ file: file('covers.json'), now: options.now, maxBytes: ONLINE_CACHE_BYTES.coverIndex - 128,
       validateStored: (key, value) => this.validKey(key, 'cover') && validCoverRef(value), onIOError })
     this.bytes = new CoverByteStore({ dir: options.dataDir ? join(options.dataDir, 'library/covers/online-cache-v1') : undefined,
       maxBytes: options.coverMaxBytes, onIOError,

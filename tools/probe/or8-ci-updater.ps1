@@ -15,6 +15,11 @@ foreach ($name in @('RUNNER_TEMP', 'GITHUB_WORKSPACE', 'GITHUB_RUN_ID', 'APPDATA
 if (@(Get-Process -Name 'JJ Music', 'jj-music' -ErrorAction SilentlyContinue).Count) {
   throw 'Refusing existing JJ Music processes; nothing will be stopped'
 }
+foreach ($debugName in @('JJ_ALLOW_DEBUG_PORT', 'JJ_DEBUG_PORT')) {
+  if ($null -ne [Environment]::GetEnvironmentVariable($debugName, 'User')) {
+    throw "Refusing an existing runner user debug setting: $debugName"
+  }
+}
 $profile = Join-Path $env:APPDATA 'jj-music'
 foreach ($path in @($profile, (Join-Path $env:APPDATA '.jj-music-data-location.json'),
     (Join-Path $env:LOCALAPPDATA 'jj-music-updater'), (Join-Path $env:LOCALAPPDATA 'Programs/jj-music'))) {
@@ -59,6 +64,7 @@ $oldSetup = Join-Path $root 'JJ-Music-0.4.2-Setup-x64.exe'
 $installDir = Join-Path $root 'Installed/JJ Music'
 $appExe = Join-Path $installDir 'JJ Music.exe'
 $targetHash = '709387aef5fbc0fee15de5a2e24f0824d6e5b7f0ed678e13b8d9a672351cbe2c'
+$runnerDebugConfigured = $false
 try {
   Invoke-WebRequest -Uri 'https://github.com/jun501389541/JJ-Music/releases/download/v0.4.2/JJ-Music-0.4.2-Setup-x64.exe' -OutFile $oldSetup
   $oldHash = (Get-FileHash -LiteralPath $oldSetup -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -97,12 +103,27 @@ public static class Or8Windows {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wparam, IntPtr lparam);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr wparam, string lparam, uint flags, uint timeout, out IntPtr result);
+  public static void RefreshEnvironment() { IntPtr result; SendMessageTimeout(new IntPtr(0xffff), 0x001a, IntPtr.Zero, "Environment", 2, 5000, out result); }
   public static string Text(IntPtr hwnd) { var s=new StringBuilder(1024); GetWindowText(hwnd,s,s.Capacity); return s.ToString(); }
   public static string Class(IntPtr hwnd) { var s=new StringBuilder(256); GetClassName(hwnd,s,s.Capacity); return s.ToString(); }
   public static IntPtr[] Top(uint pid) { var a=new List<IntPtr>(); EnumWindows((h,d)=>{ uint p; GetWindowThreadProcessId(h,out p); if(p==pid && IsWindowVisible(h)) a.Add(h); return true; },IntPtr.Zero); return a.ToArray(); }
   public static IntPtr[] Children(IntPtr hwnd) { var a=new List<IntPtr>(); EnumChildWindows(hwnd,(h,d)=>{ a.Add(h); return true; },IntPtr.Zero); return a.ToArray(); }
 }
 '@
+  # NSIS StartApp delegates to the Windows shell, which can discard child-only
+  # environment variables. Opt in only this disposable runner user, restoring
+  # the previously absent values in finally. Never change product debug gates.
+  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+  $listener.Start()
+  $debugPort = $listener.LocalEndpoint.Port
+  $listener.Stop()
+  $runnerDebugConfigured = $true
+  [Environment]::SetEnvironmentVariable('JJ_ALLOW_DEBUG_PORT', '1', 'User')
+  [Environment]::SetEnvironmentVariable('JJ_DEBUG_PORT', [string]$debugPort, 'User')
+  [Or8Windows]::RefreshEnvironment()
+  Set-Content -LiteralPath (Join-Path $root 'debug-port.json') -Encoding utf8 -Value ([string]$debugPort)
+  Record 'disposable-user-debug-opt-in' @{ port = $debugPort; restoredOnExit = $true }
   # Hosted runners can expose both setup-node and preinstalled Node entries.
   $node = (Get-Command node -CommandType Application | Select-Object -First 1).Source
   if ($node -isnot [string] -or -not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'A single Node executable is required' }
@@ -170,6 +191,14 @@ public static class Or8Windows {
   $report.status = 'failed'; $report.error = $_.Exception.Message
   throw
 } finally {
+  if ($runnerDebugConfigured) {
+    [Environment]::SetEnvironmentVariable('JJ_ALLOW_DEBUG_PORT', $null, 'User')
+    [Environment]::SetEnvironmentVariable('JJ_DEBUG_PORT', $null, 'User')
+    [Or8Windows]::RefreshEnvironment()
+  }
+  $ownedProcesses = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $appExe } |
+    ForEach-Object { @{ pid = $_.ProcessId; parentPid = $_.ParentProcessId; version = [Diagnostics.FileVersionInfo]::GetVersionInfo($_.ExecutablePath).ProductVersion; commandLine = $_.CommandLine } })
+  $report.events += @{ stage = 'final-owned-app-processes'; time = (Get-Date -Format o); value = $ownedProcesses }
   $report.finished = Get-Date -Format o
   $report | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $reportPath -Encoding utf8
   foreach ($name in @('jj-music-u0-installer.log', 'jj-music-u0-init.log')) {

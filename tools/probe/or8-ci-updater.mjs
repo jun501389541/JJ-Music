@@ -5,7 +5,6 @@ import { spawn } from 'node:child_process'
 import { openSync, closeSync } from 'node:fs'
 import { readFile, writeFile, readdir, realpath, lstat } from 'node:fs/promises'
 import { join, resolve, dirname } from 'node:path'
-import { createServer } from 'node:net'
 
 // Refuse before writes or process creation, including direct invocation on a daily host.
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' ||
@@ -33,10 +32,8 @@ async function record(name, value) {
   stage = name; report.stages.push({ stage, time: new Date().toISOString(), value }); await persist()
 }
 function check(name, condition) { assert.ok(condition, name); report.checks.push(name) }
-const port = await new Promise((done, reject) => {
-  const server = createServer(); server.once('error', reject)
-  server.listen(0, '127.0.0.1', () => { const value = server.address().port; server.close(() => done(value)) })
-})
+const port = JSON.parse(await readFile(join(root, 'debug-port.json'), 'utf8').then(text => text.replace(/^\uFEFF/, '')))
+assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535, 'Owned supervisor selected a valid debug port')
 async function connect(timeout = 60_000) {
   const deadline = Date.now() + timeout
   let target

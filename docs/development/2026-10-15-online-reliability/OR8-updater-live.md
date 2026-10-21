@@ -16,6 +16,8 @@ PowerShell 与 Node 两个入口均在写文件、下载或创建进程之前拒
 
 官方基线通过实际 NSIS 以当前用户方式静默装入拥有的目录；验证版本及 NSIS 标记后，仅新建合成设置、待写入歌词和哨兵文件。启动时不传 `--user-data-dir`，让实际重启也采用相同的默认资料位置；生产数据位置 API 必须核对到该位置。仅显式启用 `JJ_ALLOW_DEBUG_PORT=1` 与随机回环端口 `JJ_DEBUG_PORT`，清除 `ELECTRON_RUN_AS_NODE` 和 `NODE_OPTIONS`。不加载真实音源、不试听音乐。
 
+NSIS的`StartApp`通过Windows Shell启动新版，可能不继承旧应用的进程环境。为观察这次实际重启，探针现同时临时设置一次性runner账户的上述两个User环境变量并广播Environment；预先拒绝已有值，finally删除并再次广播，整个runner随后销毁。端口由supervisor在回环地址临时分配，写入自有根，Node验证后使用；没有修改开发电脑环境、应用调试门禁或公开包，也不会手动启动新版。最终记录仅匹配本次安装exe路径的实际进程与版本。
+
 Node 使用旧版实际预加载桥读取状态、创建合成歌单，然后调用检查、下载与安装。下载完成须由生产服务进入 `ready`，并在拥有的更新缓存中找到唯一匹配固定官方摘要的安装器，之后才发出安装请求。
 
 生产 `quitAndInstall(false, true)` 可能显示 NSIS 界面。PowerShell 仅枚举可执行文件路径等于探针下载缓存请求、且文件摘要仍等于目标摘要的安装器进程窗口。只对这些窗口的可见、启用 Next/Install/Finish 按钮发送原生 BM_CLICK，并记录控件文本。不会向桌面发送键盘输入，不会操作其他窗口；未知界面、权限提示或不同进程形态将超时失败，保留已有证据。
@@ -46,3 +48,7 @@ CI artifact `or8-official-updater-<run_id>` 保留 14 天，包含：
 探针现对严格路径/摘要限定的同一个NSIS窗口先点击与baseline相同的“Only for me”单选项，并通过BM_GETCHECK确认选中，再前进；目录保护保持不变。另补失败后的child.unref，报告落盘后释放控制器句柄，保留应用供runner取证，不终止任何无关进程。两处经独立复核、语法/选择器和零安装句柄回归验证，真实重跑另记。
 
 继续只读核对固定依赖的 `app-builder-lib/templates/nsis/assistedInstaller.nsh`，确认交互安装的instFilesPre会在路径不含APP_FILENAME时追加应用子目录；`--updated`跳过目录页但不跳过该处理。静默`/D=.../Installed`基线没有经过交互目录规范化，与普通安装目录不同。验收基线现明确使用自有`Installed/JJ Music`，Node启动路径同步，使测试覆盖正常命名的旧安装目录；没有设置updater.installDirectory、追加目标安装器参数或修改公开Setup。非标准静默目录的保护拒绝仍作为边界保留。
+
+第三轮 [39612630667](https://github.com/jun501389541/JJ-Music/actions/runs/39612630667) 确认“Only for me”点击前后均为选中，但旧基线仍在`Installed`，同样在目录保护处拒绝，9项前置通过、重启未通过。artifact12350972184，SHA256 `0005d43c8b02606202835a3168b24c4b681324713232aff6fbb9a52de33032c9` 已下载核对并读取；此结果支持继续修正基线目录，不能记为完整升级通过。
+
+第四轮 [39614397601](https://github.com/jun501389541/JJ-Music/actions/runs/39614397601) 使用正常命名目录，安装器明确显示Installation Complete并由探针点击Finish，未再触发目录保护；控制器仍在等待重启CDP处失败，不能据安装成功认定新版资料核验通过。artifact12352491172，SHA256 `96cc0a1c16c0fd25326cc840ec5687df772849c6b47cdd17659b3b2e94d049fe` 已核对读取。基于固定NSIS源码的Shell启动路径补充上述临时账户调试观测；这是一项待重跑验证的原因判断。

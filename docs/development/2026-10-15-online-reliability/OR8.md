@@ -4,13 +4,15 @@
 
 2026-10-21：[v0.4.5](https://github.com/jun501389541/JJ-Music/releases/tag/v0.4.5) 已公开，完整CI、安装升级及远程资产核验通过，详情见 [交付总表](OR8-delivery-status.md)；下列矩阵保留各证据的适用边界。
 
+发布后继续按项验收：main已合入交付和首批验收工具，网易/QQ真实歌单UI及受控故障/绑定/快速按钮验收已有补充证据；21份源原件保持，两个显式更新入口均无有效候选。当前进度以[发布后验收](OR8-post-release-acceptance.md)为准。
+
 ## RR01–RR20
 
 “离线覆盖”仅表示所列受控路径，不能代替真实服务或人工操作。
 
 | 场景 | 离线证据 | 真实/人工状态 |
 | --- | --- | --- |
-| RR01 有旧值后超时/结构错误 | catalog-reliability、online-resource-cache，旧值带 stale 与安全错误 | 两平台目录各一次真实搜索通过；真实故障后的缓存UI未验收 |
+| RR01 有旧值后超时/结构错误 | catalog-reliability、online-resource-cache，旧值带 stale 与安全错误；生产艺术家页面受控503后保留旧曲目并显示stale提示，见[发布后验收](OR8-post-release-acceptance.md) | 两平台目录各一次真实搜索通过；真实上游故障后的缓存UI未验收 |
 | RR02 首次失败与合法空 | catalog-reliability、diagnostic-cli，miss/空结果不混淆 | 未验证实时空结果 |
 | RR03 远程歌单空/部分分页 | playlist-snapshot、playlist-refresh、OR6 合成 UI；完整候选才确认，空不自动清列表 | 真实网易22/22、QQ10/10生产模块预览/取消/应用通过，见[真实记录](OR8-live-delivery.md)；真实空/部分仍未制造 |
 | RR04 服务失败与单资源缺失 | online-capability-health、capability-health-integration，资源/档位不冷却整个平台 | 未制造真实限流/故障 |
@@ -21,14 +23,14 @@
 | RR09 地址/格式/拒绝/低档 | playback-reliability、source-media-proxy、player-regression，双时钟和原预算只恢复一次 | 实际遇到403、抓取失败及再次解析失败；HYW 两平台固定样本新增完整传输与严格FFmpeg解码通过，详见[全曲解码](OR8-full-decode.md)；16份历史媒体头通过源的24个平台组合完成8秒隔离Electron静音播放与流清理，详见[扩展播放复验](OR8-bulk-playback-attempt.md)；产品UI错误恢复、听感未验收 |
 | RR10 歌词失败/缓存/取消 | local-lyric-cache、online-asset-cache、online-capability-health | 待实际歌词服务 |
 | RR11 半开/手动限频 | online-capability-health、capability-health-integration、OR6 合成 UI | 无后台扫平台，未人工制造429 |
-| RR12 更新失败/停用/回退 | source-revision、source-updater、OR6 合成 UI，10 个运行版本回归 | HYW真实更新检查返回非脚本，无候选；实际更新/回退未执行 |
+| RR12 更新失败/停用/回退 | source-revision、source-updater、OR6 合成 UI，10 个运行版本回归 | 21原件复核不变，两个显式更新入口均notAScript，无合格候选；实际更新/回退未执行，见[源检查](OR8-source-updates.md) |
 | RR13 适配器修订/schema | catalog-reliability、online-resource-cache，旧修订不冒充新成功 | 0.4.5已发布；适配器新修订的真实缓存迁移未专门验收 |
 | RR14 敏感错误/报告 | online-diagnostics、diagnostic-check、diagnostic-cli、diagnostic-default；白名单重建 | 无上传，真实私有错误未采集 |
 | RR15 默认与显式真实模式 | diagnostic-default 进程守卫、diagnostic-cli 参数准入；默认不读日常源、不联网 | 用户扩大授权后，显式运行20份实际源，1份静态拒绝不执行 |
 | RR16 本地/手工/待写入 | local-lyric-cache、online-asset-cache、asset-export、OR6 合成 UI | 隔离生产UI66项、生成四格式54项通过，见[交付总表](OR8-delivery-status.md)；日常资料操作未验收 |
 | RR17 回拨/无效时间 | online-resource-cache、playback-reliability、player-regression | 用注入时钟验证，不修改系统时间 |
 | RR18 合成与真实分级 | diagnostic-check/default、source-update-state、OR6 UI；真实初始化/解析/音频头另计 | 真实首字节见下表；HYW 网易/QQ固定样本各完成全曲FFmpeg解码，24个组合的隔离Electron8秒短播通过；其他源全曲解码、身份/实际音质及听感仍未验收，见[全曲记录](OR8-full-decode.md)和[短播复验](OR8-bulk-playback-attempt.md) |
-| RR19 切歌/绑定/收藏 | player-regression、online-resolver、playback-router、provenance-persistence、scan-concurrency | 两平台固定样本在生产UI连续切歌、生产队列移动保持身份及停用后禁止新播放通过，见[交互记录](OR8-ui-playback.md)；混合收藏、单条移除和DOM拖拽另有66项隔离生产UI检查，见[混合记录](OR8-mixed-queue-favorites-ui.md)；跨源重绑定、物理拖拽与作者日常操作仍待验收 |
+| RR19 切歌/绑定/收藏 | player-regression、online-resolver、playback-router、provenance-persistence、scan-concurrency；受控源A/B的显式providerId切换、同曲重新绑定和快速DOM按钮通过，见[发布后验收](OR8-post-release-acceptance.md) | 两平台固定样本在生产UI连续切歌、生产队列移动保持身份及停用后禁止新播放通过，见[交互记录](OR8-ui-playback.md)；混合收藏、单条移除和DOM拖拽另有66项隔离生产UI检查，见[混合记录](OR8-mixed-queue-favorites-ui.md)；真实源跨源重绑定、物理拖拽与作者日常操作仍待验收 |
 | RR20 关闭/清除/用户资料 | online-diagnostics、online-asset-cache、OR6 合成 UI；关闭保护仍保留基础路径 | 待实际资料验收 |
 
 ## 人工验收顺序

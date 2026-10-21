@@ -4,8 +4,8 @@
 
 | 事项 | 当前实际结果 |
 | --- | --- |
-| 合并main | 原main与交付分支无分叉，已快进并推送main6093c75；后续工作在codex/online-reliability-followup |
-| 完整应用内更新 | 已实现一次性Windows CI专用探针，静态/拒绝检查通过；真实执行结果待CI，见[更新验收](OR8-updater-live.md) |
+| 合并main | 原main与交付分支无分叉，交付和首批验收工具已快进推送main至c6b35d1，主分支CI39609631541通过；探针修正继续在codex/online-reliability-followup验收 |
+| 完整应用内更新 | 官方旧版实际检查/下载及Setup摘要通过，第四轮安装器完成安装并点击Finish，但重启CDP未恢复，资料核验未通过；Shell调试观测修正已复核，重跑39616546568等待runner，见[更新验收](OR8-updater-live.md) |
 | QQ歌单真实UI | 官方公开目录选取10首歌单，生产UI导入→IPC移除一首→预览9→10→取消保持9→再次预览→确认应用恢复10，errors为空，自有profile移除 |
 | 可信源更新回退 | 21原始文件哈希均保持；1份准入阻止，18份无显式更新URL，两个真实显式入口均notAScript，无合格候选；真实更新/回退仍未执行，见[源检查](OR8-source-updates.md) |
 | 缓存故障/快速控制/绑定 | 受控生产集成14项通过，详见下节；实际外部服务故障与作者日常操作不据此通过 |

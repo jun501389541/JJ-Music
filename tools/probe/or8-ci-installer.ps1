@@ -112,10 +112,17 @@ function Run-Installer([string]$File, [string]$Stage, [string]$Arguments) {
   if ($process.ExitCode -ne 0) { throw "$Stage failed: $($process.ExitCode)" }
   Assert-NoApp
 }
+function Assert-ProductVersion([string]$Actual, [string]$Expected) {
+  # Windows VERSIONINFO commonly has a zero fourth component. Accept that
+  # exact representation only, never a different build or version prefix.
+  if ($Actual.Trim() -cnotin @($Expected, "$Expected.0")) {
+    throw "Installed product version differs from expected $Expected"
+  }
+}
 function Assert-Installed([string]$Version, [string]$Stage) {
   if (-not (Test-Path -LiteralPath $appExe -PathType Leaf)) { throw "$Stage missing executable" }
   $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe).ProductVersion
-  if ($actual -cne $Version) { throw "$Stage version mismatch: $actual" }
+  Assert-ProductVersion $actual $Version
   $marker = Join-Path $installDir 'resources/nsis-install.marker'
   if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { throw "$Stage missing NSIS marker" }
   if ((Get-FileHash -LiteralPath $marker).Hash -ne (Get-FileHash -LiteralPath (Join-Path $workspace 'build/nsis-install.marker')).Hash) {

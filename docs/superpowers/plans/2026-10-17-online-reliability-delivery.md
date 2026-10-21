@@ -43,3 +43,5 @@
 2026-10-21 live UI completed: run 2026-10-21T05-12-59-859Z-f1f82654, wy22 import/21-to22 preview/cancel preserved21/confirmation apply22, isolated profile removed. Trusted-source real update/rollback remains externally blocked (notAScript); do not mark live task wholly passed.
 
 2026-10-21: a6f4041 branch/tag v0.4.3 pushed. CI 39548384414 failed scratch cleanup; no draft/sign/publish. Added canonical-temp-alias RED (10 pass/1 fail), fixed canonical root validation while retaining links/token/death refusal, GREEN11/11. Version advanced to0.4.4 without retagging. Full verify-044.log exit0,93/93 suites and5/5 gates. Candidate044 packaging underway.
+
+2026-10-21: v0.4.4 CI verify passed; real fresh NSIS install exit0, checker wrongly rejected Windows ProductVersion0.4.4.0. CI39549099994 retained failure artifact; signing/publish blocked. Fixed check to accept exact X.Y.Z or X.Y.Z.0 only (3 positive,6 negative and actual EXE metadata passed); parser clean. No runtime code changed. Preserve immutable tag, advance0.4.5; final remote draft ZIP will be used for actual portable upgrade before publication.

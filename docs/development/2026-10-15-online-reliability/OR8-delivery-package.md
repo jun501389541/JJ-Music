@@ -56,6 +56,8 @@ node tools/probe/or8-delivery-package.mjs --old-zip=.cache/or8-delivery/official
 
 ## 尚未验收的边界
 
+2026-10-21 修复版补验：0.4.3 标签 CI 在 scratch 路径比较上失败，未生成 Release；保留失败标签后推进0.4.4。新候选 `.cache/or8-delivery/candidate-044/` 打包和 `tools/probe/verify-package.mjs` 均退出0。`8ce88667-a50f-44e9-a26f-f0ca59a9e236-portable-report.json` 为官方0.4.2→0.4.4实际升级，22检查通过，实际版本匹配，旧profile/哨兵保留，自有根已移除。后续远程CI包有独立摘要，不与本地包混用。
+
 - 当前系统未发现 `WindowsSandbox.exe`；可选功能只读查询在现有权限下无法确认状态。没有启用功能、创建账户、安装/卸载应用或停止其他进程。因此没有安全的现成 Sandbox 安装隔离证据，不能在日常宿主直接运行硬编码 `C:\\u0-*` 的历史安装脚本。
 - `nsisInstallationTested=false`、`onlineUpdaterTested=false`。Portable 解包与复制 profile 只证明相应资料连续性，不证明 NSIS 注册表/快捷方式/旧卸载器迁移，也不证明两个公开版本之间的在线更新安装流程。
 - 签名发布工作流中的受保护密钥、Environment 和 U0 门禁保持原状，未读取、替换或绕过。公开版本可用性与既有仓库权限不等于发布门禁已通过。

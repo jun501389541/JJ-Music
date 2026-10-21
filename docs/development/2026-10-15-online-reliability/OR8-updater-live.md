@@ -40,3 +40,7 @@ CI artifact `or8-official-updater-<run_id>` 保留 14 天，包含：
 首轮 [39609669614](https://github.com/jun501389541/JJ-Music/actions/runs/39609669614) 已安装摘要匹配的官方0.4.2并预置合成资料；启动Node控制器前失败，原因是runner上Get-Command返回多个Node路径，Start-Process需要单一路径。尚未调用应用内更新API，不算产品更新失败或通过。报告artifact12348743441，SHA256 `6a200124d08a02d446976b38d093114fd48904fbc6ffb4b40275e0a3f671d9fc` 已核对并读取。
 
 探针已明确选择PATH顺序中的第一个Node，并核验单一现存文件。两个命令结果的受控fixture复现旧Object[]，修复后String；实际命令和PowerShell解析通过。重跑结果另记。
+
+第二轮 [39610138791](https://github.com/jun501389541/JJ-Music/actions/runs/39610138791)：实际旧版check返回available0.4.5，download进入ready并核对官方Setup完整SHA256，生产install调用使旧进程退出0。随后NSIS安装范围选择页被探针直接Next，安装器报“旧版安装目录与新目录不同；请先保持原安装目录完成资料迁移”，未能重启新版。9项前置检查通过，但完整升级失败。artifact12350875137，SHA256 `4332031a440f850ea114ee418af1222626caa136bf537461e267c6d69a89bd83` 已读取。不能把此结果记为更新链路通过。
+
+探针现对严格路径/摘要限定的同一个NSIS窗口先点击与baseline相同的“Only for me”单选项，并通过BM_GETCHECK确认选中，再前进；目录保护保持不变。另补失败后的child.unref，报告落盘后释放控制器句柄，保留应用供runner取证，不终止任何无关进程。两处经独立复核、语法/选择器和零安装句柄回归验证，真实重跑另记。

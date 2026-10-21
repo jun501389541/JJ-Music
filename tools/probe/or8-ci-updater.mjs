@@ -197,5 +197,8 @@ try {
   ws?.close()
   report.finished = new Date().toISOString(); await persist()
   // No broad process killing or fixture deletion; the disposable runner is destroyed.
+  // A failed CDP connection may leave the owned app alive. Retain it for CI
+  // diagnosis without keeping this completed controller alive until its timeout.
+  child?.unref()
   console.log(JSON.stringify({ status: report.status, failedStage: report.failedStage, checks: report.checks.length, error: report.error }))
 }

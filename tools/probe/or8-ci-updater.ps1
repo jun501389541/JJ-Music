@@ -126,6 +126,20 @@ public static class Or8Windows {
           $children = @([Or8Windows]::Children($window))
           $ui = ($children | ForEach-Object { [Or8Windows]::Text($_) }) -join ' | '
           if ($ui -ne $lastUi) { Record 'owned-installer-visible-ui' @{ pid = $candidate.ProcessId; title = [Or8Windows]::Text($window); controls = $ui }; $lastUi = $ui }
+          # Match the current-user baseline through the real NSIS mode radio.
+          # An administrator runner otherwise may choose an all-users install,
+          # which the production same-directory migration guard must reject.
+          foreach ($control in $children) {
+            if ([Or8Windows]::Class($control) -eq 'Button' -and [Or8Windows]::Text($control) -cmatch '^Only for &?me\s*\(' -and
+                [Or8Windows]::IsWindowVisible($control) -and [Or8Windows]::IsWindowEnabled($control)) {
+              $before = [Or8Windows]::SendMessage($control, 0x00F0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
+              [void][Or8Windows]::SendMessage($control, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+              $after = [Or8Windows]::SendMessage($control, 0x00F0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
+              Record 'owned-installer-current-user-selected' @{ before = $before; after = $after }
+              if ($after -ne 1) { throw 'Installer current-user choice was not selected' }
+              break
+            }
+          }
           foreach ($control in $children) {
             $text = [Or8Windows]::Text($control)
             if ([Or8Windows]::Class($control) -eq 'Button' -and [Or8Windows]::IsWindowVisible($control) -and [Or8Windows]::IsWindowEnabled($control) -and

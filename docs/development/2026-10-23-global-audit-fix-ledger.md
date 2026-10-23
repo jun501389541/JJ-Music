@@ -51,3 +51,11 @@ RED日志：`.cache/ga-fixes/pr-scan-red.log`、`pr-source-red.log`；GREEN日�
 本轮原OR8源复查文档SHA-256仍为`C1119F6799A0F9084AC6281E0CE98D74E021C041FF57D92199B0E1C6EB8AEA01`，继续单独保留，不混入PR修复提交。完整verify及远端状态以本节后续记录和PR检查为准。
 
 确认轮`npm run verify`完整退出0：类型检查、生产构建、93/93套件及5/5门禁通过，日志`.cache/ga-fixes/pr-followup-verify.log`。提交前逐行复核生产变更，内容缓存不缓存enabled/quarantined等可变元数据；隔离等待后只对同一内容版本写入结论。远端CI将随本次提交重新运行。
+
+## 最终合并状态
+
+补充修复提交`bc753b7f5bc24b44ea0117076e3f25e273ce909d`已推送，PR CI39890620772全部通过。随后用户明确授权合并，[PR #1](https://github.com/jun501389541/JJ-Music/pull/1)合入main，合并提交`0e2f5b84fdd4a5ef785b55a6c546c80766a8a12b`；本地main已快进同步，合并文件树与已测PR提交完全一致。
+
+[main CI39891650487](https://github.com/jun501389541/JJ-Music/actions/runs/39891650487)两项任务全部成功，覆盖完整verify、打包后的受控音源导入/启用/播放、安装器和ZIP检查。上文“尚未合并”“CI将运行”为当时快照，已经被本节状态取代。未发布新版本；原OR8复查记录的未提交修改仍保留。
+
+用户随后授权开发扫描/实际标签写入并发候选，独立记录见[扫描/标签一致性](2026-10-23-scan-tag-consistency.md)，不混同原九项及PR三项评审范围。

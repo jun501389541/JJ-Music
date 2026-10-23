@@ -624,9 +624,14 @@ export class SourceEngine {
   }
 
   async quarantine(apiId: string, reason: string): Promise<void> {
+    const validatedVersion = this.store.versionOf(apiId)
     // Invalidate routing and pending work before persisting the verdict.
     await this.stop(apiId)
-    this.store.quarantine(apiId, reason)
+    // Teardown can wait while another import installs and starts a safe revision.
+    // The earlier verdict describes only the bytes that triggered this stop.
+    if (validatedVersion !== undefined && this.store.versionOf(apiId) === validatedVersion) {
+      this.store.quarantine(apiId, reason)
+    }
   }
 
   private async stopRuntime(apiId: string): Promise<void> {

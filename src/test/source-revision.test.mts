@@ -7,6 +7,8 @@ import { SourceStore } from './sources/source-store.js'
 import { SourceEngine } from './sources/source-engine.js'
 import { applySourceUpdate, rollbackSourceUpdate, checkForUpdate, checkDailySourceUpdates } from './sources/source-updater.js'
 import { createHash } from 'node:crypto'
+import zlib from 'node:zlib'
+import { syncBuiltinESMExports } from 'node:module'
 const script = version => `/*!\n * @name Revision fixture\n * @version ${version}\n */\nfunction init(){return 1}`
 const song={id:'wy_1',source:'wy',name:'One',singer:'',meta:{songmid:'1'}}
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject}}
@@ -63,6 +65,46 @@ test('GA06 quarantine tears down the old host and invalidates its late response'
     assert.equal(f.engine.isInitialized(f.meta.id), false)
     gate.resolve('https://cdn.test/old.mp3'); await pending
   } finally { gate.resolve('https://cdn.test/old.mp3'); await pending; f.cleanup() }
+})
+
+test('quarantine finishing after a safe same-id replacement leaves the new revision enabled and routable', async () => {
+  const f = fixture(), entered = deferred(), release = deferred()
+  let pending
+  try {
+    await f.engine.reload(f.meta.id)
+    const old = f.states[0]
+    f.engine.host.teardown = async state => { state.dead = true; if (state === old) { entered.resolve(); await release.promise } }
+    f.store.import(script('2'), 'fixture')
+    pending = f.engine.quarantine(f.meta.id, 'old validation result')
+    await entered.promise
+    f.store.import(script('3'), 'fixture'); await f.engine.reload(f.meta.id)
+    release.resolve(); await pending
+    assert.equal(f.store.get(f.meta.id).meta.enabled, true)
+    assert.equal(f.store.isQuarantined(f.meta.id), false)
+    assert.ok(f.engine.providerRevision(f.meta.id))
+  } finally { release.resolve(); await pending; f.cleanup() }
+})
+
+test('runtime revision checks neither enumerate scripts nor repeatedly inflate installed content', async () => {
+  const f = fixture(), realInflate = zlib.inflateSync
+  try {
+    await f.engine.reload(f.meta.id)
+    // Warm the selected revision, then guard the actual decompression boundary.
+    const before = f.engine.providerRevision(f.meta.id)
+    let inflations = 0, enumerations = 0
+    zlib.inflateSync = (...args) => { inflations++; return realInflate(...args) }; syncBuiltinESMExports()
+    const realList = f.store.list.bind(f.store)
+    f.store.list = () => { enumerations++; return realList() }
+    for (let i = 0; i < 10; i++) assert.deepEqual(f.engine.providerRevision(f.meta.id), before)
+    assert.equal(enumerations, 0, 'single-provider guards must not enumerate the collection')
+    assert.equal(inflations, 0, 'unchanged provider content must reuse decoded text and digest')
+    f.store.replaceScript(f.meta.id, script('2'), 'fixture')
+    assert.equal(f.engine.providerRevision(f.meta.id), undefined, 'a cache must not hide changed bytes')
+    await f.engine.reload(f.meta.id)
+    assert.notEqual(f.engine.providerRevision(f.meta.id).providerVersion, before.providerVersion)
+    f.store.rollback(f.meta.id)
+    assert.equal(f.engine.providerRevision(f.meta.id), undefined)
+  } finally { zlib.inflateSync = realInflate; syncBuiltinESMExports(); f.cleanup() }
 })
 test('invalidation is synchronous before teardown waits, and same-content restoration cannot accept an old response',async()=>{
   const f=fixture();try{

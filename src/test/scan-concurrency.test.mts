@@ -4,10 +4,46 @@ import { readFileSync } from 'node:fs'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import fsPromises from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 
 const { MusicLibrary, hashPath } = await import('./library/music-library.js')
 const root = mkdtempSync(join(tmpdir(), 'jj-scan-test-'))
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+
+test('partial unreadability preserves current-schema incremental scans and still refreshes old schemas', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'jj-scan-partial-'))
+  const realReaddir = fsPromises.readdir
+  try {
+    const folder = join(own, 'music'), blocked = join(folder, 'blocked'), profile = join(own, 'profile')
+    mkdirSync(blocked, { recursive: true }); mkdirSync(join(profile, 'library'), { recursive: true })
+    writeFileSync(join(folder, 'song.wav'), 'fixture')
+    const lib = new MusicLibrary(profile)
+    let reads = 0
+    lib.readTrack = async (path, size, mtimeMs) => { reads++; return { id: hashPath(path), path, size, mtimeMs, name: 'song', singer: '' } }
+    fsPromises.readdir = async (path, ...args) => {
+      if (path === blocked) throw Object.assign(new Error('controlled inaccessible directory'), { code: 'EACCES' })
+      return realReaddir(path, ...args)
+    }
+    syncBuiltinESMExports()
+    assert.equal((await lib.addFolder(folder)).failed, 1)
+    assert.equal((await lib.scan()).unchanged, 1)
+    assert.equal(reads, 1, 'unreadable sibling must not force unchanged metadata reads')
+    assert.equal(lib.isStale(), false)
+    const indexPath = join(profile, 'library/index.json'), index = JSON.parse(readFileSync(indexPath, 'utf8'))
+    index.version = 0; writeFileSync(indexPath, JSON.stringify(index))
+    const old = new MusicLibrary(profile); await old.load()
+    old.readTrack = lib.readTrack
+    await old.scan()
+    assert.equal(old.isStale(), true, 'an incomplete schema refresh must remain pending')
+    fsPromises.readdir = realReaddir; syncBuiltinESMExports()
+    await old.scan()
+    assert.equal(old.isStale(), false)
+  } finally {
+    fsPromises.readdir = realReaddir; syncBuiltinESMExports()
+    rmSync(own, { recursive: true, force: true })
+  }
+})
 test('GA04 scans preserve unavailable roots while pruning removed files in available roots', async () => {
   const own = mkdtempSync(join(tmpdir(), 'jj-scan-offline-'))
   try {

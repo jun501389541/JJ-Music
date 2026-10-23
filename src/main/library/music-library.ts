@@ -457,13 +457,13 @@ export class MusicLibrary {
     // entries and let the caller notice the mismatch.
     const foundNothing = seen.size === 0 && progress.scanned === 0
     if (foundNothing && this.tracks.size > 0 && availableRoots.length === 0) {
-      this.stale = true
       report(true)
       return progress
     }
 
-    // Every reachable file has now been read under the current schema.
-    this.stale = unreadable.size > 0 || options.signal?.aborted === true
+    // Partial I/O failure must not turn a current index into a schema refresh.
+    // If a refresh was already needed, keep it pending until a complete scan.
+    this.stale = this.stale && (unreadable.size > 0 || options.signal?.aborted === true)
     await this.persist()
     report(true)
     return progress

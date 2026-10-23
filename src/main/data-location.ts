@@ -20,6 +20,16 @@
  * read the developer's real data — which has already damaged it once.
  */
 import { basename, dirname, join, resolve } from 'node:path'
+import { cp, readdir } from 'node:fs/promises'
+
+/** Copy before publishing the relocation pointer; the caller owns confirmation. */
+export async function copyDataForRelocation(current: string, target: string, filter: (source: string) => boolean): Promise<void> {
+  if ((await readdir(target)).length) throw new Error('目标数据目录不是空目录，请选择空目录，原资料和位置保持不变')
+  // Also reject files created after the preflight instead of silently skipping.
+  for (const name of await readdir(current)) {
+    await cp(join(current, name), join(target, name), { recursive: true, errorOnExist: true, force: false, filter })
+  }
+}
 
 /** Folder next to the executable that a portable build keeps its data in. */
 export const PORTABLE_DIR = 'data'

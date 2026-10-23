@@ -144,6 +144,7 @@ export class MusicLibrary {
   private loaded = false
   /** Deletions invalidate old reads only for scans already in flight. */
   private readonly scanRemovals = new Set<Set<string>>()
+  private readonly folderRevisions = new Map<string, number>()
   /**
    * True when the loaded index predates the current schema, so entries are
    * missing fields that only a file read can supply. `scan()` uses this to
@@ -304,6 +305,8 @@ export class MusicLibrary {
   }
 
   async removeFolder(folder: string): Promise<void> {    await this.load()
+    const key = pathKey(folder)
+    this.folderRevisions.set(key, (this.folderRevisions.get(key) ?? 0) + 1)
     this.folders = this.folders.filter((item) => item !== folder)
     // Drop tracks that lived under the removed folder.
     for (const [path] of this.tracks) {
@@ -342,6 +345,13 @@ export class MusicLibrary {
       current: ''
     }
     const seen = new Set<string>()
+    const roots = this.folders.map(folder => ({ folder, revision: this.folderRevisions.get(pathKey(folder)) ?? 0 }))
+    const rootIsCurrent = (root: typeof roots[number]) =>
+      this.folders.some(folder => pathKey(folder) === pathKey(root.folder)) &&
+      (this.folderRevisions.get(pathKey(root.folder)) ?? 0) === root.revision
+    const eligible = (file: string) => roots.some(root => rootIsCurrent(root) && isUnder(file, root.folder))
+    const availableRoots: string[] = []
+    const unreadable = new Set<string>()
     let lastReport = 0
     const pendingReads: Array<{
       file: string
@@ -358,7 +368,7 @@ export class MusicLibrary {
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i]
         const result = results[i]
-        if (removed.has(pathKey(item.file))) continue
+        if (removed.has(pathKey(item.file)) || !eligible(item.file)) continue
         if (result.failed || !result.track) progress.failed += 1
         else {
           this.tracks.set(item.file, result.track)
@@ -377,13 +387,20 @@ export class MusicLibrary {
       }
     }
 
-    for (const folder of this.folders) {
-      if (!existsSync(folder)) continue
-      for await (const file of walk(folder, options.signal)) {
+    for (const root of roots) {
+      const folder = root.folder
+      if (!rootIsCurrent(root)) continue
+      try {
+        if (!(await stat(folder)).isDirectory()) throw new Error('not a directory')
+      } catch {
+        unreadable.add(folder); progress.failed += 1; report(); continue
+      }
+      availableRoots.push(folder)
+      for await (const file of walk(folder, options.signal, directory => { unreadable.add(directory); progress.failed += 1; report() })) {
         if (options.signal?.aborted) break
         const ext = extname(file).slice(1).toLowerCase()
         if (!extensions.has(ext)) continue
-        if (removed.has(pathKey(file))) continue
+        if (removed.has(pathKey(file)) || !eligible(file)) continue
 
         if (seen.has(file)) continue
         seen.add(file)
@@ -427,7 +444,8 @@ export class MusicLibrary {
 
     // Prune entries whose files disappeared.
     for (const path of [...this.tracks.keys()]) {
-      if (this.folders.some((folder) => isUnder(path, folder)) && !seen.has(path)) {
+      if (!options.signal?.aborted && eligible(path) && availableRoots.some(folder => isUnder(path, folder)) &&
+          ![...unreadable].some(folder => isUnder(path, folder)) && !seen.has(path)) {
         if (!existsSync(path)) this.tracks.delete(path)
       }
     }
@@ -438,14 +456,14 @@ export class MusicLibrary {
     // configuration problem into visible data loss, so keep the existing
     // entries and let the caller notice the mismatch.
     const foundNothing = seen.size === 0 && progress.scanned === 0
-    if (foundNothing && this.tracks.size > 0) {
-      this.stale = true
+    if (foundNothing && this.tracks.size > 0 && availableRoots.length === 0) {
       report(true)
       return progress
     }
 
-    // Every reachable file has now been read under the current schema.
-    this.stale = false
+    // Partial I/O failure must not turn a current index into a schema refresh.
+    // If a refresh was already needed, keep it pending until a complete scan.
+    this.stale = this.stale && (unreadable.size > 0 || options.signal?.aborted === true)
     await this.persist()
     report(true)
     return progress
@@ -641,7 +659,7 @@ const SKIP_DIRS = new Set(['$recycle.bin', 'system volume information', 'node_mo
  * nested tree cannot overflow the stack, and it yields paths as it goes so the
  * caller can stream progress and abort promptly.
  */
-async function* walk(root: string, signal?: AbortSignal): AsyncGenerator<string> {
+async function* walk(root: string, signal?: AbortSignal, onUnreadable?: (directory: string) => void): AsyncGenerator<string> {
   const stack: string[] = [root]
   while (stack.length > 0) {
     if (signal?.aborted) return
@@ -652,6 +670,7 @@ async function* walk(root: string, signal?: AbortSignal): AsyncGenerator<string>
     try {
       entries = await readdir(dir, { withFileTypes: true })
     } catch {
+      onUnreadable?.(dir)
       continue
     }
     for (const entry of entries) {

@@ -107,6 +107,40 @@ function setupPlaylistStorage({ fail = false } = {}) {
 }
 afterEach(() => { store?.stop(); store?.$dispose() })
 
+test('GA02 paused session recovery preserves pause intent and position', async () => {
+  const player = setup(); let calls = 0
+  window.jj.music.url = async () => ({ url: `https://test/resume-${++calls}`, quality: '320k' })
+  const track = online('resume')
+  await player.restoreSession({ track, queue: [track], index: 0, position: 42 })
+  FakeAudio.instances[0].fail(2); await flush(); await flush()
+  assert.equal(calls, 2)
+  assert.equal(player.playing, false)
+  assert.equal(FakeAudio.instances[0].playCalls, 0)
+  assert.equal(player.currentTime, 42)
+})
+
+test('GA03 removing the current entry clears its resume snapshot for first and last rows', async () => {
+  for (const index of [0, 1]) {
+    const player = setup(), library = useLibraryStore(), writes = []
+    library.ready = true
+    window.jj.settings = { update: async patch => { writes.push(structuredClone(patch)); return { ...library.settings, ...patch } } }
+    await player.playQueue([local('a'), local('b')], index)
+    player.duration = 180; player.seek(83); await flush(); writes.length = 0
+    player.removeFromQueue(index ? 'b' : 'a'); await flush(); player.flushSession(); await flush()
+    assert.equal(player.currentTrack, null)
+    assert.equal(writes.filter(p => 'lastSession' in p).at(-1)?.lastSession, null)
+    player.$dispose()
+  }
+})
+
+test('GA09 replaying current queue preserves both genuine history pages', async () => {
+  const player = setup()
+  for (const id of ['a', 'b', 'c']) await player.playQueue([local(id)], 0, id)
+  assert.deepEqual(player.queueHistory.map(s => s.label), ['b', 'a'])
+  await player.playQueue([local('c')], 0, 'c')
+  assert.deepEqual(player.queueHistory.map(s => s.label), ['b', 'a'])
+})
+
 test('natural completion advances the queue, single repeat restarts, explicit next advances', async () => {
   const player = setup()
   await player.playQueue([local('a'), local('b')])

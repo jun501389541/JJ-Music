@@ -136,6 +136,7 @@ export class UpdateService {
       const path = this.downloadedEventFile ?? paths[0]
       if (!path || (this.downloadedEventFile && paths.length && !paths.includes(path))) throw new Error('无法确认下载文件')
       await verifyFile(path, manifest)
+      if (this.activeToken !== token) return this.getState()
       this.downloadedFile = path
       return this.set({ ...this.state, phase: 'ready', progress: 100 })
     } catch (error) {

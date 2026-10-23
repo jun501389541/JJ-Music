@@ -89,6 +89,8 @@ export interface LoadedApi {
 export class SourceStore {
   private readonly filePath: string
   private apis: StoredApi[] = []
+  // Replaced records become collectible; metadata-only mutations reuse content.
+  private readonly contentCache = new WeakMap<StoredApi, { script: string; source: string; digest: string }>()
 
   constructor(dataDir: string) {
     this.filePath = join(dataDir, 'sources', 'user_api.json')
@@ -144,12 +146,22 @@ export class SourceStore {
   list(): LoadedApi[] {
     return this.apis.map((api) => ({
       meta: toMeta(api),
-      source: decodeScript(api.script)
+      source: this.contentOf(api).source
     }))
   }
 
   get(id: string): LoadedApi | undefined {
-    return this.list().find((api) => api.meta.id === id)
+    const api = this.apis.find(api => api.id === id)
+    return api ? { meta: toMeta(api), source: this.contentOf(api).source } : undefined
+  }
+
+  private contentOf(api: StoredApi): { source: string; digest: string } {
+    const cached = this.contentCache.get(api)
+    if (cached?.script === api.script) return cached
+    const source = decodeScript(api.script)
+    const digest = createHash('sha256').update(source, 'utf8').digest('hex').slice(0, 16)
+    this.contentCache.set(api, { script: api.script, source, digest })
+    return { source, digest }
   }
 
   /**
@@ -384,8 +396,10 @@ export class SourceStore {
     // quarantine. Without this a user re-enabling everything out of habit
     // would re-arm the script that can shut the machine down.
     if (enabled && api.quarantined) return false
+    const previous = api.enabled
     api.enabled = enabled
-    this.persist()
+    try { this.persist() }
+    catch (error) { api.enabled = previous; throw error }
     return true
   }
 
@@ -446,7 +460,7 @@ export class SourceStore {
   versionOf(id: string): string | undefined {
     const api = this.apis.find((item) => item.id === id || item.stableId === id)
     if (!api) return undefined
-    const digest = createHash('sha256').update(decodeScript(api.script), 'utf8').digest('hex').slice(0, 16)
+    const { digest } = this.contentOf(api)
     return `${api.stableId ?? api.id}@${digest}`
   }
 

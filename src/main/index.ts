@@ -22,7 +22,7 @@ import type { ImportedPlaylist } from '@shared/types'
 import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { cp, mkdir, readFile } from 'node:fs/promises'
-import { resolveDataDir, migrationSource, pointerPath, relocationProblem, NSIS_INSTALL_MARKER, type DataDirChoice } from './data-location'
+import { resolveDataDir, migrationSource, pointerPath, relocationProblem, copyDataForRelocation, NSIS_INSTALL_MARKER, type DataDirChoice } from './data-location'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
 import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
@@ -1647,7 +1647,7 @@ function registerIpc(): void {
           const content = await readFile(filePath, 'utf8')
           // Same gate as every other entry point: a dropped script is validated on
           // the way in, before it could ever be switched on.
-          const { blocking } = importScript(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
+          const { blocking } = await importScript(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
           if (blocking.length) {
             result.skipped += 1
             continue
@@ -1822,12 +1822,7 @@ function registerIpc(): void {
     await flushAssetWrites()
     await requireServices().pendingAssets.flush()
     await flushJsonWrites()
-    await cp(current, target, {
-      recursive: true,
-      errorOnExist: false,
-      force: false,
-      filter: (source) => !isSkippedForMigration(current, source)
-    })
+    await copyDataForRelocation(current, target, source => !isSkippedForMigration(current, source))
     writeFileSync(dataPointerFile, JSON.stringify({ dir: target, movedAt: Date.now() }, null, 2))
     return { moved: true, dir: target }
   })
@@ -1844,14 +1839,14 @@ function registerIpc(): void {
    * through this, because four copies of the same gate are four chances for one of
    * them to be narrower than the rest.
    */
-  function importScript(content: string, name: string, updateUrl?: string): { meta: UserApiMeta; blocking: { title: string; detail: string }[] } {
+  async function importScript(content: string, name: string, updateUrl?: string): Promise<{ meta: UserApiMeta; blocking: { title: string; detail: string }[] }> {
     const { sourceStore, sourceEngine } = requireServices()
     const meta = sourceStore.import(content, name, updateUrl)
     const loaded = sourceStore.get(meta.id)
     if (!loaded) return { meta, blocking: [] }
     const report = sourceEngine.validate(loaded.source, meta.name)
     const blocking = report.findings.filter(f => f.severity === 'block').map(f => ({ title: f.title, detail: f.detail }))
-    if (report.blocked) sourceStore.quarantine(meta.id, `导入时校验未通过：${blocking.map(f => f.title).join('；')}`)
+    if (report.blocked) await sourceEngine.quarantine(meta.id, `导入时校验未通过：${blocking.map(f => f.title).join('；')}`)
     return { meta, blocking: report.blocked ? blocking : [] }
   }
 
@@ -1860,7 +1855,7 @@ function registerIpc(): void {
     if (sourceStore.metas().length >= 20) {
       throw new Error('最多只能导入 20 个音源')
     }
-    const { meta, blocking } = importScript(payload, name || '导入音源')
+    const { meta, blocking } = await importScript(payload, name || '导入音源')
     if (blocking.length) {
       throw new Error(
         `「${meta.name}」未通过启动前校验，已导入但保持停用：\n` +
@@ -1887,7 +1882,7 @@ function registerIpc(): void {
     const refused: string[] = []
     for (const filePath of result.filePaths) {
       const content = await readFile(filePath, 'utf8')
-      const { meta, blocking } = importScript(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
+      const { meta, blocking } = await importScript(content, filePath.split(/[\\/]/).pop() ?? '导入音源')
       imported.push(meta)
       if (blocking.length) refused.push(meta.name)
     }
@@ -1928,7 +1923,7 @@ function registerIpc(): void {
     let name = file
     try { name = decodeURIComponent(file) } catch { /* not percent-encoded */ }
     const updateUrl = looksLikeScript(content) ? new URL(link).toString() : undefined
-    const { meta, blocking } = importScript(content, name || '在线音源', updateUrl)
+    const { meta, blocking } = await importScript(content, name || '在线音源', updateUrl)
     await sourceEngine.startAll()
     if (blocking.length) {
       throw new Error(`「${meta.name}」未通过启动前校验，已导入但保持停用：\n${blocking.map(f => `· ${f.title}：${f.detail}`).join('\n')}`)

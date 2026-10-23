@@ -301,6 +301,7 @@ export const usePlayerStore = defineStore('player', () => {
   let startupMonotonicDeadline: number | undefined
   let loadedTrackId: string | null = null
   let loadedMediaUrl: string | null = null
+  let playbackAutoplay = false
 
   /** How long audio may stall before we treat it as a failed source. */
   const STALL_TIMEOUT_MS = 20_000
@@ -360,7 +361,7 @@ export const usePlayerStore = defineStore('player', () => {
         if(mayRetryUrl&&canRecoverMedia(failure)){
           const index=queue.value.findIndex(item=>item.id===track.id)
           if(index<0)return
-          await playTrackAt(index,{retryUrl:false,resolutionDeadline:startupDeadline,resolutionMonotonicDeadline:startupMonotonicDeadline})
+          await playTrackAt(index,{autoplay:playbackAutoplay,startAt:currentTime.value,retryUrl:false,resolutionDeadline:startupDeadline,resolutionMonotonicDeadline:startupMonotonicDeadline})
         }else finish()
       })()
       return
@@ -421,6 +422,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (index < 0 || index >= queue.value.length) return
     const manualRetry=options.retryUrl!==false&&!!error.value
     const generation = ++playGeneration
+    playbackAutoplay = options.autoplay !== false
     toggleGeneration++
     pausePending = false
     loadedTrackId = null
@@ -662,7 +664,7 @@ export const usePlayerStore = defineStore('player', () => {
     const signature = (list: PlayableTrack[]): string => list.map(track => track.id).join(',')
     const outgoing = queue.value
     const next = queueHistory.value.filter(entry => signature(entry.queue) !== signature(incoming))
-    if (outgoing.length > 0 && !next.some(entry => signature(entry.queue) === signature(outgoing))) {
+    if (outgoing.length > 0 && signature(outgoing) !== signature(incoming) && !next.some(entry => signature(entry.queue) === signature(outgoing))) {
       next.unshift({
         label: queueLabel.value,
         queue: JSON.parse(JSON.stringify(outgoing)) as PlayableTrack[],
@@ -720,10 +722,12 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
     if (playing.value && !pausePending) {
+      playbackAutoplay = false
       pausePending = true
       try { await instance.pause(transitionsEnabled.value ? PAUSE_FADE_MS : 0) }
       finally { if (intent === toggleGeneration) pausePending = false }
     } else {
+      playbackAutoplay = true
       pausePending = false
       await instance.play(transitionsEnabled.value ? PAUSE_FADE_MS : 0).catch(() => undefined)
     }
@@ -896,13 +900,15 @@ export const usePlayerStore = defineStore('player', () => {
   function removeFromQueue(trackId: string): void {
     const index = queue.value.findIndex((track) => track.id === trackId)
     if (index < 0) return
-    queue.value.splice(index, 1)
-    if (index < currentIndex.value) currentIndex.value -= 1
-    else if (index === currentIndex.value) {
+    const removingCurrent = index === currentIndex.value
+    if (removingCurrent) {
       // No queued song should appear current after the playing item is removed.
       stop()
       currentIndex.value = -1
     }
+    queue.value.splice(index, 1)
+    if (index < currentIndex.value) currentIndex.value -= 1
+    if (removingCurrent) clearSession()
   }
 
   function clearQueue(): void {
@@ -1094,6 +1100,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function stop(): void {
+    playbackAutoplay = false
     toggleGeneration++
     pausePending = false
     // Capture the position before clearing state, or the resume point would

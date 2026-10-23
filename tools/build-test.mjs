@@ -96,6 +96,7 @@ await build({
   join(repoRoot, 'src', 'main', 'library', 'pending-assets.ts'),
     join(repoRoot, 'src', 'main', 'library', 'pending-asset-write.ts'),
     join(repoRoot, 'src', 'main', 'library', 'path-task-queue.ts'),
+    join(repoRoot, 'src', 'main', 'library', 'local-file-relink.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
     join(repoRoot, 'src', 'main', 'online', 'platform-registry.ts'),

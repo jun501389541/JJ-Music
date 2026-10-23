@@ -8,6 +8,7 @@
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
+import type { LocalRelinkChange, LocalRelinkPreview } from '@shared/local-file-relink'
 import type {
   AppSettings,
   AssetKind,
@@ -348,6 +349,9 @@ const api = {
   },
 
   library: {
+    relinkPreview: (id: string, path: string) => invoke<LocalRelinkPreview | null>(IPC.libraryRelinkPreview, id, path),
+    relinkApply: (token: string) => invoke<LocalRelinkChange & { settings: AppSettings }>(IPC.libraryRelinkApply, token),
+    relinkDiscard: (token: string) => invoke<void>(IPC.libraryRelinkDiscard, token),
     importFiles: () => invoke<number>(IPC.libraryImportFiles),
     reveal: (path: string) => invoke<void>(IPC.fileReveal, path),
     folders: () => invoke<string[]>(IPC.libraryFolders),

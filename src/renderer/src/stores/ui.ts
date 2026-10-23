@@ -15,6 +15,7 @@ export interface MenuItem {
 }
 export const useUiStore = defineStore('ui', () => {
   const nowPlaying = ref(false)
+  const localRelinkBusy = ref(false)
   const playbackPanel = ref<'eq' | 'queue' | null>(null)
   const menu = shallowRef<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const trackInfo = shallowRef<PlayableTrack | null>(null)
@@ -33,5 +34,5 @@ export const useUiStore = defineStore('ui', () => {
     return new Promise(resolve => { dialog.value = { title, message, confirmLabel: '确认', resolve } })
   }
   function finishDialog(value: string | null): void { dialog.value?.resolve(value); dialog.value = null }
-  return { nowPlaying, playbackPanel, menu, trackInfo, matchTrack, dialog, openMenu, prompt, confirm, finishDialog }
+  return { localRelinkBusy, nowPlaying, playbackPanel, menu, trackInfo, matchTrack, dialog, openMenu, prompt, confirm, finishDialog }
 })

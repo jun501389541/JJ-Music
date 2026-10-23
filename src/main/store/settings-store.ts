@@ -49,6 +49,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 }
 
 export class SettingsStore {
+  async reload(): Promise<AppSettings> { this.loaded = false; return this.load() }
   private readonly filePath: string
   private settings: AppSettings = { ...DEFAULT_SETTINGS }
   private loaded = false
@@ -102,6 +103,11 @@ interface PlaylistFile {
  * player appends to, mirroring LX Music's `default` list id.
  */
 export class PlaylistStore {
+  async reload(): Promise<void> {
+    await this.flush()
+    this.loaded = false; this.loading = undefined; this.playlists = []; this.items.clear()
+    await this.load()
+  }
   private readonly filePath: string
   private playlists: Playlist[] = []
   private items = new Map<string, PlayableTrack[]>()

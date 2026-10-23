@@ -5,6 +5,9 @@
  * a channel name is a compile error rather than a silently dead handler.
  */
 export const IPC = {
+  libraryRelinkPreview: 'library:relink-preview',
+  libraryRelinkApply: 'library:relink-apply',
+  libraryRelinkDiscard: 'library:relink-discard',
   updateStatus: 'update:status',
   updateCheck: 'update:check',
   updateDownload: 'update:download',

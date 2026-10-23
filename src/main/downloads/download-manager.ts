@@ -119,6 +119,7 @@ export type GuardedFetch = (
   init?: RequestInit & { allowedHosts?: string[] }
 ) => Promise<Response>
 export class DownloadManager {
+  isBusy(): boolean { return this.running.size > 0 }
   private tasks: DownloadTask[] = []
   private controllers = new Map<string, AbortController>()
   /** Per-task settle promise, so a removal can wait for its own download to stop. */

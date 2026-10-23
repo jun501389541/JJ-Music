@@ -557,6 +557,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
 
 /** Global shortcuts, mirroring the conveniences of a desktop player. */
 function onKeydown(event: KeyboardEvent): void {
+  if (ui.localRelinkBusy) { event.preventDefault(); return }
   if (ui.menu || ui.dialog || ui.trackInfo || ui.matchTrack) return
   // A focused control already handled this key (for example a slider arrow).
   if (event.defaultPrevented) return
@@ -677,10 +678,12 @@ const contentKey = computed(() => route.path)
     -->
     <CoverFlightLayer />
     <ToastHost />
+    <div v-if="ui.localRelinkBusy" class="relink-busy" role="status" aria-live="polite">正在修复文件关联…</div>
   </div>
 </template>
 
 <style scoped>
+.relink-busy { position: fixed; inset: 36px 0 0; z-index: 10000; display: grid; place-items: center; background: var(--bg-primary); opacity: .95; cursor: wait; }
 .shell {
   display: flex;
   flex-direction: column;

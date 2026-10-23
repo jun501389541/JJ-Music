@@ -39,6 +39,29 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
     ...(local ? [{ label: locals.length > 1 ? `文件（${locals.length} 首）` : '文件', icon: 'folder', children: [
       { label: '在资源管理器中打开', icon: 'folder', action: () => window.jj.library.reveal(track.path) },
       { label: '复制文件地址', icon: 'link', action: () => navigator.clipboard.writeText(track.path) },
+      ...(locals.length === 1 ? [{ label: '重新定位文件', icon: 'folder', action: async () => {
+        let token: string | undefined
+        try {
+          const preview = await window.jj.library.relinkPreview(track.id, track.path)
+          if (!preview) return
+          token = preview.token
+          const info = (t: LocalMusicInfo) => `${t.name} · ${t.singer || '未知歌手'} · ${t.duration === undefined ? '时长未知' : `${t.duration} 秒`}\n${t.path}`
+          if (!await ui.confirm('确认重新定位文件', `原歌曲：\n${info(preview.old)}\n\n新文件：\n${info(preview.next)}\n\n请核对是否为同一录音。确认后保留收藏和歌单顺序，不自动播放。待写入资料仍需在待写入页面重新选择目标。`)) return
+          ui.localRelinkBusy = true
+          player.beginLocalRelink(preview)
+          await library.updateSettings({}) // Drain earlier session/settings writes before the transaction.
+          const result = await window.jj.library.relinkApply(preview.token)
+          token = undefined
+          player.finishLocalRelink(result)
+          await library.acceptLocalRelink(result.settings)
+          toast.success('已重新定位文件，收藏和歌单关联已更新')
+        } catch (error) { toast.error(error instanceof Error ? error.message : '重新定位失败') }
+        finally {
+          player.finishLocalRelink()
+          ui.localRelinkBusy = false
+          if (token) await window.jj.library.relinkDiscard(token).catch(() => undefined)
+        }
+      } }] : []),
       { label: '在线匹配标签', icon: 'edit', action: () => { ui.matchTrack = track } },
       separator,
       /*

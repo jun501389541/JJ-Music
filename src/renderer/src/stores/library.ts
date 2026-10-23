@@ -217,6 +217,11 @@ export const useLibraryStore = defineStore('library', () => {
   }
 
   let libraryRefreshGeneration = 0
+  async function acceptLocalRelink(next: AppSettings): Promise<void> {
+    settings.value = next
+    recentPlayed.value = next.recentPlayed
+    await Promise.all([refreshLibrary(), refreshPlaylists()])
+  }
   async function refreshLibrary(): Promise<void> {
     const generation = ++libraryRefreshGeneration
     const nextTracks = await window.jj.library.tracks()
@@ -472,6 +477,7 @@ export const useLibraryStore = defineStore('library', () => {
     init,
     refreshSources,
     refreshLibrary,
+    acceptLocalRelink,
     refreshPlaylists,
     updateSettings,
     addFolder,

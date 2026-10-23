@@ -31,6 +31,13 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const quality = (value: unknown): boolean => LX_QUALITIES.includes(value as (typeof LX_QUALITIES)[number])
 
   switch (channel) {
+    case IPC.libraryRelinkPreview:
+      if(args.length !== 2 || !str(args[0], 256) || !path(args[1])) bad()
+      break
+    case IPC.libraryRelinkApply:
+    case IPC.libraryRelinkDiscard:
+      if(args.length !== 1 || typeof args[0] !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(args[0])) bad()
+      break
     case IPC.sourcesUpdateApply:
       if(args.length>3||!str(args[0],256)||!str(args[1],4*1024*1024)||
         (args[2]!==undefined&&(typeof args[2]!=='string'||!/^[a-f0-9]{64}$/i.test(args[2]))))bad()

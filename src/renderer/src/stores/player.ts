@@ -5,6 +5,7 @@
  * so swapping in a native engine changes nothing in this file.
  */
 import { useLibraryStore } from './library'
+import { relinkTrack, type LocalRelinkChange } from '@shared/local-file-relink'
 import { useToastStore } from './toast'
 import { toMediaUrl } from '@shared/media-url'
 import { stripScriptCoverData, stripScriptCoverDataFromTracks } from '@shared/persisted-track'
@@ -420,6 +421,7 @@ export const usePlayerStore = defineStore('player', () => {
     options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; resolutionMonotonicDeadline?: number; transition?: boolean } = {}
   ): Promise<void> {
     if (index < 0 || index >= queue.value.length) return
+    if (localRelinkBusy) return
     const manualRetry=options.retryUrl!==false&&!!error.value
     const generation = ++playGeneration
     playbackAutoplay = options.autoplay !== false
@@ -439,6 +441,8 @@ export const usePlayerStore = defineStore('player', () => {
     lyricAbort?.abort()
     mayRetryUrl = options.retryUrl !== false
     const track = queue.value[index]
+    if (localRelinkResume?.id === track.id && options.startAt === undefined) options = { ...options, startAt: localRelinkResume.position }
+    localRelinkResume = null
     currentIndex.value = index
     currentTime.value = 0
     if (playMode.value === 'random') rememberRandomDraw(track.id)
@@ -542,6 +546,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function playTrack(track: PlayableTrack): Promise<void> {
+    if (localRelinkBusy) return
     const index = queue.value.findIndex((item) => item.id === track.id)
     if (index >= 0) {
       await playTrackAt(index)
@@ -625,6 +630,7 @@ export const usePlayerStore = defineStore('player', () => {
     label = '',
     options: { playMode?: PlayMode; singleTrackAudition?: boolean } = {}
   ): Promise<void> {
+    if (localRelinkBusy) return
     rememberQueue(tracks)
     // Capture the outgoing session before replacing its rows. playTrackAt owns
     // cancellation and the bounded fade, including queue-changing entrypoints.
@@ -641,6 +647,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** Restore a saved queue using its stored row and mode, without a playback offset. */
   async function playQueueSnapshot(snapshot: QueueSnapshot, startIndex = snapshot.currentIndex): Promise<void> {
+    if (localRelinkBusy) return
     await playQueue(snapshot.queue, startIndex, snapshot.label, {
       playMode: snapshot.playMode,
       singleTrackAudition: snapshot.singleTrackAudition
@@ -697,6 +704,7 @@ export const usePlayerStore = defineStore('player', () => {
    * highlight - and the next 下一首 - jump to a different song.
    */
   function moveInQueue(from: number, to: number): void {
+    if (localRelinkBusy) return
     if (from === to || to < 0 || to >= queue.value.length || from < 0 || from >= queue.value.length) return
     const list = [...queue.value]
     const [item] = list.splice(from, 1)
@@ -710,6 +718,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function toggle(): Promise<void> {
+    if (localRelinkBusy) return
     const intent = ++toggleGeneration
     if (loading.value) {
       stop()
@@ -734,12 +743,14 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function next(): Promise<void> {
+    if (localRelinkBusy) return
     if (queue.value.length === 0) return
     const nextIndex = pickNextIndex(1)
     await playTrackAt(nextIndex)
   }
 
   async function previous(): Promise<void> {
+    if (localRelinkBusy) return
     if (queue.value.length === 0) return
     // Restart the current track first, matching every mainstream player.
     if (currentTime.value > 3) {
@@ -762,6 +773,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function handleEnded(): Promise<void> {
+    if (localRelinkBusy) return
     if (singleTrackAudition.value && queue.value.length === 1) {
       playing.value = false
       return
@@ -782,6 +794,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function seek(time: number): void {
+    if (localRelinkBusy) return
     if (!Number.isFinite(time)) return
     const clamped = Math.max(0, Math.min(time, duration.value || 0))
     engine.value?.seek(clamped)
@@ -898,6 +911,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function removeFromQueue(trackId: string): void {
+    if (localRelinkBusy) return
     const index = queue.value.findIndex((track) => track.id === trackId)
     if (index < 0) return
     const removingCurrent = index === currentIndex.value
@@ -912,6 +926,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function clearQueue(): void {
+    if (localRelinkBusy) return
     stop()
     queue.value = []
     currentIndex.value = -1
@@ -923,6 +938,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function insertNext(tracks: PlayableTrack[]): void {
+    if (localRelinkBusy) return
     const ids = new Set(tracks.map(track => track.id))
     const current = currentTrack.value
     queue.value = queue.value.filter(track => !ids.has(track.id) || track.id === current?.id)
@@ -972,7 +988,38 @@ export const usePlayerStore = defineStore('player', () => {
   let sessionDirty = false
   const SESSION_INTERVAL_MS = 5_000
 
+  let localRelinkBusy = false
+  let localRelinkPosition: number | null = null
+  let localRelinkIdentity: PlayableTrack | null = null
+  let localRelinkResume: { id: string; position: number } | null = null
+  function beginLocalRelink(change: LocalRelinkChange): void {
+    const current = currentTrack.value
+    const saved = useLibraryStore().settings.lastSession
+    if (current && relinkTrack(current, change) !== current && error.value && currentTime.value === 0 && saved && relinkTrack(saved.track, change) !== saved.track && Number.isFinite(saved.position) && saved.position > 0) currentTime.value = saved.position
+    flushSession()
+    localRelinkBusy = true
+    if (currentTrack.value && relinkTrack(currentTrack.value, change) !== currentTrack.value) {
+      localRelinkPosition = currentTime.value
+      localRelinkIdentity = change.old
+      stopPlayback()
+    }
+  }
+  function finishLocalRelink(change?: LocalRelinkChange): void {
+    if (change) {
+      queue.value = queue.value.map(t => relinkTrack(t, change))
+      queueHistory.value = queueHistory.value.map(q => ({ ...q, queue: q.queue.map(t => relinkTrack(t, change)) }))
+      error.value = null
+    }
+    const expected = change?.next ?? localRelinkIdentity
+    if (localRelinkPosition !== null && expected && currentTrack.value && isLocalTrack(currentTrack.value) && isLocalTrack(expected) && currentTrack.value.id === expected.id && currentTrack.value.path === expected.path) {
+      currentTime.value = localRelinkPosition
+      localRelinkResume = { id: currentTrack.value.id, position: localRelinkPosition }
+    }
+    localRelinkPosition = null; localRelinkIdentity = null
+    localRelinkBusy = false
+  }
   function snapshotSession(): void {
+    if (localRelinkBusy) return
     const track = currentTrack.value
     if (!track || !queue.value.length) return
     sessionDirty = true
@@ -986,6 +1033,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function writeSession(): void {
+    if (localRelinkBusy) return
     const track = currentTrack.value
     if (!track) return
     sessionDirty = false
@@ -1017,6 +1065,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** Forget the resume point, so the next launch does not reopen a closed book. */
   function clearSession(): void {
+    if (localRelinkBusy) return
     if (sessionTimer !== null) {
       clearTimeout(sessionTimer)
       sessionTimer = null
@@ -1041,6 +1090,7 @@ export const usePlayerStore = defineStore('player', () => {
    * stay quiet instead of announcing a resume that did not happen.
    */
   async function restoreSession(session: LastSession | null | undefined): Promise<boolean> {
+    if (localRelinkBusy) return false
     if (!session?.track) return false
     if (!Array.isArray(session.queue) || session.queue.length === 0) return false
 
@@ -1074,6 +1124,7 @@ export const usePlayerStore = defineStore('player', () => {
    * cannot be played.
    */
   function restoreQueueHistory(list: unknown): void {
+    if (localRelinkBusy) return
     if (!Array.isArray(list)) {
       queueHistory.value = []
       return
@@ -1100,6 +1151,11 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function stop(): void {
+    if (localRelinkBusy) return
+    stopPlayback()
+  }
+  function stopPlayback(): void {
+    localRelinkResume = null
     playbackAutoplay = false
     toggleGeneration++
     pausePending = false
@@ -1406,6 +1462,8 @@ export const usePlayerStore = defineStore('player', () => {
     useLyricSource,
     flushSession,
     restoreSession,
+    beginLocalRelink,
+    finishLocalRelink,
     refreshOutputDevices,
     setOutputDevice,
     applyEqualizerPreset,

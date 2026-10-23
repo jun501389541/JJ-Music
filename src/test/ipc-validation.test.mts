@@ -12,6 +12,15 @@ const IPC = {
 
 const rejects = (channel, args) => assert.throws(() => assertIpcArgs(channel, args))
 const accepts = (channel, args) => assert.doesNotThrow(() => assertIpcArgs(channel, args))
+accepts('library:relink-preview', ['known-id', 'E:/Music/missing.flac'])
+rejects('library:relink-preview', ['known-id'])
+rejects('library:relink-preview', ['known-id', 'E:/Music/missing.flac', 'E:/injected.wav'])
+rejects('library:relink-preview', ['known-id', 'bad\0path'])
+for (const channel of ['library:relink-apply', 'library:relink-discard']) {
+  accepts(channel, ['12345678-1234-1234-1234-123456789abc'])
+  rejects(channel, ['E:/injected.wav'])
+  rejects(channel, ['12345678-1234-1234-1234-123456789abc', {}])
+}
 
 accepts(IPC.musicSearch, ['wy', '晴天', 1, 'search-1790320000000-1'])
 accepts(IPC.musicSearch, ['wy', '晴天', 1, 'online-entity-1790320000000-1'])

@@ -14,6 +14,8 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, sessi
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { DownloadManager } from './downloads/download-manager'
+import { RelinkCandidates, RelinkCommitGuard, commitLocalRelink, recoverLocalRelink } from './library/local-file-relink'
+import { sameLocalPath } from '@shared/local-file-relink'
 import { ArtistImageStore } from './library/artist-images'
 import { resolveArtistImage } from './online/artist-image'
 import { flushJsonWrites } from './store/json-file'
@@ -448,6 +450,7 @@ function requireServices(): Services {
 async function createServices(): Promise<Services> {
   await migrateLegacyData()
   const dataDir = app.getPath('userData')
+  await recoverLocalRelink(dataDir)
   const settings = new SettingsStore(dataDir)
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
@@ -1433,14 +1436,23 @@ function fromMainWindow(event: { sender: Electron.WebContents; senderFrame: Elec
 }
 
 /** Wrap a handler so every rejection becomes a typed `IpcResult`. */
+const relinkGuard = new RelinkCommitGuard()
+let relinkCommit: Promise<unknown> | undefined
+const inFlightIpc = new Set<Promise<unknown>>()
 function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): void {
   ipcMain.handle(channel, async (event, ...args) => {
+    let operation: Promise<T> | undefined
     try {
       if (!fromMainWindow(event)) throw new Error('不允许的 IPC 来源')
       assertIpcArgs(channel, args)
-      return ok(await fn(...(args as never[])))
+      if (relinkGuard.blocked && !channel.startsWith('window:')) throw new Error('正在修复本地文件关联，写入中断时请重启应用恢复')
+      operation = Promise.resolve().then(() => fn(...(args as never[])))
+      if (channel !== IPC.libraryRelinkApply) inFlightIpc.add(operation)
+      return ok(await operation)
     } catch (error) {
       return fail(error)
+    } finally {
+      if (operation) inFlightIpc.delete(operation)
     }
   })
 }
@@ -2367,6 +2379,48 @@ function registerIpc(): void {
   })
 
   handle(IPC.libraryTracks, () => requireServices().library.getAll())
+  const findLocalReference = async (id: string, path?: string): Promise<LocalMusicInfo | undefined> => {
+      const { library, playlists, settings } = requireServices()
+      const indexed = library.get(id)
+      if (indexed && (path === undefined || sameLocalPath(indexed.path, path))) return structuredClone(indexed)
+      const stored = settings.get()
+      const rows = [...stored.recentPlayed, ...(stored.lastSession ? [stored.lastSession.track, ...stored.lastSession.queue] : []), ...(stored.queueHistory ?? []).flatMap(q => q.queue)]
+      for (const list of await playlists.list()) rows.push(...await playlists.getItems(list.id))
+      const found = rows.find((t): t is LocalMusicInfo => isLocalTrack(t) && t.id === id && (path === undefined || sameLocalPath(t.path, path)))
+      return found ? structuredClone(found) : undefined
+  }
+  const relinkCandidates = new RelinkCandidates({
+    findOld: findLocalReference,
+    findTarget: id => findLocalReference(id),
+    readTrack: path => requireServices().library.readTrack(path)
+  })
+  handle(IPC.libraryRelinkPreview, async (id: string, path: string) => {
+    await relinkCandidates.source(id, path)
+    const selected = await dialog.showOpenDialog({ title: '重新定位音乐文件', properties: ['openFile'], filters: [{ name: '音乐文件', extensions: ['mp3', 'flac', 'wav', 'm4a', 'aac', 'ogg', 'opus'] }] })
+    if (selected.canceled || selected.filePaths.length !== 1) return null
+    return relinkCandidates.preview(id, path, selected.filePaths[0])
+  })
+  handle(IPC.libraryRelinkDiscard, (token: string) => relinkCandidates.discard(token))
+  handle(IPC.libraryRelinkApply, async (token: string) => {
+    const current = requireServices()
+    relinkCommit = relinkGuard.run(async () => {
+      await Promise.allSettled([...inFlightIpc])
+      await assetOperations.flush(); await assetCommits.flush(); await flushAssetWrites()
+      if (quitting) throw new Error('播放器正在退出')
+      if (current.library.isScanning() || current.downloads.isBusy()) throw new Error('请等待曲库扫描和下载完成后重新定位')
+      await current.playlists.flush(); await flushJsonWrites()
+      return relinkCandidates.confirm(token)
+    }, change => commitLocalRelink(current.dataDir, change), async change => {
+      await current.library.reload(); await current.playlists.reload(); await current.settings.reload()
+      relinkCandidates.discard(token)
+      rememberPicked([change.next.path])
+      return { ...change, settings: current.settings.get() }
+    }, () => existsSync(join(current.dataDir, 'local-relink.pending.json')))
+    try { return await relinkCommit }
+    finally {
+      relinkCommit = undefined
+    }
+  })
 
   handle(IPC.libraryRemoveTracks, (ids: string[]) => {
     const { library } = requireServices()
@@ -3018,6 +3072,7 @@ if (!app.requestSingleInstanceLock()) {
     const current = services
     // The source lifecycle owns child processes, so stop it before quitting.
     void Promise.allSettled([
+      ...(relinkCommit ? [relinkCommit] : []),
       current.downloads.shutdown(),
       current.catalogReliability.flush(),
       current.onlineAssets.flush(),

@@ -107,6 +107,52 @@ function setupPlaylistStorage({ fail = false } = {}) {
 }
 afterEach(() => { store?.stop(); store?.$dispose() })
 
+test('local relink preserves current resume position through finish and close without autoplay', async () => {
+  const player = setup(), library = useLibraryStore(), writes = []
+  library.ready = true
+  window.jj.settings = { update: async patch => { writes.push(structuredClone(patch)); return { ...library.settings, ...patch } } }
+  const old = local('relink-old'), next = local('relink-next')
+  player.queue = [old]; player.currentIndex = 0; player.currentTime = 73
+  player.beginLocalRelink({ old, next })
+  await flush()
+  player.finishLocalRelink({ old, next })
+  player.flushSession(); await flush()
+  const saved = writes.filter(p => p.lastSession).at(-1).lastSession
+  assert.equal(saved.track.id, next.id)
+  assert.equal(saved.position, 73)
+  assert.equal(player.playing, false)
+  assert.equal(player.currentIndex, 0)
+  await player.toggle()
+  FakeAudio.instances.at(-1).dispatchEvent(new Event('loadedmetadata'))
+  assert.equal(FakeAudio.instances.at(-1).currentTime, 73, 'explicit resume seeks to the preserved position')
+})
+
+test('local relink retains saved resume position when the missing media reports zero progress', async () => {
+  const player = setup(), library = useLibraryStore(), writes = []
+  const old = local('missing-resume'), next = local('moved-resume')
+  library.ready = true
+  library.settings = { ...library.settings, lastSession: { track: old, queue: [old], index: 0, position: 73 } }
+  window.jj.settings = { update: async patch => { writes.push(structuredClone(patch)); return { ...library.settings, ...patch } } }
+  player.queue = [old]; player.currentIndex = 0; player.currentTime = 0; player.error = 'missing file'
+  player.beginLocalRelink({ old, next }); await flush()
+  player.finishLocalRelink({ old, next }); player.flushSession(); await flush()
+  assert.equal(writes.filter(p => p.lastSession).at(-1).lastSession.position, 73)
+})
+
+test('external transport and queue controls cannot change the current entry during local relink', async () => {
+  const player = setup(), old = local('repairing'), next = local('repaired'), other = local('other')
+  player.queue = [old, other]; player.currentIndex = 0; player.currentTime = 73
+  player.beginLocalRelink({ old, next })
+  await player.next(); await player.previous(); await player.toggle()
+  player.seek(0); player.stop(); player.moveInQueue(0, 1); player.removeFromQueue(old.id); player.insertNext([local('inserted')]); player.clearQueue()
+  assert.deepEqual(player.queue.map(t => t.id), [old.id, other.id])
+  assert.equal(player.currentIndex, 0)
+  player.finishLocalRelink({ old, next })
+  assert.deepEqual(player.queue.map(t => t.id), [next.id, other.id])
+  assert.equal(player.currentTime, 73)
+  assert.equal(player.playing, false)
+})
+
 test('GA02 paused session recovery preserves pause intent and position', async () => {
   const player = setup(); let calls = 0
   window.jj.music.url = async () => ({ url: `https://test/resume-${++calls}`, quality: '320k' })

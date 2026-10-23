@@ -28,6 +28,8 @@ Ruling: 采用executing-plans顺序实施，末尾一次独立审查；共享out
 
 上段为实施完成时快照。用户继续执行后进入分支交付：修复与三份审查/计划/账本记录一起提交，推送修复分支并以PR交付；此前OR8源复查的独立未提交修改继续保留。提交前再次运行`npm run verify`，完整退出0、93/93套件及5/5门禁通过，日志`.cache/ga-fixes/verify-before-commit.log`。本轮不更改版本或发布资产；实际提交与PR编号以Git/GitHub记录为准。
 
+分支交付已完成：修复提交`32a50548217235926bce44877df4ed58da6abb9a`已推送至`origin/codex/global-audit-fixes`，[PR #1](https://github.com/jun501389541/JJ-Music/pull/1)已创建，base为main。后续文档提交同步此状态；远端CI以PR检查结果为准，尚未合并main，也未发布版本。
+
 边界：本轮采用生产模块离线回归和受控媒体/源宿主替身；未执行真实第三方源、安装器或人工听感。此前真实源候选缺失与听感待验状态不变。
 
 首轮全量：类型检查与生产构建通过，90/93套件；三个旧源测试使用不完整SourceStore替身，未提供get/内容字段，新运行状态防护正确拒绝。补齐测试替身契约而不放宽生产guard后，三套分别通过，source-engine为153/153。保留verify.log与*-compat.log，完整确认轮另记。

@@ -142,8 +142,8 @@ export class MusicLibrary {
   private tracks = new Map<string, LocalMusicInfo>()
   private folders: string[] = []
   private loaded = false
-  /** Deletions invalidate old reads only for scans already in flight. */
-  private readonly scanRemovals = new Set<Set<string>>()
+  /** Explicit index changes invalidate reads only for scans already in flight. */
+  private readonly scanInvalidations = new Set<Set<string>>()
   private readonly folderRevisions = new Map<string, number>()
   /**
    * True when the loaded index predates the current schema, so entries are
@@ -257,7 +257,7 @@ export class MusicLibrary {
     await this.load()
     const key = pathKey(path)
     // Also invalidate a pending first scan read, even if no indexed row exists yet.
-    for (const removed of this.scanRemovals) removed.add(key)
+    for (const invalidated of this.scanInvalidations) invalidated.add(key)
     const ids = this.getAll().filter(track => pathKey(track.path) === key).map(track => track.id)
     if (ids.length) await this.removeTracks(ids)
   }
@@ -324,16 +324,16 @@ export class MusicLibrary {
    */
   async scan(options: ScanOptions = {}): Promise<ScanProgress> {
     await this.load()
-    const removed = new Set<string>()
-    this.scanRemovals.add(removed)
+    const invalidated = new Set<string>()
+    this.scanInvalidations.add(invalidated)
     try {
-      return await this.scanFolders(options, removed)
+      return await this.scanFolders(options, invalidated)
     } finally {
-      this.scanRemovals.delete(removed)
+      this.scanInvalidations.delete(invalidated)
     }
   }
 
-  private async scanFolders(options: ScanOptions, removed: Set<string>): Promise<ScanProgress> {
+  private async scanFolders(options: ScanOptions, invalidated: Set<string>): Promise<ScanProgress> {
     const extensions = new Set(
       (options.extensions ?? DEFAULT_EXTENSIONS).map((ext) => ext.toLowerCase())
     )
@@ -368,7 +368,7 @@ export class MusicLibrary {
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i]
         const result = results[i]
-        if (removed.has(pathKey(item.file)) || !eligible(item.file)) continue
+        if (invalidated.has(pathKey(item.file)) || !eligible(item.file)) continue
         if (result.failed || !result.track) progress.failed += 1
         else {
           this.tracks.set(item.file, result.track)
@@ -400,7 +400,7 @@ export class MusicLibrary {
         if (options.signal?.aborted) break
         const ext = extname(file).slice(1).toLowerCase()
         if (!extensions.has(ext)) continue
-        if (removed.has(pathKey(file)) || !eligible(file)) continue
+        if (invalidated.has(pathKey(file)) || !eligible(file)) continue
 
         if (seen.has(file)) continue
         seen.add(file)
@@ -579,6 +579,10 @@ export class MusicLibrary {
    */
   async updateTrack(track: LocalMusicInfo): Promise<void> {
     await this.load()
+    // A completed write is authoritative. A scan may already have parsed the
+    // pre-write file (including sidecar provenance), so reject its late result.
+    // Each active scan owns its set; future scans still see and stat this file.
+    for (const invalidated of this.scanInvalidations) invalidated.add(pathKey(track.path))
     this.tracks.set(track.path, track)
     await this.persist()
   }

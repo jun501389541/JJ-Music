@@ -6,10 +6,57 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import fsPromises from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
+import NodeID3 from 'node-id3'
+import { exportAssets, mergeAssets } from './library/asset-export.js'
+import { parseFile } from 'music-metadata'
 
 const { MusicLibrary, hashPath } = await import('./library/music-library.js')
 const root = mkdtempSync(join(tmpdir(), 'jj-scan-test-'))
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+
+for (const target of ['embedded', 'sidecar']) test(`a late scan cannot replace an actual ${target} write's refreshed index`, async () => {
+  const own = mkdtempSync(join(tmpdir(), 'jj-scan-write-')), entered = deferred(), release = deferred()
+  let scanning
+  try {
+    const folder = join(own, 'music'), profile = join(own, 'profile'), file = join(folder, 'song.mp3')
+    mkdirSync(folder)
+    // Parser fixture: MPEG frame headers and ID3, with no user recording.
+    const frame = Buffer.alloc(417); frame.writeUInt32BE(0xfffb9064)
+    writeFileSync(file, Buffer.concat(Array.from({ length: 12 }, () => frame)))
+    assert.equal(NodeID3.update({ title: 'original title', artist: 'fixture' }, file), true)
+    const peer = join(folder, 'other.mp3')
+    writeFileSync(peer, readFileSync(file))
+    const lib = new MusicLibrary(profile)
+    const readTrack = lib.readTrack.bind(lib)
+    let held = false
+    lib.readTrack = async (...args) => {
+      const track = await readTrack(...args)
+      if (args[0] === file && args[1] !== undefined && !held) { held = true; entered.resolve(); await release.promise }
+      return track
+    }
+    scanning = lib.addFolder(folder); await entered.promise
+    const current = await readTrack(file)
+    const patch = target === 'embedded' ? { title: 'confirmed title' } : { lyrics: '[00:00.00]confirmed lyric' }
+    const result = await exportAssets({ audioPath: file, patch, to: [target] })
+    assert.equal(result.written, true)
+    const next = result.embeddedWritten ? await readTrack(file) : { ...current, assets: mergeAssets(current.assets, result.assets) }
+    await lib.updateTrack(next)
+    const expected = structuredClone(lib.get(next.id))
+    release.resolve(); await scanning
+    assert.deepEqual(lib.get(next.id), expected, 'late scan must preserve the confirmed in-memory result')
+    assert.equal(lib.get(hashPath(peer)).name, 'original title', 'other paths still commit their scan results')
+    const saved = JSON.parse(readFileSync(join(profile, 'library/index.json'), 'utf8'))
+    const persisted = JSON.parse(JSON.stringify(expected))
+    assert.deepEqual(saved.tracks.find(t => t.id === next.id), persisted, 'late scan must preserve the persisted result')
+    assert.equal(saved.tracks.length, 2)
+    if (target === 'embedded') assert.equal((await parseFile(file)).common.title, 'confirmed title')
+    else assert.equal(readFileSync(join(folder, 'song.lrc'), 'utf8'), patch.lyrics)
+    const restarted = new MusicLibrary(profile); await restarted.load()
+    assert.deepEqual(restarted.get(next.id), persisted)
+    const again = await lib.scan()
+    assert.equal(again.unchanged, 2, 'invalidation must not suppress future incremental scans')
+  } finally { release.resolve(); await scanning; rmSync(own, { recursive: true, force: true }) }
+})
 
 test('partial unreadability preserves current-schema incremental scans and still refreshes old schemas', async () => {
   const own = mkdtempSync(join(tmpdir(), 'jj-scan-partial-'))

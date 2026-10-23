@@ -118,6 +118,8 @@ Windows 打包若在 `win-unpacked.tmp` 重命名时遇到 `EPERM`，可指定�
 
 0.4.5 交付后，主分支 [CI](https://github.com/jun501389541/JJ-Music/actions/runs/39620504197) 通过 93/93 个离线测试套件、5/5 项门禁及打包启动、安装器和 ZIP 校验；官方安装版 0.4.2→0.4.5 的[完整应用内更新验收](https://github.com/jun501389541/JJ-Music/actions/runs/39619505135)通过 16 项检查。网易云、QQ 音乐真实歌单界面已有验收记录。人工听感仍待验，真实音源更新/回退因缺少有效候选尚未执行；这些结果不代表全部第三方音源或曲目均可用。
 
+后续全仓审查的 9 项修复及 PR 评审的 3 项补充修复已通过 [PR #1](https://github.com/jun501389541/JJ-Music/pull/1) 合入 main；[合并后 CI](https://github.com/jun501389541/JJ-Music/actions/runs/39891650487) 的完整验证与打包检查全部通过。这批修复尚未发布新安装包，详见[执行记录](docs/development/2026-10-23-global-audit-fix-ledger.md)。
+
 ## 致谢与许可
 
 界面设计参考 Salt Player for Windows；音源兼容性参考 [LX Music](https://github.com/lyswhut/lx-music-desktop) 的公开自定义音源协议。参考软件、第三方脚本与个人音乐数据均不包含在仓库或发行包内。

@@ -47,6 +47,16 @@ export function safeName(value: string): string {
   return !name || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name) ? `_${name || '歌曲'}` : name
 }
 
+/** Metadata can expose a length mismatch; it cannot prove a full recording. */
+function durationWarning(interval: string | undefined, actual: number | undefined): string | undefined {
+  if (typeof interval !== 'string' || !/^\d{1,6}:[0-5]\d$/.test(interval)) return
+  if (typeof actual !== 'number' || !Number.isFinite(actual) || actual <= 0) return
+  const [minutes, seconds] = interval.split(':').map(Number)
+  const expected = minutes * 60 + seconds
+  if (expected <= 0 || Math.abs(actual - expected) <= Math.max(5, expected * 0.05)) return
+  return `音频时长约 ${Math.round(actual)} 秒，与目录标注 ${expected} 秒不符，请核对音源与歌曲版本`
+}
+
 /** Preserve original/translation/romanization with identical timestamps in one LRC. */
 export function mergeLyrics(lyrics: LyricResult, translation: boolean, romanization: boolean): string {
   const parts = [lyrics.lyric, translation ? lyrics.tlyric : '', romanization ? lyrics.rlyric : ''].filter(Boolean) as string[]
@@ -432,6 +442,8 @@ export class DownloadManager {
       if (task.quality.startsWith('flac') && !metadata.format.lossless) throw Error('音源返回有损音频，与所选无损音质不符')
       if (task.quality === '320k' && !metadata.format.lossless && metadata.format.bitrate && metadata.format.bitrate < 288000) throw Error('音源返回音频的码率明显低于所选 320k 音质')
       if (task.quality === 'flac24bit' && (metadata.format.bitsPerSample || 0) < 24) throw Error('音源返回的音频不足 24 bit，与所选音质不符')
+      const lengthWarning = durationWarning(task.track.interval, metadata.format.duration)
+      if (lengthWarning) task.warnings.push(lengthWarning)
       stage=join(folder, `.jj-${task.id}${ext}`)
       await rename(temp,stage); temp=''
       task.status='tagging'

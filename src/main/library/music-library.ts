@@ -66,6 +66,8 @@ export function isPlayableFormat(path: string): boolean {
 
 interface LibraryIndex {
   version: number
+  /** Some retained entries still need fields from a complete refresh. */
+  refreshPending?: boolean
   /** Absolute folder paths that were scanned. */
   folders: string[]
   tracks: LocalMusicInfo[]
@@ -176,7 +178,7 @@ export class MusicLibrary {
     // Discarding the whole index here would empty the user's library on screen
     // until they rescanned, which is a far worse outcome than showing entries
     // with a couple of blank fields.
-    this.stale = raw.version !== INDEX_VERSION
+    this.stale = raw.version !== INDEX_VERSION || raw.refreshPending === true
 
     this.folders = Array.isArray(raw.folders) ? raw.folders : []
     const entries = (raw.tracks ?? []).filter((track) => track?.path)
@@ -203,6 +205,7 @@ export class MusicLibrary {
   private async persist(): Promise<void> {
     const payload: LibraryIndex = {
       version: INDEX_VERSION,
+      ...(this.stale ? { refreshPending: true } : {}),
       folders: this.folders,
       tracks: [...this.tracks.values()]
     }
@@ -463,7 +466,7 @@ export class MusicLibrary {
 
     // Partial I/O failure must not turn a current index into a schema refresh.
     // If a refresh was already needed, keep it pending until a complete scan.
-    this.stale = this.stale && (unreadable.size > 0 || options.signal?.aborted === true)
+    this.stale = this.stale && (unreadable.size > 0 || invalidated.size > 0 || options.signal?.aborted === true)
     await this.persist()
     report(true)
     return progress

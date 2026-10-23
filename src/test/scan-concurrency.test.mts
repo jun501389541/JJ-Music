@@ -14,6 +14,46 @@ const { MusicLibrary, hashPath } = await import('./library/music-library.js')
 const root = mkdtempSync(join(tmpdir(), 'jj-scan-test-'))
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
 
+for (const restart of [false, true]) test(`a sidecar write during an old-schema scan retains pending refresh (${restart ? 'restart' : 'same process'})`, async () => {
+  const own = mkdtempSync(join(tmpdir(), 'jj-scan-schema-')), entered = deferred(), release = deferred()
+  let scanning
+  try {
+    const folder = join(own, 'music'), profile = join(own, 'profile'), file = join(folder, 'song.mp3'), cover = join(folder, 'song.png')
+    mkdirSync(folder); mkdirSync(join(profile, 'library'), { recursive: true })
+    const frame = Buffer.alloc(417); frame.writeUInt32BE(0xfffb9064)
+    writeFileSync(file, Buffer.concat(Array.from({ length: 12 }, () => frame)))
+    writeFileSync(cover, Buffer.from('89504e470d0a1a0a', 'hex'))
+    const info = await fsPromises.stat(file), id = hashPath(file), indexPath = join(profile, 'library/index.json')
+    const oldTrack = { id, path: file, name: 'song', singer: '', size: info.size, mtimeMs: info.mtimeMs }
+    writeFileSync(indexPath, JSON.stringify({ version: 4, folders: [folder], tracks: [oldTrack] }))
+    const lib = new MusicLibrary(profile); await lib.load()
+    const readTrack = lib.readTrack.bind(lib); let held = false
+    lib.readTrack = async (...args) => {
+      const fresh = await readTrack(...args)
+      if (!held && args[1] !== undefined) { held = true; entered.resolve(); await release.promise }
+      return fresh
+    }
+    scanning = lib.scan(); await entered.promise
+    const result = await exportAssets({ audioPath: file, patch: { lyrics: '[00:00.00]confirmed' }, to: ['sidecar'] })
+    assert.equal(result.written, true)
+    // This is the production sidecar-only commit: no metadata reread occurs.
+    await lib.updateTrack({ ...oldTrack, assets: mergeAssets(oldTrack.assets, result.assets) })
+    release.resolve(); await scanning
+    assert.equal(lib.isStale(), true, 'discarded schema reads cannot complete the upgrade')
+    const reloaded = new MusicLibrary(profile); await reloaded.load()
+    assert.equal(reloaded.isStale(), true, 'pending schema work must survive persistence and restart')
+    const retry = restart ? reloaded : lib
+    await retry.scan()
+    assert.equal(retry.get(id).coverPath, cover, 'unchanged audio must still gain its sidecar cover metadata')
+    assert.equal(retry.get(id).assets.cover[0].origin, 'sidecar')
+    assert.equal(retry.get(id).assets.lyrics.main[0].origin, 'sidecar')
+    assert.equal(readFileSync(join(folder, 'song.lrc'), 'utf8'), '[00:00.00]confirmed')
+    assert.equal(retry.isStale(), false)
+    const completed = new MusicLibrary(profile); await completed.load()
+    assert.equal(completed.isStale(), false, 'only the completed scan publishes the current schema version')
+  } finally { release.resolve(); await scanning; rmSync(own, { recursive: true, force: true }) }
+})
+
 for (const target of ['embedded', 'sidecar']) test(`a late scan cannot replace an actual ${target} write's refreshed index`, async () => {
   const own = mkdtempSync(join(tmpdir(), 'jj-scan-write-')), entered = deferred(), release = deferred()
   let scanning

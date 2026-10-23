@@ -39,6 +39,16 @@ PR #2合并后的main CI39913184381两项全部成功。本地候选包使用已
 
 候选asar内容核验通过；打包应用的全新隔离profile导入/启用生成源后，实际登记五平台、解析受控jjstream地址并通过fork宿主发出受控lx.request，未通过项0。日志`.cache/final-delivery/verify-package.log`及`packaged-source.log`；该工具最终主动结束自有隔离进程树，不冒称为优雅退出验收。
 
+发布候选提交`c22788941bc58ed4ddd2bc3d2b0cd8722680be4b`及不可变标签`v0.4.6`已推送。[发布CI39914953296](https://github.com/jun501389541/JJ-Music/actions/runs/39914953296)的verify/draft均成功：一次性runner实际首次安装0.4.6、卸载保留资料、安装官方0.4.2、同路径升级0.4.6，四次进程退出码均0；0.4.6.0版本与NSIS marker匹配，settings/playlists/pending三份文件逐阶段长度和SHA-256一致。13阶段报告`status=passed`，artifact12484038796的ZIP摘要`b61454717f6c632c423d977a3262fb8806d322a7fa075d44722183433fe07a87`，本地`.cache/final-delivery/installer-artifact-39914953296/report.json`。
+
+草稿Release ID为`421540970`。受保护环境的既有U0许可、签名密钥及公钥均未修改；流程已签名并上传六项资产。远程ZIP的API长度145,884,191字节、SHA-256 `ce7a4a186702c7a32d82e60725a4362e68809732268cb62587fe3580f8ad5619`；远程Setup为103,643,470字节、SHA-256 `26d9761b4f04fa501bbc17e6f0d3652f0f791cb56d67e039b754af41204c7196`。本地候选与远程包摘要不同，后续仅用实际下载的远程包验证与发布，不将本地候选升级证据挪作远程证据。
+
+六项远程文件已下载逐项匹配API长度/SHA-256；首轮安装包下载180秒超时，保留已验证ZIP后用新请求和有界预算重试，未放宽字节或摘要检查。使用受保护环境公钥独立验证签名清单、Setup SHA-256/SHA-512、latest.yml及完整资产集合，两项验证命令退出0。报告`.cache/final-delivery/remote-assets.json`、`asset-check-ok.json`及对应日志；没有获取私钥。
+
+实际远程ZIP再次执行官方0.4.5→0.4.6便携升级，运行`466219ea-51c2-464b-a7ef-14ed03ef9bdb`，22项通过，旧资料与合成哨兵不变，应用正常关闭、自有根回收，报告`.cache/final-delivery/portable-report.json`。随后精确绑定不可变`v0.4.6`标签及c227889提交公开Release421540970；[v0.4.6](https://github.com/jun501389541/JJ-Music/releases/tag/v0.4.6)已匿名验证draft=false、latest=v0.4.6、六项相同资产。匿名凭据为`.cache/final-delivery/published-verification.json`。
+
+官方应用内更新探针已将目标版本及两处Setup摘要固定到实际远程0.4.6。Node语法、PowerShell AST检查通过；日常主机直接运行仍在副作用前以CI_ONLY_REFUSAL拒绝。该变更仅更新验收夹具常量，不更改产品更新来源、用户确认、签名校验、安装门禁或已发布二进制。
+
 ## 保留边界
 
 - 人工听感、录音身份/实际音质及日常交互仍需真人确认，遵循用户此前“全部可自动验证先完成，听感待验”的选择。

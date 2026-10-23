@@ -63,7 +63,7 @@ $env:OR8_UPDATER_ROOT = $root
 $oldSetup = Join-Path $root 'JJ-Music-0.4.2-Setup-x64.exe'
 $installDir = Join-Path $root 'Installed/JJ Music'
 $appExe = Join-Path $installDir 'JJ Music.exe'
-$targetHash = '709387aef5fbc0fee15de5a2e24f0824d6e5b7f0ed678e13b8d9a672351cbe2c'
+$targetHash = '26d9761b4f04fa501bbc17e6f0d3652f0f791cb56d67e039b754af41204c7196'
 $runnerDebugConfigured = $false
 try {
   Invoke-WebRequest -Uri 'https://github.com/jun501389541/JJ-Music/releases/download/v0.4.2/JJ-Music-0.4.2-Setup-x64.exe' -OutFile $oldSetup
@@ -188,7 +188,7 @@ public static class Or8Windows {
   $result = Get-Content -LiteralPath (Join-Path $root 'updater-report.json') -Raw | ConvertFrom-Json
   if ($result.status -cne 'passed') { throw 'Probe did not affirm successful restart/data continuity' }
   $newVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe).ProductVersion.Trim()
-  if ($newVersion -cnotin @('0.4.5', '0.4.5.0')) { throw 'Installed target version differs after restart' }
+  if ($newVersion -cnotin @('0.4.6', '0.4.6.0')) { throw 'Installed target version differs after restart' }
   Record 'official-target-installed' @{ version = $newVersion; exeHash = (Get-FileHash -LiteralPath $appExe).Hash }
   $report.status = 'passed'
 } catch {
@@ -215,6 +215,6 @@ public static class Or8Windows {
   }
   $env:TEMP = $originalTemp; $env:TMP = $originalTmp; $env:LOCALAPPDATA = $originalLocal
   Remove-Item Env:OR8_UPDATER_ROOT -ErrorAction SilentlyContinue
-  if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Official 0.4.2 -> 0.4.5 packaged updater: **$($report.status)**. Inspect supervisor/updater reports and screenshots. No build, signing, gate or secret changes. This disposable runner is discarded; no daily host acceptance is claimed." }
+  if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Official 0.4.2 -> 0.4.6 packaged updater: **$($report.status)**. Inspect supervisor/updater reports and screenshots. No build, signing, gate or secret changes. This disposable runner is discarded; no daily host acceptance is claimed." }
   # Preserve fixture and processes for diagnosis; GitHub destroys this entire runner.
 }

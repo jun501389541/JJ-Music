@@ -2,23 +2,23 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.4.5** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.4.6** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.5/JJ-Music-0.4.5-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.5/JJ-Music-0.4.5-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.5/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.6/JJ-Music-0.4.6-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.6/JJ-Music-0.4.6-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.6/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。安装版支持在应用内检查更新，确认下载、校验后再确认重启安装；便携版需退出应用后手动更新，并保留原有 `data/`。安装版默认使用 `%APPDATA%/jj-music`，便携版默认使用 exe 旁的 `data/`，详细规则见下方“数据与限制”。
 
-### 0.4.5 更新重点
+### 0.4.6 更新重点
 
-- 在线资料刷新失败时保留上次成功结果，并显示过期或失败状态；头像、歌曲详情补全和下载封面接入分平台、分能力的健康状态与本地脱敏诊断。
-- 已保存的网易云、QQ 音乐远程歌单可预览刷新差异，取消时保留原快照，确认后才应用完整候选。
-- 待写入歌词及其翻译、音译支持重启恢复、明确重选和失败重试；容量不足时保留已有选择。同文件资料写入按路径串行，避免迟到任务覆盖新选择。
+- 修复暂停恢复、删除当前歌曲与重复播放列表时的会话及历史记录一致性问题。
+- 不可达目录保留曲库资料；扫描不再覆盖刚确认写入的标签或歌词来源，未完成的旧索引刷新可跨重启继续。
+- 修复音源替换隔离与启停持久化竞态，减少运行校验的重复解码；资料迁移和更新取消保持用户确认的结果。
 
 完整变更见[更新日志](CHANGELOG.md)。
 
@@ -78,8 +78,8 @@
 打包输出：
 
     release/
-      JJ-Music-0.4.5-Setup-x64.exe
-      JJ-Music-0.4.5-Portable-x64.zip
+      JJ-Music-0.4.6-Setup-x64.exe
+      JJ-Music-0.4.6-Portable-x64.zip
       SHA256SUMS.txt          # 由 npm run dist 生成，只列本次版本的两个文件
       win-unpacked/
 
@@ -118,7 +118,7 @@ Windows 打包若在 `win-unpacked.tmp` 重命名时遇到 `EPERM`，可指定�
 
 0.4.5 交付后，主分支 [CI](https://github.com/jun501389541/JJ-Music/actions/runs/39620504197) 通过 93/93 个离线测试套件、5/5 项门禁及打包启动、安装器和 ZIP 校验；官方安装版 0.4.2→0.4.5 的[完整应用内更新验收](https://github.com/jun501389541/JJ-Music/actions/runs/39619505135)通过 16 项检查。网易云、QQ 音乐真实歌单界面已有验收记录。人工听感仍待验，真实音源更新/回退因缺少有效候选尚未执行；这些结果不代表全部第三方音源或曲目均可用。
 
-后续全仓审查的 9 项修复及 PR 评审的 3 项补充修复已通过 [PR #1](https://github.com/jun501389541/JJ-Music/pull/1) 合入 main；[合并后 CI](https://github.com/jun501389541/JJ-Music/actions/runs/39891650487) 的完整验证与打包检查全部通过。这批修复尚未发布新安装包，详见[执行记录](docs/development/2026-10-23-global-audit-fix-ledger.md)。
+后续全仓审查的 9 项修复及 PR 评审的 3 项补充修复已通过 [PR #1](https://github.com/jun501389541/JJ-Music/pull/1) 合入 main；[PR #2](https://github.com/jun501389541/JJ-Music/pull/2) 补齐扫描写入与旧格式索引刷新连续性。全部纳入 0.4.6 交付，验证与剩余真实验收边界见[最终交付记录](docs/development/2026-10-23-reliability-final-delivery.md)。
 
 ## 致谢与许可
 

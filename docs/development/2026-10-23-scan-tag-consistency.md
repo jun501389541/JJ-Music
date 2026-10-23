@@ -47,3 +47,7 @@
 GREEN扫描7/7：同进程与重启后均能在音频大小/mtime不变时补齐侧车封面与歌词来源，确认歌词内容未变，完整刷新后再次加载不再标记待刷新，日志`.cache/ga-fixes/scan-schema-green.log`。上次自动审批服务额度耗尽的调用未执行生产补丁；用户继续后核实实际文件并完成上述GREEN，不将中断调用当作验证结果。
 
 补充确认轮`npm run verify`退出0，类型检查、生产构建、93/93套件、5/5门禁通过，日志`.cache/ga-fixes/scan-schema-verify.log`。既有生产集成探针重新构建运行`adf45ee2-8843-4174-8553-312c3702a6ea`，11项通过，正常退出、profile已回收，仍保留四个目录请求被守卫拒绝的脱敏记录；日志`.cache/ga-fixes/scan-schema-ui-confirm.log`。旧格式跨重启场景由正式模块回归覆盖，不将该场景冒称为已完成UI对话框验收。补充提交后重新检查远端CI。
+
+## 合并完成
+
+补充提交`bd19a12d4c8a11a0bca59a88c39deff7f0f6c8be`的CI39911248317两项任务全部成功。用户明确授权后，[PR #2](https://github.com/jun501389541/JJ-Music/pull/2)合入main，提交`965c974e54f41d844caeffe4c291909818e164f1`；main CI39913184381同样全部通过。上文未合并/未发布为当时快照；用户随后授权新版本交付，后续以[最终交付记录](2026-10-23-reliability-final-delivery.md)为准。

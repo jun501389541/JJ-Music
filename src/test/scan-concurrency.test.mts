@@ -1,10 +1,46 @@
 import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
-const { MusicLibrary } = await import('./library/music-library.js')
+const { MusicLibrary, hashPath } = await import('./library/music-library.js')
 const root = mkdtempSync(join(tmpdir(), 'jj-scan-test-'))
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+test('GA04 scans preserve unavailable roots while pruning removed files in available roots', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'jj-scan-offline-'))
+  try {
+    const offline = join(own, 'unmounted'), available = join(own, 'available'), profile = join(own, 'profile')
+    mkdirSync(available); mkdirSync(join(profile, 'library'), { recursive: true })
+    const missing = join(offline, 'song.wav'), deleted = join(available, 'deleted.wav')
+    writeFileSync(join(profile, 'library/index.json'), JSON.stringify({ version: 5, folders: [offline, available], tracks: [missing, deleted].map(path => ({ id: hashPath(path), path, name: 'song', singer: '' })) }))
+    const lib = new MusicLibrary(profile); await lib.load()
+    const progress = await lib.scan()
+    assert.ok(lib.get(hashPath(missing)), 'offline entries survive')
+    assert.equal(lib.get(hashPath(deleted)), undefined, 'confirmed deletion under reachable root is pruned')
+    assert.ok(progress.failed > 0, 'unreachable root is reported')
+    const saved = JSON.parse(readFileSync(join(profile, 'library/index.json'), 'utf8'))
+    assert.deepEqual(saved.tracks.map(t => t.path), [missing])
+    await lib.removeFolder(available)
+    await lib.scan()
+    assert.ok(lib.get(hashPath(missing)), 'all roots unavailable still preserves index')
+  } finally { rmSync(own, { recursive: true, force: true }) }
+})
+test('GA05 folder removal invalidates a metadata read already in progress', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'jj-scan-remove-'))
+  try {
+    const folder = join(own, 'music'), profile = join(own, 'profile')
+    mkdirSync(folder); const file = join(folder, 'song.wav'); writeFileSync(file, 'fixture')
+    const lib = new MusicLibrary(profile), entered = deferred(), release = deferred()
+    lib.readTrack = async path => { entered.resolve(); await release.promise; return { id: hashPath(path), path, name: 'song', singer: '' } }
+    const pending = lib.addFolder(folder); await entered.promise
+    await lib.removeFolder(folder); release.resolve(); await pending
+    assert.equal(lib.getAll().length, 0)
+    assert.deepEqual(lib.getFolders(), [])
+    assert.deepEqual(JSON.parse(readFileSync(join(profile, 'library/index.json'), 'utf8')).tracks, [])
+  } finally { rmSync(own, { recursive: true, force: true }) }
+})
 const wav = Buffer.alloc(44)
 wav.write('RIFF', 0); wav.writeUInt32LE(36, 4); wav.write('WAVEfmt ', 8)
 wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22)

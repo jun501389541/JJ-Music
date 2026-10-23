@@ -6,8 +6,9 @@ import { runDiagnosticChecks } from './online/diagnostic-check.js'
 const track={id:'wy_1',source:'wy',name:'Fixture',singer:'Fixture',meta:{songmid:'1'}}
 const context=action=>onlineContext('wy',action)
 function engine(answers){
-  const source=new SourceEngine({versionOf:id=>id+'-version'},'unused','ipc')
-  for(const id of Object.keys(answers))source.runtimes.set(id,{api:{meta:{id,stableId:'stable-'+id,name:'Fixture '+id}},host:{dead:false,id},sources:[{id:'wy',actions:['musicUrl','lyric'],qualitys:['128k']}]})
+  const apis=new Map(Object.keys(answers).map(id=>[id,{meta:{id,stableId:'stable-'+id,name:'Fixture '+id,enabled:true},source:''}]))
+  const source=new SourceEngine({versionOf:id=>id+'-version',get:id=>apis.get(id)},'unused','ipc')
+  for(const id of Object.keys(answers))source.runtimes.set(id,{api:apis.get(id),host:{dead:false,id},sources:[{id:'wy',actions:['musicUrl','lyric'],qualitys:['128k']}]})
   source.sourceProviders.set('wy',Object.keys(answers))
   source.getHost=()=>({request:async(host,payload)=>answers[host.id](payload)})
   return source

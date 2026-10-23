@@ -6,9 +6,30 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { join } from 'node:path'
-import { migrationSource, pointerPath, relocationProblem, resolveDataDir } from './data-location.js'
+import { migrationSource, pointerPath, relocationProblem, resolveDataDir, copyDataForRelocation } from './data-location.js'
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 
 const APPDATA = 'C:/Users/me/AppData/Roaming/jj-music'
+test('relocation refuses existing target data and never publishes a new pointer', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'jj-relocation-'))
+  try {
+    const current = join(root, 'current'), target = join(root, 'target'), pointer = join(root, 'pointer.json')
+    await mkdir(current); await mkdir(target)
+    await writeFile(join(current, 'playlists.json'), 'current lists')
+    await writeFile(join(target, 'playlists.json'), 'old target lists')
+    await writeFile(pointer, current)
+    await assert.rejects(async () => {
+      await copyDataForRelocation(current, target, () => true)
+      await writeFile(pointer, target)
+    })
+    assert.equal(await readFile(pointer, 'utf8'), current)
+    assert.equal(await readFile(join(target, 'playlists.json'), 'utf8'), 'old target lists')
+    const empty = join(root, 'empty'); await mkdir(empty)
+    await copyDataForRelocation(current, empty, () => true)
+    assert.equal(await readFile(join(empty, 'playlists.json'), 'utf8'), 'current lists')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 const EXE = 'D:/Apps/JJ Music'
 const base = {
   switchDir: null, envDir: null, exeDir: EXE, appDataDir: APPDATA,

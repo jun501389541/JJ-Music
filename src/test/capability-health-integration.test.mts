@@ -19,9 +19,10 @@ test('catalog cache reads do not count as recovery and cooling only blocks the f
   assert.equal(album.data.status,'available')
 })
 function engine(health, answer){
-  const store={versionOf:()=> 'v1'}
+  const api={meta:{id:'a',stableId:'stable-a',name:'Fixture',enabled:true},source:''}
+  const store={versionOf:()=> 'v1',get:id=>id==='a'?api:undefined}
   const source=new SourceEngine(store,'unused','ipc',{health})
-  source.runtimes.set('a',{api:{meta:{id:'a',stableId:'stable-a',name:'Fixture'}},host:{dead:false},sources:[{id:'wy',actions:['musicUrl','lyric'],qualitys:['128k']}]})
+  source.runtimes.set('a',{api,host:{dead:false},sources:[{id:'wy',actions:['musicUrl','lyric'],qualitys:['128k']}]})
   source.sourceProviders.set('wy',['a'])
   source.getHost=()=>({request:answer})
   return source

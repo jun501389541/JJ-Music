@@ -707,6 +707,7 @@ function orderOf(engine) {
 function multiSourceEngine(listOrder, runtimes) {
   const engine = new SourceEngine({
     list: () => listOrder,
+    get: id => { const api = listOrder.find(api => api.meta.id === id); return api ? { ...api, source: '' } : undefined },
     versionOf: apiId => `test-version-${apiId}`
   }, 'unused')
   engine.runtimes = new Map(runtimes.map((r) => [r.api.meta.id, r]))

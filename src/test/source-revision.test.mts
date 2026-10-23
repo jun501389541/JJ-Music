@@ -37,6 +37,33 @@ test('transient candidates stay unroutable until durable commit publishes their 
     assert.equal(f.events.at(-1).phase,'ready');assert.equal(f.events.at(-1).providerVersion,after.providerVersion)
   }finally{f.cleanup()}
 })
+
+test('GA06 a quarantined same-name replacement cannot route the old runtime or its late response', async () => {
+  const f = fixture()
+  try {
+    await f.engine.reload(f.meta.id)
+    f.store.import(script('2'), 'fixture')
+    f.store.quarantine(f.meta.id, 'controlled quarantine')
+    assert.equal(f.engine.providerRevision(f.meta.id), undefined)
+    await assert.rejects(f.engine.getMusicUrl('wy', { ...song, providerId: f.meta.stableId }, '128k', true))
+  } finally { f.cleanup() }
+})
+
+test('GA06 quarantine tears down the old host and invalidates its late response', async () => {
+  const f = fixture(), gate = deferred(), entered = deferred()
+  let pending
+  try {
+    await f.engine.reload(f.meta.id)
+    f.engine.host.request = async () => { entered.resolve(); return gate.promise }
+    pending = assert.rejects(f.engine.getMusicUrl('wy', { ...song, providerId: f.meta.stableId }, '128k', true))
+    await entered.promise
+    f.store.import(script('2'), 'fixture')
+    await f.engine.quarantine(f.meta.id, 'controlled quarantine')
+    assert.equal(f.states[0].dead, true)
+    assert.equal(f.engine.isInitialized(f.meta.id), false)
+    gate.resolve('https://cdn.test/old.mp3'); await pending
+  } finally { gate.resolve('https://cdn.test/old.mp3'); await pending; f.cleanup() }
+})
 test('invalidation is synchronous before teardown waits, and same-content restoration cannot accept an old response',async()=>{
   const f=fixture();try{
     await f.engine.reload(f.meta.id)

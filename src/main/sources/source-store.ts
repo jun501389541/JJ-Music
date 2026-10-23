@@ -384,8 +384,10 @@ export class SourceStore {
     // quarantine. Without this a user re-enabling everything out of habit
     // would re-arm the script that can shut the machine down.
     if (enabled && api.quarantined) return false
+    const previous = api.enabled
     api.enabled = enabled
-    this.persist()
+    try { this.persist() }
+    catch (error) { api.enabled = previous; throw error }
     return true
   }
 

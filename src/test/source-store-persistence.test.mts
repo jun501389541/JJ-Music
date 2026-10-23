@@ -46,6 +46,7 @@ test('source persistence reports a persistent replacement lock after bounded att
   assert.throws(() => store.setEnabled(meta.id, true), value => value === error)
   assert.equal(calls, 5)
   assert.equal(fs.readFileSync(store.path, 'utf8'), original)
+  assert.equal(store.get(meta.id).meta.enabled, false, 'GA07 failed enable must roll back memory')
 }))
 
 test('source persistence does not retry unrelated filesystem failures', () => fixture((store, meta, original) => {
@@ -56,4 +57,14 @@ test('source persistence does not retry unrelated filesystem failures', () => fi
   assert.throws(() => store.setEnabled(meta.id, true), value => value === error)
   assert.equal(calls, 1)
   assert.equal(fs.readFileSync(store.path, 'utf8'), original)
+}))
+
+test('GA07 failed disable preserves the last durable enabled state', () => fixture((store, meta) => {
+  store.setEnabled(meta.id, true)
+  const durable = fs.readFileSync(store.path, 'utf8')
+  fs.renameSync = () => { throw Object.assign(new Error('controlled write failure'), { code: 'EINVAL' }) }
+  syncBuiltinESMExports()
+  assert.throws(() => store.setEnabled(meta.id, false))
+  assert.equal(store.get(meta.id).meta.enabled, true)
+  assert.equal(fs.readFileSync(store.path, 'utf8'), durable)
 }))

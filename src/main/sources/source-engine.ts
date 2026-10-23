@@ -623,6 +623,12 @@ export class SourceEngine {
     await this.stopRuntime(apiId)
   }
 
+  async quarantine(apiId: string, reason: string): Promise<void> {
+    // Invalidate routing and pending work before persisting the verdict.
+    await this.stop(apiId)
+    this.store.quarantine(apiId, reason)
+  }
+
   private async stopRuntime(apiId: string): Promise<void> {
     const runtime = this.runtimes.get(apiId)
     if (!runtime) return
@@ -651,6 +657,8 @@ export class SourceEngine {
     const runtime=this.runtimes.get(id)??[...this.runtimes.values()].find(r=>r.api.meta.stableId===id)
     if(!runtime||runtime.host.dead||runtime.transient||runtime.initialized===false)return undefined
     const apiId=runtime.api.meta.id,generation=runtime.generation??this.lifecycle.get(apiId)??0
+    const current = this.store.get(apiId)
+    if (!current?.meta.enabled || current.meta.quarantined || current.source !== runtime.api.source) return undefined
     if(runtime.generation!==undefined&&!this.isCurrentGeneration(apiId,generation))return undefined
     return {apiId,providerId:runtime.api.meta.stableId??apiId,providerVersion:this.store.versionOf(apiId),generation}
   }

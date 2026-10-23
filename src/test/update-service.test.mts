@@ -4,9 +4,41 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { Readable } from 'node:stream'
 import { UpdateService } from '../../out/test/updates/service.js'
 
 const pair = generateKeyPairSync('ed25519')
+test('GA08 cancellation during file verification cannot publish ready or overwrite a retry', async () => {
+  const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+  for (const retry of [false, true]) {
+    const dir = await mkdtemp(join(tmpdir(), 'jj-update-cancel-'))
+    const realRead = fs.createReadStream, entered = [deferred(), deferred()], released = [deferred(), deferred()]
+    let first, second, reads = 0
+    try {
+      const path = join(dir, name); await writeFile(path, body)
+      fs.createReadStream = file => {
+        assert.equal(file, path)
+        const index = reads++; entered[index].resolve()
+        return Readable.from((async function* () { await released[index].promise; yield body })())
+      }
+      syncBuiltinESMExports()
+      const { service, setPath } = fixture(); setPath(path); await service.check()
+      first = service.download(); await entered[0].promise
+      service.cancel()
+      if (retry) { second = service.download(); await entered[1].promise }
+      released[0].resolve(); await first
+      assert.equal(service.getState().phase, retry ? 'downloading' : 'available')
+      if (retry) { released[1].resolve(); await second; assert.equal(service.getState().phase, 'ready') }
+    } finally {
+      for (const gate of released) gate.resolve()
+      await Promise.allSettled([first, second].filter(Boolean))
+      fs.createReadStream = realRead; syncBuiltinESMExports()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+})
 const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
 const name = 'JJ-Music-0.3.0-Setup-x64.exe'
 const body = Buffer.from('installer contents')

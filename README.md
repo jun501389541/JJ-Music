@@ -117,6 +117,7 @@ Windows 打包若在 `win-unpacked.tmp` 重命名时遇到 `EPERM`，可指定�
 
 ## 文档与反馈
 
+- [0.5.0 发布与验证记录](docs/development/2026-10-25-v0.5.0-release.md)
 - [更新日志](CHANGELOG.md)
 - [架构说明](docs/ARCHITECTURE.md)
 - [下载与歌单导入](docs/DOWNLOADS_AND_PLAYLIST_IMPORT.md)
@@ -124,6 +125,8 @@ Windows 打包若在 `win-unpacked.tmp` 重命名时遇到 `EPERM`，可指定�
 - [发布后专项验收](docs/development/2026-10-15-online-reliability/OR8-post-release-acceptance.md)
 - [0.1.1 审阅与验证记录](docs/FINAL_REVIEW_0.1.1.md)
 - [提交问题](https://github.com/jun501389541/JJ-Music/issues)
+
+0.5.0 已通过 109/109 离线套件、5/5 门禁、成品合成音源检查、真实 NSIS 安装与升级、六资产签名/摘要复核、22 项便携资料升级及 16 项官方应用内更新检查。交付提交、公开下载和应用内更新验收见[本次发布记录](docs/development/2026-10-25-v0.5.0-release.md)。人工听感仍待验。
 
 0.4.6 [发布CI](https://github.com/jun501389541/JJ-Music/actions/runs/39914953296)通过 93/93 个离线测试套件、5/5 项门禁及真实安装、卸载保留资料和同路径升级；远程签名与摘要核验、0.4.5→0.4.6 便携升级 22 项检查通过，官方安装版 0.4.2→0.4.6 的[完整应用内更新验收](https://github.com/jun501389541/JJ-Music/actions/runs/39916946344)通过 16 项检查。网易云、QQ 音乐真实歌单界面复验通过；24 个真实音源/平台组合的完整解码中 19 个通过、5 个解析失败或长度不符。人工听感仍待验，真实音源更新/回退因缺少有效候选尚未执行。
 

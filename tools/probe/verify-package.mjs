@@ -8,6 +8,11 @@
  * instead of by re-reading code.
  *
  * Usage: node tools/probe/verify-package.mjs [app.asar]
+ *        node tools/probe/verify-package.mjs <app.asar> --artifact-version=X.Y.Z
+ *
+ * Default mode checks local checkout freshness. Artifact mode checks archive
+ * content and the expected version, without comparing clocks across machines.
+ * It does not authenticate provenance; verify release digests/signatures separately.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
@@ -16,8 +21,26 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const asarPath = process.argv[2] ?? join(repoRoot, 'release', 'win-unpacked', 'resources', 'app.asar')
-const exePath = join(repoRoot, 'release', 'win-unpacked', 'JJ Music.exe')
+let requestedAsar, artifactVersion
+function invalidArguments(message) {
+  console.error(message)
+  console.error('Usage: verify-package.mjs [app.asar] OR <app.asar> --artifact-version=X.Y.Z')
+  process.exit(2)
+}
+for (const arg of process.argv.slice(2)) {
+  if (arg.startsWith('--artifact-version=')) {
+    if (artifactVersion !== undefined) invalidArguments('Duplicate artifact version')
+    artifactVersion = arg.slice('--artifact-version='.length)
+    if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(artifactVersion)) {
+      invalidArguments('Artifact version must be a stable X.Y.Z version')
+    }
+  } else if (arg.startsWith('-') || requestedAsar !== undefined) {
+    invalidArguments('Unknown option or multiple archive paths')
+  } else requestedAsar = arg
+}
+if (artifactVersion !== undefined && !requestedAsar) invalidArguments('Artifact mode requires an explicit archive path')
+const asarPath = resolve(requestedAsar ?? join(repoRoot, 'release', 'win-unpacked', 'resources', 'app.asar'))
+const exePath = resolve(dirname(asarPath), '..', 'JJ Music.exe')
 
 if (!existsSync(asarPath)) {
   console.error(`no asar at ${asarPath} — run \`npm run pack\` first`)
@@ -58,16 +81,19 @@ function newestSource(dir) {
   return { time: newest, file: newestFile }
 }
 
-const newest = newestSource(join(repoRoot, 'src'))
-console.log(`newest src: ${new Date(newest.time).toLocaleString()}  (${newest.file.replace(repoRoot, '')})`)
-
-const stale = newest.time > asarTime.getTime()
-console.log(
-  `\n${stale ? '*** STALE PACKAGE ***' : 'package is newer than all sources'}`
-)
-if (stale) {
-  console.log('The packaged build predates the newest source change, so it does')
-  console.log('not contain it. Re-run `npm run pack` before testing.')
+let stale = false
+if (artifactVersion !== undefined) {
+  console.log('\nartifact content mode: expected version ' + artifactVersion)
+  console.log('Cross-host timestamps are not compared; checkout freshness is not asserted.')
+} else {
+  const newest = newestSource(join(repoRoot, 'src'))
+  console.log('\nnewest src: ' + new Date(newest.time).toLocaleString() + '  (' + newest.file.replace(repoRoot, '') + ')')
+  stale = newest.time > asarTime.getTime()
+  console.log('\n' + (stale ? '*** STALE PACKAGE ***' : 'package is newer than all sources'))
+  if (stale) {
+    console.log('The packaged build predates the newest source change, so it does')
+    console.log('not contain it. Re-run npm run pack before testing.')
+  }
 }
 
 // Extract and look for the feature markers.
@@ -88,6 +114,19 @@ try {
       else if (/\.(js|cjs|mjs|html)$/.test(entry.name)) text += readFileSync(full, 'utf8')
     }
     return text
+  }
+
+  if (artifactVersion !== undefined) {
+    let metadata
+    try {
+      metadata = JSON.parse(readFileSync(join(tmp, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
+    } catch {
+      throw new Error('Invalid package metadata: expected a readable package.json object')
+    }
+    if (metadata?.version !== artifactVersion) {
+      throw new Error('Package version mismatch: expected ' + artifactVersion + ', found ' + String(metadata?.version))
+    }
+    console.log('package version verified: ' + metadata.version)
   }
 
   const main = readAll(join(tmp, 'out', 'main'))
@@ -154,7 +193,7 @@ try {
   console.log(
     `\n${missing === 0 && unpackedMissing === 0 ? 'all features present' : `${missing + unpackedMissing} check(s) MISSING`}`
   )
-  process.exit(stale || missing > 0 || unpackedMissing > 0 ? 1 : 0)
+  process.exitCode = stale || missing > 0 || unpackedMissing > 0 ? 1 : 0
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** Playlist detail: the tracks of one list. */
 import { useUiStore, type MenuItem } from '../stores/ui'
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { isLocalTrack, type PlayableTrack } from '@shared/types'
 import { toMediaUrl } from '@shared/media-url'
@@ -11,6 +11,10 @@ import { useToastStore } from '../stores/toast'
 import AppIcon from '../components/AppIcon.vue'
 import TrackList from '../components/TrackList.vue'
 import PlaylistRefreshPanel from '../components/PlaylistRefreshPanel.vue'
+import { playlistEntryKey } from '@shared/playlist-refresh'
+import { filterPlaylistTracks, playlistTrackIndex } from '../utils/playlist-track-filter'
+import { useViewState } from '../composables/view-state'
+import { usePlaylistExport } from '../composables/use-playlist-export'
 
 const route = useRoute()
 const router = useRouter()
@@ -18,12 +22,20 @@ const library = useLibraryStore()
 const player = usePlayerStore()
 const toast = useToastStore()
 const ui = useUiStore()
+const {exporting,exportPlaylists}=usePlaylistExport()
 
 const tracks = ref<PlayableTrack[]>([])
 const loading = ref(true)
 
 const listId = computed(() => String(route.params['id'] ?? ''))
 const playlist = computed(() => library.playlists.find((list) => list.id === listId.value))
+const {state:rememberedFilter,save:saveFilter}=useViewState('playlist-tracks:'+listId.value,{query:''})
+const query=ref(typeof rememberedFilter.query==='string'?rememberedFilter.query:'')
+const visibleTracks=computed(()=>filterPlaylistTracks(tracks.value,query.value))
+const filtering=computed(()=>!!query.value.trim())
+const trackList=ref<{scrollToTop():void}|null>(null)
+watch(query,async value=>{saveFilter({query:value});await nextTick();trackList.value?.scrollToTop()})
+function playFiltered(track:PlayableTrack):void{const index=playlistTrackIndex(tracks.value,track);if(index>=0)void playAt(index)}
 
 let loadGeneration = 0
 onUnmounted(() => { loadGeneration++ })
@@ -92,7 +104,7 @@ async function removeTracks(selection: PlayableTrack[]): Promise<void> {
   const many = selection.length > 1
   if (many && !await ui.confirm('批量移除', `从歌单移除选中的 ${selection.length} 首？歌曲仍保留在曲库中，可再次加入。`)) return
   try {
-    await window.jj.playlists.removeTracks(listId.value, selection.map((track) => track.id))
+    await window.jj.playlists.removeTracks(listId.value, selection.map(playlistEntryKey), true)
   } catch (error) {
     // Without this the rows stay on screen looking removed while the list on disk
     // never changed, and the next 打开 shows them again.
@@ -121,15 +133,17 @@ function playlistActions(_track: PlayableTrack, _index: number, selection: Playa
  */
 let orderWrite: Promise<void> = Promise.resolve()
 function reorder(from: number, to: number): void {
+  if(filtering.value)return
+  const targetId=listId.value
   const list = [...tracks.value]
   const [moved] = list.splice(from, 1)
   if (!moved) return
   list.splice(to, 0, moved)
   tracks.value = list
-  const order = list.map((track) => track.id)
+  const order = list.map(playlistEntryKey)
   orderWrite = orderWrite
     .catch(() => {})
-    .then(() => window.jj.playlists.reorder(listId.value, order))
+    .then(() => window.jj.playlists.reorder(targetId, order, true))
     .catch(async (error: unknown) => {
       toast.error(error instanceof Error ? error.message : '保存顺序失败')
       await load()
@@ -181,7 +195,7 @@ async function clearCover(): Promise<void> {
           <p class="view__subtitle">{{ tracks.length }} 首曲目 · 按住 Ctrl / Shift 选择多首可批量移除，拖动行可调整顺序</p>
         </div>
       </div>
-      <div class="actions">
+      <div class="actions"><button class="btn" :disabled="exporting||loading||!playlist" @click="exportPlaylists(listId,playlist?.name)">{{ exporting?'正在导出…':'导出完整歌单' }}</button>
         <button class="btn" type="button" @click="chooseCover">{{ playlist?.coverPath ? '更换封面' : '设置封面' }}</button>
         <button v-if="playlist?.coverPath" class="btn" type="button" @click="clearCover">移除封面</button>
         <button
@@ -195,6 +209,7 @@ async function clearCover(): Promise<void> {
       </div>
     </header>
 
+    <div class="playlist-track-search"><input v-model="query" class="input" type="search" maxlength="200" aria-label="在歌单内搜索" placeholder="搜索歌名、歌手或专辑"><button v-if="query" class="btn" @click="query=''">清空查找</button><span role="status">{{ visibleTracks.length }} / {{ tracks.length }} 首</span></div><p v-if="filtering" class="playlist-filter-note">筛选仅影响显示；播放沿用完整歌单顺序，筛选时不能拖动排序。</p>
     <PlaylistRefreshPanel v-if="playlist?.sourceListId&&playlist.source!=='local'" :playlist-id="listId" @applied="library.refreshPlaylists()" />
     <div v-if="loading" class="empty">
       <span class="spinner" />
@@ -207,13 +222,15 @@ async function clearCover(): Promise<void> {
       </span>
     </div>
 
-    <TrackList v-else :extra-actions="playlistActions" :reorderable="true" :tracks="tracks" :show-album="true" @play="(_track, index) => playAt(index)" @reorder="reorder" />
+    <div v-else-if="!visibleTracks.length" class="empty"><span class="empty__title">没有匹配的歌曲</span><span class="empty__hint">换个关键词，或清空查找查看完整歌单。</span></div>
+    <TrackList v-else ref="trackList" :extra-actions="playlistActions" :reorderable="!filtering" :tracks="visibleTracks" :show-album="true" :state-key="'playlist:'+listId" @play="playFiltered" @reorder="reorder" />
 
 
   </div>
 </template>
 
 <style scoped>
+.playlist-track-search{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex:none}.playlist-track-search input{flex:1;max-width:480px}.playlist-track-search span,.playlist-filter-note{font-size:12px;color:var(--text-secondary)}.playlist-filter-note{margin:0 0 10px;flex:none}
 .playlist-view{display:flex;flex-direction:column;overflow:hidden}.playlist-view :deep(.tracklist){flex:1;min-height:0;height:auto}
 
 .back {

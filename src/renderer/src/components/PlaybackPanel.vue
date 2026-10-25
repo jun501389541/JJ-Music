@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { playlistEntryKey } from '@shared/playlist-refresh'
 /**
  * The playback panel: EQ and the queue, in place over whatever page is open.
  *
@@ -24,20 +25,22 @@
  * current track or the bottom bar until 播放这份列表 is pressed — a browse
  * control that silently retargets playback is the mistake this shape avoids.
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { PlayableTrack, QueueSnapshot } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
-import { useUiStore } from '../stores/ui'
+import { useUiStore, type MenuItem } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
 import EqualizerPanel from './EqualizerPanel.vue'
 import TrackList from './TrackList.vue'
+import {filterPlaylistTracks,playlistTrackIndex} from '../utils/playlist-track-filter'
 
 const ui = useUiStore()
 const player = usePlayerStore()
 
 /** 0 is the live queue; 1..n are the older ones, newest first. */
 const page = ref(0)
-const list = ref<{ reveal: (index: number) => void } | null>(null)
+const list = ref<{ reveal: (index: number) => void;scrollToTop:()=>void } | null>(null)
+const query=ref('')
 
 /** A page a list of rows cannot name: show what it starts with instead. */
 function nameOf(label: string, tracks: PlayableTrack[]): string {
@@ -59,6 +62,32 @@ const pages = computed<Array<{ label: string; tracks: PlayableTrack[]; live: boo
 /** Clamped so a history that just shrank cannot leave the panel on a blank page. */
 const shown = computed(() => pages.value[Math.min(page.value, pages.value.length - 1)] ?? pages.value[0])
 const onLivePage = computed(() => shown.value.live)
+const visibleTracks=computed(()=>filterPlaylistTracks(shown.value.tracks,query.value))
+const filtering=computed(()=>!!query.value.trim())
+watch(page,()=>{query.value=''})
+// Post-flush scrolling runs before locatePlaying's nextTick reveal.
+watch([query,page],()=>list.value?.scrollToTop(),{flush:'post'})
+async function locatePlaying():Promise<void>{
+ if(!onLivePage.value)return
+ query.value=''
+ await nextTick()
+ if(onLivePage.value)list.value?.reveal(player.currentIndex)
+}
+function searchEscape():void{if(query.value)query.value='';else ui.playbackPanel=null}
+function playFiltered(track:PlayableTrack):void{
+ const index=playlistTrackIndex(shown.value.tracks,track)
+ if(index<0)return
+ if(onLivePage.value)void player.playTrackAt(index);else playFromHistory(index)
+}
+function removeTrack(track:PlayableTrack):void{
+ if(onLivePage.value)player.removeFromQueue(playlistEntryKey(track),true)
+}
+function queueActions(track:PlayableTrack):MenuItem[]{
+ return onLivePage.value?[{label:'从播放列表移除',icon:'trash',action:()=>removeTrack(track)}]:[]
+}
+function reorder(from:number,to:number):void{
+ if(onLivePage.value&&!filtering.value)player.moveInQueue(from,to)
+}
 
 watch(() => pages.value.length, count => { if (page.value >= count) page.value = 0 })
 
@@ -103,7 +132,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 // Every time the panel is opened it starts on the live queue: paging back is a
 // deliberate act, not a mode the panel should remember across closes.
-watch(() => ui.playbackPanel, value => { if (value) page.value = 0 })
+watch(() => ui.playbackPanel, value => { if (value) {page.value = 0;query.value='';list.value?.scrollToTop()} },{flush:'post'})
 
 async function clearQueue(): Promise<void> {
   if (!await ui.confirm('清空播放队列', `将移除 ${player.queue.length} 首歌曲，正在播放的也会停止。`)) return
@@ -160,27 +189,29 @@ function playThisList(): void {
           <small class="np-panel__page-name">{{ shown.label }}</small>
           <div class="np-panel__actions">
             <button v-if="!onLivePage" class="btn btn--primary" type="button" @click="playThisList">播放这份列表</button>
-            <button class="btn" type="button" :disabled="!onLivePage || player.currentIndex < 0" title="定位到正在播放的曲目" @click="list?.reveal(player.currentIndex)">当前播放</button>
+            <button class="btn" type="button" :disabled="!onLivePage || player.currentIndex < 0" title="定位到正在播放的曲目" @click="locatePlaying">当前播放</button>
             <button class="btn" type="button" :disabled="player.queue.length === 0" @click="clearQueue">清空播放队列</button>
           </div>
         </div>
 
+        <div v-if="ui.playbackPanel==='queue'" class="queue-search"><input v-model="query" class="input" type="search" maxlength="200" aria-label="在播放列表内搜索" placeholder="搜索歌名、歌手或专辑" @keydown.esc.stop.prevent="searchEscape"><button v-if="query" class="btn" type="button" @click="query=''">清空搜索</button><span role="status">{{visibleTracks.length}} / {{total}}</span></div>
+        <p v-if="ui.playbackPanel==='queue'&&filtering" class="queue-search-note">筛选仅影响显示，播放保持完整列表；筛选时不能拖动排序。</p>
         <EqualizerPanel v-if="ui.playbackPanel === 'eq'" />
         <TrackList
           v-else
           ref="list"
           class="np-panel__list"
-          :tracks="shown.tracks"
+          :tracks="visibleTracks"
           state-key="playback-panel"
           :row-height="46"
           single-line
-          removable
-          :reorderable="onLivePage"
-          empty-text="播放列表是空的"
-          :extra-actions="track => [{ label: '从播放列表移除', icon: 'trash', action: () => player.removeFromQueue(track.id) }]"
-          @play="(_, index) => onLivePage ? player.playTrackAt(index) : playFromHistory(index)"
-          @remove="track => player.removeFromQueue(track.id)"
-          @reorder="(from, to) => player.moveInQueue(from, to)"
+          :removable="onLivePage"
+          :reorderable="onLivePage&&!filtering"
+          :empty-text="filtering?'没有匹配的歌曲':'播放列表是空的'"
+          :extra-actions="queueActions"
+          @play="playFiltered"
+          @remove="removeTrack"
+          @reorder="reorder"
         />
       </aside>
     </div>
@@ -188,6 +219,7 @@ function playThisList(): void {
 </template>
 
 <style scoped>
+.queue-search{display:flex;align-items:center;gap:8px;margin:0 0 10px;flex:none}.queue-search input{flex:1;min-width:0}.queue-search button{flex:none}.queue-search span{white-space:nowrap;font-size:12px;color:var(--text-secondary)}.queue-search-note{font-size:11px;color:var(--text-secondary);margin:0 0 10px;flex:none}
 /*
  * The layer is teleported to `body` so it sits in the same stacking context on
  * both surfaces; as a child of `.np` it could only ever cover the playback page.

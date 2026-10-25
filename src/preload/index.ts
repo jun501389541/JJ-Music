@@ -1,3 +1,5 @@
+import type {MissingFilesResult} from '@shared/missing-files'
+import type { PlaylistSource, PlaylistSearchPage } from '@shared/playlist-search'
 /**
  * Preload bridge.
  *
@@ -8,6 +10,11 @@
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
+import type { ChartSource, ChartSummary, ChartPage } from '@shared/chart-types'
+import type { ResourceEnvelope } from '@shared/online-reliability'
+import type { PlaylistBackupResult, PlaylistRestorePreview, PlaylistRestoreResult } from '@shared/playlist-backup'
+import type { BatchRelinkScan, RelinkReference, RelinkChoice } from '@shared/batch-file-relink'
+import type { LocalRelinkChange, LocalRelinkPreview } from '@shared/local-file-relink'
 import type {
   AppSettings,
   AssetKind,
@@ -50,6 +57,11 @@ async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 }
 
 const api = {
+  charts: {
+    artwork: (source: ChartSource, id: string, requestId?: string) => invoke<string>(IPC.chartsArtwork, source, id, requestId),
+    list: (source: ChartSource, requestId?: string, force = false) => invoke<ResourceEnvelope<ChartSummary[]>>(IPC.chartsList, source, requestId, force),
+    tracks: (source: ChartSource, id: string, page: number, period = '', requestId?: string, force = false) => invoke<ResourceEnvelope<ChartPage>>(IPC.chartsTracks, source, id, page, period, requestId, force)
+  },
   updates: {
     status: () => invoke<UpdateStatus>(IPC.updateStatus),
     check: () => invoke<UpdateStatus>(IPC.updateCheck),
@@ -78,7 +90,12 @@ const api = {
      */
     chooseFolder: () => invoke<string | null>(IPC.downloadsChooseFolder)
   },
+  playlistSearch: {
+    providers: () => invoke<Array<{id:PlaylistSource;name:string;unavailable?:string}>>(IPC.playlistSearchProviders),
+    search: (source:PlaylistSource, keyword:string, page:number, requestId?:string, force=false) => invoke<ResourceEnvelope<PlaylistSearchPage>>(IPC.playlistSearch,source,keyword,page,requestId,force)
+  },
   playlistImport: {
+    discard: (token:string) => invoke<void>(IPC.playlistImportDiscard,token),
     providers: () => invoke<Array<{ id: SourceId; name: string }>>(IPC.playlistImportProviders),
     preview: (source: SourceId, input: string, requestId?: string) => invoke<ImportedPlaylist & { token: string }>(IPC.playlistImportPreview, source, input, requestId),
     /**
@@ -348,6 +365,12 @@ const api = {
   },
 
   library: {
+    relinkBatchScan: (refs: RelinkReference[], requestId?: string) => invoke<BatchRelinkScan | null>(IPC.libraryRelinkBatchScan, refs, requestId),
+    relinkBatchPreview: (token: string, choices: RelinkChoice[], requestId?: string) => invoke<LocalRelinkPreview[]>(IPC.libraryRelinkBatchPreview, token, choices, requestId),
+    relinkBatchDiscard: (token: string) => invoke<void>(IPC.libraryRelinkBatchDiscard, token),
+    relinkPreview: (id: string, path: string) => invoke<LocalRelinkPreview | null>(IPC.libraryRelinkPreview, id, path),
+    relinkApply: (token: string) => invoke<LocalRelinkChange & { settings: AppSettings }>(IPC.libraryRelinkApply, token),
+    relinkDiscard: (token: string) => invoke<void>(IPC.libraryRelinkDiscard, token),
     importFiles: () => invoke<number>(IPC.libraryImportFiles),
     reveal: (path: string) => invoke<void>(IPC.fileReveal, path),
     folders: () => invoke<string[]>(IPC.libraryFolders),
@@ -362,6 +385,7 @@ const api = {
     removeTracks: (ids: string[]) => invoke<number>(IPC.libraryRemoveTracks, ids),
     scan: () => invoke<void>(IPC.libraryScan),
     tracks: () => invoke<LocalMusicInfo[]>(IPC.libraryTracks),
+    missingFiles: (requestId?:string) => invoke<MissingFilesResult>(IPC.libraryMissingFiles,requestId),
     /** Subscribe to index changes independent of scan progress. */
     onChanged: (handler: () => void) => {
       const listener = (): void => handler()
@@ -377,9 +401,14 @@ const api = {
   },
 
   playlists: {
+    restorePreview: () => invoke<PlaylistRestorePreview | null>(IPC.playlistRestorePreview),
+    restoreApply: (token: string) => invoke<PlaylistRestoreResult>(IPC.playlistRestoreApply, token),
+    restoreDiscard: (token: string) => invoke<void>(IPC.playlistRestoreDiscard, token),
+    exportJson: (id?: string) => invoke<PlaylistBackupResult | null>(IPC.playlistExportJson, id),
     list: () => invoke<Playlist[]>(IPC.playlistList),
     create: (name: string) => invoke<Playlist>(IPC.playlistCreate, name),
     remove: (id: string) => invoke<void>(IPC.playlistRemove, id),
+    removeMany: (ids:string[]) => invoke<number>(IPC.playlistRemoveMany,ids),
     rename: (id: string, name: string) => invoke<void>(IPC.playlistRename, id, name),
     /** Opens the image picker in main; returns the stored path, or null if cancelled. */
     chooseCover: (id: string) => invoke<string | null>(IPC.playlistChooseCover, id),
@@ -387,9 +416,9 @@ const api = {
     items: (id: string) => invoke<PlayableTrack[]>(IPC.playlistItems, id),
     addTracks: (id: string, tracks: PlayableTrack[]) =>
       invoke<number>(IPC.playlistAddTracks, id, tracks),
-    removeTracks: (id: string, trackIds: string[]) =>
-      invoke<number>(IPC.playlistRemoveTracks, id, trackIds),
-    reorder: (id: string, trackIds: string[]) => invoke<void>(IPC.playlistReorder, id, trackIds),
+    removeTracks: (id: string, trackIds: string[], byEntryKey = false) =>
+      invoke<number>(IPC.playlistRemoveTracks, id, trackIds, byEntryKey),
+    reorder: (id: string, trackIds: string[], byEntryKey = false) => invoke<void>(IPC.playlistReorder, id, trackIds, byEntryKey),
     backfillQualitys: (id: string) =>
       invoke<Array<{ id: string; qualitys: Array<{ type: string; size?: string }> }>>(
         IPC.playlistBackfillQualitys,

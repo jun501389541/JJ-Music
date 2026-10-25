@@ -63,7 +63,8 @@ process.on('message', () => { process.send({ blocking: true }); Atomics.wait(new
     }
     // Only this fixture's recorded host is eligible for cleanup.
     if (childPid && alive(childPid)) { process.kill(childPid, 'SIGKILL'); await waitFor(() => !alive(childPid)) }
-    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true })
+    // The restricted launcher may still be removing its scratch directory after the host exits.
+    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     assert.ok(resolve(dir).startsWith(resolve(tmpdir()) + sep))
     rmSync(dir, { recursive: true, force: true })
   }

@@ -4,7 +4,9 @@
  * Everything here is engine-agnostic — it drives the `AudioEngine` interface,
  * so swapping in a native engine changes nothing in this file.
  */
+import { playlistEntryKey } from '@shared/playlist-refresh'
 import { useLibraryStore } from './library'
+import { relinkTrack, type LocalRelinkChange } from '@shared/local-file-relink'
 import { useToastStore } from './toast'
 import { toMediaUrl } from '@shared/media-url'
 import { stripScriptCoverData, stripScriptCoverDataFromTracks } from '@shared/persisted-track'
@@ -357,9 +359,9 @@ export const usePlayerStore = defineStore('player', () => {
           }catch{/* Diagnosis unavailable; retain the actual media classification. */}
           finally{if(timer)clearTimeout(timer)}
         }
-        if(generation!==playGeneration||currentTrack.value?.id!==track.id)return
+        if(generation!==playGeneration||(!currentTrack.value||playlistEntryKey(currentTrack.value)!==playlistEntryKey(track)))return
         if(mayRetryUrl&&canRecoverMedia(failure)){
-          const index=queue.value.findIndex(item=>item.id===track.id)
+          const index=queue.value.findIndex(item=>playlistEntryKey(item)===playlistEntryKey(track))
           if(index<0)return
           await playTrackAt(index,{autoplay:playbackAutoplay,startAt:currentTime.value,retryUrl:false,resolutionDeadline:startupDeadline,resolutionMonotonicDeadline:startupMonotonicDeadline})
         }else finish()
@@ -396,7 +398,7 @@ export const usePlayerStore = defineStore('player', () => {
     lyricAbort = new AbortController()
     const generation = ++lyricGeneration
     return () =>
-      generation === lyricGeneration && currentTrack.value?.id === track.id
+      generation === lyricGeneration && !!currentTrack.value && playlistEntryKey(currentTrack.value) === playlistEntryKey(track)
   }
 
   /**
@@ -420,6 +422,7 @@ export const usePlayerStore = defineStore('player', () => {
     options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; resolutionMonotonicDeadline?: number; transition?: boolean } = {}
   ): Promise<void> {
     if (index < 0 || index >= queue.value.length) return
+    if (localRelinkBusy) return
     const manualRetry=options.retryUrl!==false&&!!error.value
     const generation = ++playGeneration
     playbackAutoplay = options.autoplay !== false
@@ -439,9 +442,11 @@ export const usePlayerStore = defineStore('player', () => {
     lyricAbort?.abort()
     mayRetryUrl = options.retryUrl !== false
     const track = queue.value[index]
+    if (localRelinkResume?.id === track.id && options.startAt === undefined) options = { ...options, startAt: localRelinkResume.position }
+    localRelinkResume = null
     currentIndex.value = index
     currentTime.value = 0
-    if (playMode.value === 'random') rememberRandomDraw(track.id)
+    if (playMode.value === 'random') rememberRandomDraw(playlistEntryKey(track))
     error.value = null
     loading.value = true
     lyrics.value = null
@@ -522,8 +527,8 @@ export const usePlayerStore = defineStore('player', () => {
         const terminal = err instanceof ResolutionError && ['cancelled', 'timeout', 'providerMissing', 'matchFailed'].includes(err.reason)
         if (options.retryUrl !== false && !terminal) {
           // Queue edits keep this playback intent but can move its row.
-          const retryIndex = queue.value.findIndex(item => item.id === track.id)
-          if (retryIndex < 0 || currentTrack.value?.id !== track.id) {
+          const retryIndex = queue.value.findIndex(item => playlistEntryKey(item) === playlistEntryKey(track))
+          if (retryIndex < 0 || (!currentTrack.value||playlistEntryKey(currentTrack.value)!==playlistEntryKey(track))) {
             loading.value = false
             return
           }
@@ -542,7 +547,8 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function playTrack(track: PlayableTrack): Promise<void> {
-    const index = queue.value.findIndex((item) => item.id === track.id)
+    if (localRelinkBusy) return
+    const index = queue.value.findIndex((item) => playlistEntryKey(item) === playlistEntryKey(track))
     if (index >= 0) {
       await playTrackAt(index)
       return
@@ -594,10 +600,10 @@ export const usePlayerStore = defineStore('player', () => {
     if (randomPool.length === 0) {
       // Hold the track now playing out of a fresh pass so two passes cannot meet
       // at the same song — the one repeat a shuffled walk should never show.
-      const current = currentTrack.value?.id
-      randomPool = shuffled(tracks.map((track) => track.id).filter((id) => id !== current))
+      const current = currentTrack.value ? playlistEntryKey(currentTrack.value) : undefined
+      randomPool = shuffled(tracks.map(playlistEntryKey).filter((id) => id !== current))
     }
-    const positions = new Map(tracks.map((track, index) => [track.id, index]))
+    const positions = new Map(tracks.map((track, index) => [playlistEntryKey(track), index]))
     while (randomPool.length > 0) {
       const id = randomPool.shift() as string
       const index = positions.get(id)
@@ -613,7 +619,7 @@ export const usePlayerStore = defineStore('player', () => {
   function randomPreviousIndex(): number {
     while (randomHistory.length > 1) {
       randomHistory.pop()
-      const position = queue.value.findIndex((track) => track.id === randomHistory[randomHistory.length - 1])
+      const position = queue.value.findIndex((track) => playlistEntryKey(track) === randomHistory[randomHistory.length - 1])
       if (position >= 0) return position
     }
     return -1
@@ -625,6 +631,7 @@ export const usePlayerStore = defineStore('player', () => {
     label = '',
     options: { playMode?: PlayMode; singleTrackAudition?: boolean } = {}
   ): Promise<void> {
+    if (localRelinkBusy) return
     rememberQueue(tracks)
     // Capture the outgoing session before replacing its rows. playTrackAt owns
     // cancellation and the bounded fade, including queue-changing entrypoints.
@@ -641,6 +648,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** Restore a saved queue using its stored row and mode, without a playback offset. */
   async function playQueueSnapshot(snapshot: QueueSnapshot, startIndex = snapshot.currentIndex): Promise<void> {
+    if (localRelinkBusy) return
     await playQueue(snapshot.queue, startIndex, snapshot.label, {
       playMode: snapshot.playMode,
       singleTrackAudition: snapshot.singleTrackAudition
@@ -661,7 +669,7 @@ export const usePlayerStore = defineStore('player', () => {
    * holding the same list makes paging look broken.
    */
   function rememberQueue(incoming: PlayableTrack[]): void {
-    const signature = (list: PlayableTrack[]): string => list.map(track => track.id).join(',')
+    const signature = (list: PlayableTrack[]): string => JSON.stringify(list.map(playlistEntryKey))
     const outgoing = queue.value
     const next = queueHistory.value.filter(entry => signature(entry.queue) !== signature(incoming))
     if (outgoing.length > 0 && signature(outgoing) !== signature(incoming) && !next.some(entry => signature(entry.queue) === signature(outgoing))) {
@@ -697,6 +705,7 @@ export const usePlayerStore = defineStore('player', () => {
    * highlight - and the next 下一首 - jump to a different song.
    */
   function moveInQueue(from: number, to: number): void {
+    if (localRelinkBusy) return
     if (from === to || to < 0 || to >= queue.value.length || from < 0 || from >= queue.value.length) return
     const list = [...queue.value]
     const [item] = list.splice(from, 1)
@@ -710,6 +719,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function toggle(): Promise<void> {
+    if (localRelinkBusy) return
     const intent = ++toggleGeneration
     if (loading.value) {
       stop()
@@ -734,12 +744,14 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function next(): Promise<void> {
+    if (localRelinkBusy) return
     if (queue.value.length === 0) return
     const nextIndex = pickNextIndex(1)
     await playTrackAt(nextIndex)
   }
 
   async function previous(): Promise<void> {
+    if (localRelinkBusy) return
     if (queue.value.length === 0) return
     // Restart the current track first, matching every mainstream player.
     if (currentTime.value > 3) {
@@ -762,6 +774,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function handleEnded(): Promise<void> {
+    if (localRelinkBusy) return
     if (singleTrackAudition.value && queue.value.length === 1) {
       playing.value = false
       return
@@ -782,6 +795,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function seek(time: number): void {
+    if (localRelinkBusy) return
     if (!Number.isFinite(time)) return
     const clamped = Math.max(0, Math.min(time, duration.value || 0))
     engine.value?.seek(clamped)
@@ -826,7 +840,7 @@ export const usePlayerStore = defineStore('player', () => {
     // it goes into the log. Without this the first 上一首 after switching to
     // 随机 has a one-entry history, finds nothing to step back to, and falls
     // through to the sequential neighbour — skipping the track just heard.
-    if (mode === 'random' && currentTrack.value) rememberRandomDraw(currentTrack.value.id)
+    if (mode === 'random' && currentTrack.value) rememberRandomDraw(playlistEntryKey(currentTrack.value))
   }
 
   function setRate(value: number): void {
@@ -884,8 +898,8 @@ export const usePlayerStore = defineStore('player', () => {
    * ------------------------------------------------------------ */
 
   async function addToQueue(tracks: PlayableTrack[], playNow = false): Promise<void> {
-    const existing = new Set(queue.value.map((track) => track.id))
-    const additions = tracks.filter(track => { if (existing.has(track.id)) return false; existing.add(track.id); return true })
+    const existing = new Set(queue.value.map(playlistEntryKey))
+    const additions = tracks.filter(track => { if (existing.has(playlistEntryKey(track))) return false; existing.add(playlistEntryKey(track)); return true })
     if (additions.length === 0 && !playNow) return
 
     if (playNow && additions.length > 0) {
@@ -894,11 +908,12 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
     queue.value = [...queue.value, ...additions]
-    if (playNow && tracks.length) await playTrackAt(queue.value.findIndex(track => track.id === tracks[0].id))
+    if (playNow && tracks.length) await playTrackAt(queue.value.findIndex(track => playlistEntryKey(track) === playlistEntryKey(tracks[0])))
   }
 
-  function removeFromQueue(trackId: string): void {
-    const index = queue.value.findIndex((track) => track.id === trackId)
+  function removeFromQueue(trackId: string, byEntryKey = false): void {
+    if (localRelinkBusy) return
+    const index = queue.value.findIndex((track) => (byEntryKey?playlistEntryKey(track):track.id) === trackId)
     if (index < 0) return
     const removingCurrent = index === currentIndex.value
     if (removingCurrent) {
@@ -912,6 +927,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function clearQueue(): void {
+    if (localRelinkBusy) return
     stop()
     queue.value = []
     currentIndex.value = -1
@@ -923,12 +939,13 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function insertNext(tracks: PlayableTrack[]): void {
-    const ids = new Set(tracks.map(track => track.id))
+    if (localRelinkBusy) return
+    const ids = new Set(tracks.map(playlistEntryKey))
     const current = currentTrack.value
-    queue.value = queue.value.filter(track => !ids.has(track.id) || track.id === current?.id)
-    currentIndex.value = current ? queue.value.findIndex(track => track.id === current.id) : -1
+    queue.value = queue.value.filter(track => !ids.has(playlistEntryKey(track)) || !!current && playlistEntryKey(track) === playlistEntryKey(current))
+    currentIndex.value = current ? queue.value.findIndex(track => playlistEntryKey(track) === playlistEntryKey(current)) : -1
     const seen = new Set<string>()
-    const unique = tracks.filter(track => { if (track.id === current?.id || seen.has(track.id)) return false; seen.add(track.id); return true })
+    const unique = tracks.filter(track => { if (current && playlistEntryKey(track) === playlistEntryKey(current) || seen.has(playlistEntryKey(track))) return false; seen.add(playlistEntryKey(track)); return true })
     queue.value.splice(currentIndex.value + 1, 0, ...unique)
   }
 
@@ -972,7 +989,38 @@ export const usePlayerStore = defineStore('player', () => {
   let sessionDirty = false
   const SESSION_INTERVAL_MS = 5_000
 
+  let localRelinkBusy = false
+  let localRelinkPosition: number | null = null
+  let localRelinkIdentity: PlayableTrack | null = null
+  let localRelinkResume: { id: string; position: number } | null = null
+  function beginLocalRelink(change: LocalRelinkChange): void {
+    const current = currentTrack.value
+    const saved = useLibraryStore().settings.lastSession
+    if (current && relinkTrack(current, change) !== current && error.value && currentTime.value === 0 && saved && relinkTrack(saved.track, change) !== saved.track && Number.isFinite(saved.position) && saved.position > 0) currentTime.value = saved.position
+    flushSession()
+    localRelinkBusy = true
+    if (currentTrack.value && relinkTrack(currentTrack.value, change) !== currentTrack.value) {
+      localRelinkPosition = currentTime.value
+      localRelinkIdentity = change.old
+      stopPlayback()
+    }
+  }
+  function finishLocalRelink(change?: LocalRelinkChange): void {
+    if (change) {
+      queue.value = queue.value.map(t => relinkTrack(t, change))
+      queueHistory.value = queueHistory.value.map(q => ({ ...q, queue: q.queue.map(t => relinkTrack(t, change)) }))
+      error.value = null
+    }
+    const expected = change?.next ?? localRelinkIdentity
+    if (localRelinkPosition !== null && expected && currentTrack.value && isLocalTrack(currentTrack.value) && isLocalTrack(expected) && currentTrack.value.id === expected.id && currentTrack.value.path === expected.path) {
+      currentTime.value = localRelinkPosition
+      localRelinkResume = { id: currentTrack.value.id, position: localRelinkPosition }
+    }
+    localRelinkPosition = null; localRelinkIdentity = null
+    localRelinkBusy = false
+  }
   function snapshotSession(): void {
+    if (localRelinkBusy) return
     const track = currentTrack.value
     if (!track || !queue.value.length) return
     sessionDirty = true
@@ -986,6 +1034,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function writeSession(): void {
+    if (localRelinkBusy) return
     const track = currentTrack.value
     if (!track) return
     sessionDirty = false
@@ -1017,6 +1066,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** Forget the resume point, so the next launch does not reopen a closed book. */
   function clearSession(): void {
+    if (localRelinkBusy) return
     if (sessionTimer !== null) {
       clearTimeout(sessionTimer)
       sessionTimer = null
@@ -1041,6 +1091,7 @@ export const usePlayerStore = defineStore('player', () => {
    * stay quiet instead of announcing a resume that did not happen.
    */
   async function restoreSession(session: LastSession | null | undefined): Promise<boolean> {
+    if (localRelinkBusy) return false
     if (!session?.track) return false
     if (!Array.isArray(session.queue) || session.queue.length === 0) return false
 
@@ -1074,6 +1125,7 @@ export const usePlayerStore = defineStore('player', () => {
    * cannot be played.
    */
   function restoreQueueHistory(list: unknown): void {
+    if (localRelinkBusy) return
     if (!Array.isArray(list)) {
       queueHistory.value = []
       return
@@ -1100,6 +1152,11 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function stop(): void {
+    if (localRelinkBusy) return
+    stopPlayback()
+  }
+  function stopPlayback(): void {
+    localRelinkResume = null
     playbackAutoplay = false
     toggleGeneration++
     pausePending = false
@@ -1166,7 +1223,7 @@ export const usePlayerStore = defineStore('player', () => {
     // stale lyrics explicitly: bailing out silently here used to leave the
     // *previous* track's lyrics on screen, since nothing else resets them on
     // this path.
-    if (currentTrack.value?.id !== track.id) {
+    if ((!currentTrack.value||playlistEntryKey(currentTrack.value)!==playlistEntryKey(track))) {
       lyrics.value = null
       lyricSource.value = 'none'
       lyricError.value = null
@@ -1189,7 +1246,7 @@ export const usePlayerStore = defineStore('player', () => {
         lyricAsset.value = result.asset ?? null
       } else {
         // A hand-picked source belongs to the track it was picked for.
-        if (lyricSourceChoiceTrack !== track.id) {
+        if (lyricSourceChoiceTrack !== playlistEntryKey(track)) {
           lyricSourceChoiceTrack = null
           lyricSourceChoice.value = null
         }
@@ -1217,11 +1274,11 @@ export const usePlayerStore = defineStore('player', () => {
         // view does not show a placeholder for a track that has artwork.
         if (enriched.picUrl && !onlineTrack.picUrl) {
           onlineTrack.picUrl = enriched.picUrl
-          const index = queue.value.findIndex((item) => item.id === onlineTrack.id)
+          const index = queue.value.findIndex((item) => playlistEntryKey(item) === playlistEntryKey(onlineTrack))
           if (index >= 0) {
             // Mutate in place so any bound view updates without a re-sort.
             const queued = queue.value[index]
-            if ('picUrl' in queued) queued.picUrl = enriched.picUrl
+            if (!isLocalTrack(queued)) queued.picUrl = enriched.picUrl
           }
         }
 
@@ -1238,7 +1295,7 @@ export const usePlayerStore = defineStore('player', () => {
           // has to be written too — and it has to be written *because* it may not
           // carry an `assets` key yet: a plain search result is exactly the case
           // this exists for, so gating on `'assets' in queued` skipped it.
-          const queued = queue.value.find((item) => item.id === onlineTrack.id)
+          const queued = queue.value.find((item) => playlistEntryKey(item) === playlistEntryKey(onlineTrack))
           if (queued) queued.assets = onlineTrack.assets
         }
       }
@@ -1314,7 +1371,7 @@ export const usePlayerStore = defineStore('player', () => {
     const track = currentTrack.value
     if (!track || isLocalTrack(track)) return
     lyricSourceChoice.value = source
-    lyricSourceChoiceTrack = source ? track.id : null
+    lyricSourceChoiceTrack = source ? playlistEntryKey(track) : null
     await loadLyrics(track)
   }
 
@@ -1406,6 +1463,8 @@ export const usePlayerStore = defineStore('player', () => {
     useLyricSource,
     flushSession,
     restoreSession,
+    beginLocalRelink,
+    finishLocalRelink,
     refreshOutputDevices,
     setOutputDevice,
     applyEqualizerPreset,

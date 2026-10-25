@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { playlistEntryKey } from '@shared/playlist-refresh'
 /**
  * Transport button cluster, shared by the toolbar and the now-playing view.
  *
@@ -92,7 +93,7 @@ onBeforeUnmount(() => clearTimeout(hintTimer))
 
 /** Whether the playing track is in the favourites playlist. */
 const favorite = computed(() =>
-  library.favorites.some((track) => track.id === player.currentTrack?.id))
+  library.favorites.some((track) => player.currentTrack && playlistEntryKey(track) === playlistEntryKey(player.currentTrack)))
 
 /**
  * Toggle favourite, guarding the no-track case.

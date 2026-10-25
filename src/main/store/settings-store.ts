@@ -1,4 +1,6 @@
+import { playlistEntryKey } from '@shared/playlist-refresh'
 import { UI_DEFAULTS } from '@shared/preferences'
+import { PLAYLIST_BACKUP_MAX_LISTS, PLAYLIST_BACKUP_MAX_TRACKS, type PlaylistBackupSnapshot } from '@shared/playlist-backup'
 /**
  * Application settings and playlist persistence.
  *
@@ -7,7 +9,7 @@ import { UI_DEFAULTS } from '@shared/preferences'
  * that an imported LX library maps cleanly onto ours.
  */
 import { existsSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { AppSettings, PlayableTrack, Playlist } from '@shared/types'
 import { isLocalTrack } from '@shared/types'
@@ -49,6 +51,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 }
 
 export class SettingsStore {
+  async reload(): Promise<AppSettings> { this.loaded = false; return this.load() }
   private readonly filePath: string
   private settings: AppSettings = { ...DEFAULT_SETTINGS }
   private loaded = false
@@ -102,6 +105,11 @@ interface PlaylistFile {
  * player appends to, mirroring LX Music's `default` list id.
  */
 export class PlaylistStore {
+  async reload(): Promise<void> {
+    await this.flush()
+    this.loaded = false; this.loading = undefined; this.playlists = []; this.items.clear()
+    await this.load()
+  }
   private readonly filePath: string
   private playlists: Playlist[] = []
   private items = new Map<string, PlayableTrack[]>()
@@ -173,6 +181,34 @@ export class PlaylistStore {
     const tracks=this.items.get(id)??[]
     return {playlist:structuredClone(playlist),tracks:structuredClone(tracks),revision:createHash('sha256').update(JSON.stringify([playlist,tracks])).digest('hex')}
   }
+  /** One durable transaction; restoring never overwrites saved/system playlist identities. */
+  async restoreBackup(snapshots:readonly PlaylistBackupSnapshot[]):Promise<import('@shared/playlist-backup').PlaylistRestoreResult>{
+    const copied=structuredClone(snapshots)
+    if(!copied.length||copied.length>PLAYLIST_BACKUP_MAX_LISTS||copied.reduce((n,s)=>n+s.tracks.length,0)>PLAYLIST_BACKUP_MAX_TRACKS)throw Error('恢复内容过多或为空')
+    return this.mutate(()=>{
+      let position=this.playlists.reduce((max,p)=>Math.max(max,p.position),-1)+1
+      if(!Number.isSafeInteger(position)||position<0||position+copied.length>Number.MAX_SAFE_INTEGER)throw Error('现有歌单顺序无效')
+      const ids:string[]=[]
+      for(const snapshot of copied){
+        let id:string
+        do{id='list_'+randomUUID()}while(this.items.has(id)||this.playlists.some(p=>p.id===id))
+        const playlist:Playlist={id,name:snapshot.playlist.name.length<=4092?snapshot.playlist.name+'（恢复）':snapshot.playlist.name,source:snapshot.playlist.source,position:position++,...(snapshot.playlist.sourceListId?{sourceListId:snapshot.playlist.sourceListId}:{})}
+        this.playlists.push(playlist);this.items.set(id,snapshot.tracks);ids.push(id)
+      }
+      return{playlists:copied.length,tracks:copied.reduce((n,s)=>n+s.tracks.length,0),ids}
+    })
+  }
+  async backupSnapshot(id?:string):Promise<PlaylistBackupSnapshot[]>{
+    await this.load()
+    const operation=this.changes.then(()=>{
+      const lists=id?this.playlists.filter(p=>p.id===id):this.playlists.slice().sort((a,b)=>a.position-b.position)
+      if(id&&!lists.length)throw Error('歌单不存在')
+      if(lists.length>PLAYLIST_BACKUP_MAX_LISTS||lists.reduce((n,p)=>n+(this.items.get(p.id)?.length??0),0)>PLAYLIST_BACKUP_MAX_TRACKS)throw Error('备份内容过多，请分别导出歌单')
+      return lists.map(playlist=>({playlist:structuredClone(playlist),tracks:structuredClone(this.items.get(playlist.id)??[])}))
+    })
+    this.changes=operation.catch(()=>undefined)
+    return operation
+  }
   async snapshot(id: string): Promise<SavedPlaylistSnapshot> { await this.load(); await this.changes; return this.state(id) }
   async flush(): Promise<void> { await this.load(); await this.changes }
   async applySnapshot(id: string, revision: string, tracks: PlayableTrack[]): Promise<Playlist> {
@@ -210,6 +246,35 @@ export class PlaylistStore {
     })
   }
 
+  /** Minimal committed references, bounded without cloning artwork or opaque track data. */
+  async localReferences():Promise<import('@shared/missing-files').LocalReferenceSnapshot>{
+    await this.load()
+    const operation=this.changes.then(()=>{
+      const references:import('@shared/missing-files').LocalReferenceInput[]=[];let limited=false
+      outer:for(const list of this.playlists){
+        for(const track of this.items.get(list.id)??[]){
+          if(!track||!isLocalTrack(track))continue
+          if(references.length>=50000){limited=true;break outer}
+          references.push({track:{id:track.id,path:track.path,name:track.name,singer:track.singer,...(track.albumName?{albumName:track.albumName}:{})},origin:{id:'playlist:'+list.id,name:list.name}})
+        }
+      }
+      return{references,limited}
+    })
+    this.changes=operation.catch(()=>undefined)
+    return operation
+  }
+  async removeMany(ids:readonly string[]):Promise<number>{
+    if(!Array.isArray(ids)||!ids.length||ids.length>1000||ids.some(id=>typeof id!=='string'||!id.length||id.length>256)||new Set(ids).size!==ids.length)throw Error('批量删除参数无效')
+    const copied=ids.slice()
+    return this.mutate(()=>{
+      if(copied.some(id=>id==='default'||id==='favorites'))throw Error('内置歌单不能批量删除')
+      if(copied.some(id=>!this.playlists.some(p=>p.id===id)))throw Error('歌单已变更，请重新选择')
+      const drop=new Set(copied)
+      this.playlists=this.playlists.filter(p=>!drop.has(p.id))
+      for(const id of copied)this.items.delete(id)
+      return copied.length
+    })
+  }
   async remove(id: string): Promise<void> {
     return this.mutate(()=>{
     if (id === 'default' || id === 'favorites') throw new Error('内置歌单不能删除')
@@ -248,11 +313,11 @@ export class PlaylistStore {
     return this.mutate(()=>{
     if(!this.playlists.some(p=>p.id===id))throw new Error('歌单不存在')
     const existing = this.items.get(id) ?? []
-    const seen = new Set(existing.map((track) => track.id))
+    const seen = new Set(existing.map(playlistEntryKey))
     let added = 0
     for (const track of copied) {
-      if (seen.has(track.id)) continue
-      seen.add(track.id)
+      if (seen.has(playlistEntryKey(track))) continue
+      seen.add(playlistEntryKey(track))
       existing.push(track)
       added += 1
     }
@@ -297,12 +362,13 @@ export class PlaylistStore {
   }
 
   /** Drop entries by track id. Returns how many actually left the list. */
-  async removeTracks(id: string, trackIds: string[]): Promise<number> {
+  async removeTracks(id: string, trackIds: string[], byEntryKey = false): Promise<number> {
     return this.mutate(()=>{
     if(!this.playlists.some(p=>p.id===id))throw new Error('歌单不存在')
     const existing = this.items.get(id) ?? []
     const drop = new Set(trackIds)
-    const kept = existing.filter((track) => !drop.has(track.id))
+    if(!byEntryKey){const selected=existing.filter(t=>drop.has(t.id));if(new Set(selected.map(t=>t.id)).size!==selected.length)throw Error('曲目身份不唯一，请重新打开歌单后操作')}
+    const kept = existing.filter((track) => !drop.has(byEntryKey?playlistEntryKey(track):track.id))
     this.items.set(id, kept)
     const removed = existing.length - kept.length
     return removed
@@ -310,11 +376,12 @@ export class PlaylistStore {
   }
 
   /** Replace the whole ordering, used by drag-and-drop reordering. */
-  async reorder(id: string, trackIds: string[]): Promise<void> {
+  async reorder(id: string, trackIds: string[], byEntryKey = false): Promise<void> {
     return this.mutate(()=>{
     if(!this.playlists.some(p=>p.id===id))throw new Error('歌单不存在')
     const existing = this.items.get(id) ?? []
-    const byId = new Map(existing.map((track) => [track.id, track]))
+    if(!byEntryKey&&new Set(existing.map(t=>t.id)).size!==existing.length)throw Error('曲目身份不唯一，请重新打开歌单后操作')
+    const byId = new Map(existing.map((track) => [byEntryKey?playlistEntryKey(track):track.id, track]))
     const reordered: PlayableTrack[] = []
     for (const trackId of trackIds) {
       const track = byId.get(trackId)

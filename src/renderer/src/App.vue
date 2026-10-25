@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { playlistEntryKey } from '@shared/playlist-refresh'
 /**
  * Application shell.
  *
@@ -428,7 +429,7 @@ watch(
       player.playing,
       // Same test the context menu uses, so the two surfaces never disagree
       // about whether the current track is in 我喜欢的.
-      library.favorites.some((item) => item.id === player.currentTrack?.id)
+      library.favorites.some((item) => player.currentTrack && playlistEntryKey(item) === playlistEntryKey(player.currentTrack))
     ] as const,
   ([hasTrack, playing, favorite]) => {
     void window.jj.shell?.setTaskbarState({ hasTrack, playing, favorite }).catch(() => undefined)
@@ -557,6 +558,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
 
 /** Global shortcuts, mirroring the conveniences of a desktop player. */
 function onKeydown(event: KeyboardEvent): void {
+  if (ui.localRelinkBusy) { event.preventDefault(); return }
   if (ui.menu || ui.dialog || ui.trackInfo || ui.matchTrack) return
   // A focused control already handled this key (for example a slider arrow).
   if (event.defaultPrevented) return
@@ -677,10 +679,12 @@ const contentKey = computed(() => route.path)
     -->
     <CoverFlightLayer />
     <ToastHost />
+        <div v-if="ui.localRelinkBusy" class="relink-busy" role="status" aria-live="polite"><div class="relink-busy__content"><p>正在修复文件关联…<template v-if="ui.localRelinkBatch">已完成 {{ ui.localRelinkBatch.completed }} / {{ ui.localRelinkBatch.total }} 首</template></p><button v-if="ui.localRelinkBatch" data-batch-stop class="btn" :disabled="ui.localRelinkBatch.stopRequested" @click="ui.localRelinkBatch.stopRequested=true">{{ ui.localRelinkBatch.stopRequested?'当前项完成后停止':'停止后续处理' }}</button></div></div>
   </div>
 </template>
 
 <style scoped>
+.relink-busy__content{display:flex;flex-direction:column;align-items:center;gap:18px}.relink-busy__content button{cursor:pointer}.relink-busy { position: fixed; inset: 36px 0 0; z-index: 10000; display: grid; place-items: center; background: var(--bg-primary); opacity: .95; cursor: wait; }
 .shell {
   display: flex;
   flex-direction: column;

@@ -37,7 +37,7 @@ function check(name, ok, detail = '') {
   }
 }
 
-const folder = process.argv[2] ?? 'D:\\Music\\华语歌曲'
+const folder = process.argv[2] ?? process.env.JJ_TEST_MUSIC_DIR ?? ''
 
 console.log('='.repeat(72))
 console.log('歌词解析 / 内嵌歌词 / 标签匹配')

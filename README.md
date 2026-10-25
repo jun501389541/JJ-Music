@@ -2,26 +2,27 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.4.6** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.5.0** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.6/JJ-Music-0.4.6-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.6/JJ-Music-0.4.6-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.4.6/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.5.0/JJ-Music-0.5.0-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.5.0/JJ-Music-0.5.0-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.5.0/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。安装版支持在应用内检查更新，确认下载、校验后再确认重启安装；便携版需退出应用后手动更新，并保留原有 `data/`。安装版默认使用 `%APPDATA%/jj-music`，便携版默认使用 exe 旁的 `data/`，详细规则见下方“数据与限制”。
 
-### 0.4.6 更新重点
+### 0.5.0 更新重点
 
-- 修复暂停恢复、删除当前歌曲与重复播放列表时的会话及历史记录一致性问题。
-- 不可达目录保留曲库资料；扫描不再覆盖刚确认写入的标签或歌词来源，未完成的旧索引刷新可跨重启继续。
-- 修复音源替换隔离与启停持久化竞态，减少运行校验的重复解码；资料迁移和更新取消保持用户确认的结果。
+- 新增网易云、QQ 音乐、酷狗、酷我与咪咕排行榜浏览，以及网易云、酷狗、酷我、咪咕公开歌单搜索；歌单可先预览曲目，再确认导入。
+- 增加歌单名称与曲目筛选、JSON 备份及恢复为新歌单、普通歌单多选删除。
+- 增加本地缺失文件汇总和逐首/批量重新定位，保留歌单顺序与完整歌曲身份。
+- 播放队列和历史支持筛选；筛选结果仍在原完整列表中播放，并保护播放身份、歌词与封面归属。
+- 延续 0.4.6 的扫描、播放和资料写入可靠性修复。
 
-完整变更见[更新日志](CHANGELOG.md)。
-
+完整变更与验证边界见[更新日志](CHANGELOG.md)。
 0.1.1 至 0.1.5 的 Windows 包在部分电脑上无法启动音源（在线播放随之失效），请使用 0.1.6 及以后版本。
 
 ## 功能
@@ -59,6 +60,14 @@
 
 在线资料可用不等于音源播放可用，也不保证全部曲目或音质档位可用。资料缓存与播放地址分别处理：刷新失败可保留旧资料，过期的播放地址不会作为可用地址继续复用。
 
+## 本版新增能力
+
+榜单支持网易云、QQ 音乐、酷狗、酷我与咪咕；公开歌单搜索支持网易云、酷狗、酷我、咪咕，QQ 歌单可继续通过链接或 ID 导入。在线预览不会自动写入本地歌单，需由用户确认。
+
+本地管理包括已保存歌单名称筛选、歌单内曲目筛选、JSON 备份与恢复、普通歌单多选删除、缺失本地文件汇总和批量重新定位。恢复会创建新歌单，不覆盖现有内容或当前队列。
+
+播放队列和历史支持查找；点击筛选结果仍以完整队列位置播放，筛选时不可拖动排序。自动化离线验收不代替真实音源播放、跨格式个人音乐样本和人工听感验收。详细范围见[更新日志](CHANGELOG.md)及对应[开发记录](docs/development/)。
+
 ## 从源码运行
 
 使用 Node.js 24、npm 和 Windows x64。
@@ -78,8 +87,8 @@
 打包输出：
 
     release/
-      JJ-Music-0.4.6-Setup-x64.exe
-      JJ-Music-0.4.6-Portable-x64.zip
+      JJ-Music-0.5.0-Setup-x64.exe
+      JJ-Music-0.5.0-Portable-x64.zip
       SHA256SUMS.txt          # 由 npm run dist 生成，只列本次版本的两个文件
       win-unpacked/
 

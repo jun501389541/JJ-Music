@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { playlistEntryKey } from '@shared/playlist-refresh'
 import { isLocalTrack, type PlayableTrack } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -44,7 +45,7 @@ function unavailableTitle(track: PlayableTrack): string {
 const start = computed(() => Math.max(0, Math.min(props.tracks.length - 1, Math.floor(scrollTop.value / rowHeight.value) - 5)))
 const end = computed(() => Math.min(props.tracks.length, start.value + Math.ceil(height.value / rowHeight.value) + 10))
 const visible = computed(() => props.tracks.slice(start.value, end.value).map((track, i) => ({ track, index: start.value + i })))
-const chosen = computed(() => selected.value.size ? props.tracks.filter(track => selected.value.has(track.id)) : [])
+const chosen = computed(() => selected.value.size ? props.tracks.filter(track => selected.value.has(playlistEntryKey(track))) : [])
 /**
  * Selection is per-visit; scroll is not.
  *
@@ -76,7 +77,7 @@ function reveal(index: number): void {
   // Selecting it also makes the row read as "the one you asked for" once the
   // list stops moving.
   const track = props.tracks[index]
-  if (track) { selected.value = new Set([track.id]); anchor = index }
+  if (track) { selected.value = new Set([playlistEntryKey(track)]); anchor = index }
 }
 /**
  * Put the list back at the top without touching the selection.
@@ -140,12 +141,12 @@ function cover(track: PlayableTrack): string | undefined {
 }
 function choose(event: MouseEvent, index: number): void {
   const track = props.tracks[index]
-  if (event.shiftKey) selected.value = new Set(props.tracks.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map(t => t.id))
-  else if (event.ctrlKey || event.metaKey) { const next = new Set(selected.value); next.has(track.id) ? next.delete(track.id) : next.add(track.id); selected.value = next }
-  else selected.value = new Set([track.id])
+  if (event.shiftKey) selected.value = new Set(props.tracks.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map(playlistEntryKey))
+  else if (event.ctrlKey || event.metaKey) { const next = new Set(selected.value); next.has(playlistEntryKey(track)) ? next.delete(playlistEntryKey(track)) : next.add(playlistEntryKey(track)); selected.value = next }
+  else selected.value = new Set([playlistEntryKey(track)])
   if (!event.shiftKey) anchor = index
 }
-function check(index: number): void { const next = new Set(selected.value), id = props.tracks[index].id; next.has(id) ? next.delete(id) : next.add(id); selected.value = next; anchor = index }
+function check(index: number): void { const next = new Set(selected.value), id = playlistEntryKey(props.tracks[index]); next.has(id) ? next.delete(id) : next.add(id); selected.value = next; anchor = index }
 /**
  * The actions for one row, given the whole selection.
  *
@@ -154,7 +155,7 @@ function check(index: number): void { const next = new Set(selected.value), id =
  * for only the first row in the other.
  */
 function menuItems(track: PlayableTrack, selection: PlayableTrack[]): MenuItem[] {
-  const index = props.tracks.findIndex((item) => item.id === track.id)
+  const index = props.tracks.findIndex((item) => playlistEntryKey(item) === playlistEntryKey(track))
   return [...trackActions(track, selection), ...(props.extraActions ? [{ label: '', separator: true }, ...props.extraActions(track, index, selection)] : [])]
 }
 /**
@@ -193,9 +194,9 @@ function dragEndRow(): void {
   dragFrom.value = -1
   dropAt.value = -1
 }
-function menu(event: MouseEvent, track: PlayableTrack): void { if (!selected.value.has(track.id)) selected.value = new Set([track.id]); ui.openMenu(event, menuItems(track, chosen.value)) }
+function menu(event: MouseEvent, track: PlayableTrack): void { if (!selected.value.has(playlistEntryKey(track))) selected.value = new Set([playlistEntryKey(track)]); ui.openMenu(event, menuItems(track, chosen.value)) }
 function key(event: KeyboardEvent): void {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'a') { event.preventDefault(); event.stopPropagation(); selected.value = new Set(props.tracks.map(track => track.id)) }
+  if ((event.ctrlKey || event.metaKey) && event.key === 'a') { event.preventDefault(); event.stopPropagation(); selected.value = new Set(props.tracks.map(playlistEntryKey)) }
   if (event.key === 'Escape') selected.value = new Set()
 }
 </script>
@@ -205,8 +206,8 @@ function key(event: KeyboardEvent): void {
   <div ref="viewport" class="track-viewport" role="grid" aria-label="歌曲列表" :aria-rowcount="tracks.length" @scroll="scrollTop = ($event.target as HTMLElement).scrollTop">
     <div v-if="!tracks.length" class="empty"><AppIcon name="music" :size="38"/><p>{{ emptyText }}</p></div>
     <div v-else :style="{ height: tracks.length * rowHeight + 'px', position: 'relative' }">
-      <div v-for="{track, index} in visible" :key="track.id" class="track-row" role="row" :aria-rowindex="index + 1" :aria-selected="selected.has(track.id)" :tabindex="index === anchor ? 0 : -1" :draggable="reorderable" :style="{ height: rowHeight + 'px', transform: `translateY(${index * rowHeight}px)` }" :class="{ current: player.currentTrack?.id === track.id, selected: selected.has(track.id), 'is-dragging': dragFrom === index, 'drop-before': dropAt === index && dragFrom >= 0, 'drop-after': dropAt === index + 1 && dragFrom >= 0 && index === tracks.length - 1 }" @click="choose($event, index)" @dblclick="emit('play', track, index)" @contextmenu="menu($event, track)" @keydown.enter.prevent.stop="emit('play', track, index)" @dragstart="dragStart(index, $event)" @dragover="dragOverRow(index, $event)" @drop="dropRow($event)" @dragend="dragEndRow()">
-        <span class="track-number"><input v-if="library.settings.showCheckboxes || selected.size" type="checkbox" :checked="selected.has(track.id)" :aria-label="`选择 ${track.name}`" @click.stop="check(index)"/><template v-else><span class="index-number">{{ String(index + offset + 1).padStart(2,'0') }}</span><button class="row-play" :aria-label="`播放 ${track.name}`" @click.stop="emit('play', track, index)"><AppIcon name="play" :size="16"/></button></template></span>
+      <div v-for="{track, index} in visible" :key="playlistEntryKey(track)" class="track-row" role="row" :aria-rowindex="index + 1" :aria-selected="selected.has(playlistEntryKey(track))" :tabindex="index === anchor ? 0 : -1" :draggable="reorderable" :style="{ height: rowHeight + 'px', transform: `translateY(${index * rowHeight}px)` }" :class="{ current: player.currentTrack && playlistEntryKey(player.currentTrack) === playlistEntryKey(track), selected: selected.has(playlistEntryKey(track)), 'is-dragging': dragFrom === index, 'drop-before': dropAt === index && dragFrom >= 0, 'drop-after': dropAt === index + 1 && dragFrom >= 0 && index === tracks.length - 1 }" @click="choose($event, index)" @dblclick="emit('play', track, index)" @contextmenu="menu($event, track)" @keydown.enter.prevent.stop="emit('play', track, index)" @dragstart="dragStart(index, $event)" @dragover="dragOverRow(index, $event)" @drop="dropRow($event)" @dragend="dragEndRow()">
+        <span class="track-number"><input v-if="library.settings.showCheckboxes || selected.size" type="checkbox" :checked="selected.has(playlistEntryKey(track))" :aria-label="`选择 ${track.name}`" @click.stop="check(index)"/><template v-else><span class="index-number">{{ String(index + offset + 1).padStart(2,'0') }}</span><button class="row-play" :aria-label="`播放 ${track.name}`" @click.stop="emit('play', track, index)"><AppIcon name="play" :size="16"/></button></template></span>
         <div class="track-identity">
           <span class="track-cover"><img v-if="cover(track)" :src="cover(track)" alt="" loading="lazy" referrerpolicy="no-referrer"/><AppIcon v-else name="music" :size="21"/></span>
           <span class="track-label">

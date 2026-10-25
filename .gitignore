@@ -14,6 +14,7 @@ dist/
 # Local caches, kept inside the workspace so sandboxed installs work
 .cache/
 .graphflow-cache/
+.graphflow/
 graphflow-out/
 *.log
 .env

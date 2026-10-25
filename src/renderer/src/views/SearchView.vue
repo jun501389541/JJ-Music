@@ -7,6 +7,8 @@ import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
 import { useUiStore } from '../stores/ui'
 import TrackList from '../components/TrackList.vue'
+import PlaylistSearchPanel from '../components/PlaylistSearchPanel.vue'
+import { usePlaylistSearchStore } from '../stores/playlist-search'
 import SearchSuggest from '../components/SearchSuggest.vue'
 import AppIcon from '../components/AppIcon.vue'
 import { useSearchSuggest } from '../composables/use-search-suggest'
@@ -16,6 +18,9 @@ import { cancellableMusic } from '../utils/cancellable-music'
 
 const library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore(), ui = useUiStore()
 const router = useRouter(), route = useRoute()
+const playlistSearch = usePlaylistSearchStore()
+const searchKind = computed(() => route.query.kind === 'playlists' ? 'playlists' : 'songs')
+function switchKind(kind: string): void { void router.replace({ path: '/search', query: { kind, q: (kind === 'songs' ? keyword.value : playlistSearch.current.query) || undefined, ...(kind === 'playlists' ? { p: playlistSearch.source } : {}) } }) }
 // `all` and `local` are this view's own scopes, not platforms. Everything else
 // is asked of the main process: the list used to be a literal copy of the search
 // adapters and silently fell behind when 咪咕 was added, because nothing but a
@@ -25,7 +30,7 @@ const VIEW_SCOPES: Array<{ id: SourceId; name: string }> = [
   { id: 'local', name: '本地音乐' }
 ]
 const platforms = ref<Array<{ id: SourceId; name: string }>>([...VIEW_SCOPES])
-const keyword = ref(typeof route.query.q === 'string' ? route.query.q : '')
+const keyword = ref(searchKind.value === 'songs' && typeof route.query.q === 'string' ? route.query.q : '')
 const submittedQuery = ref('')
 /**
  * Which tab was last open is view state, not URL state: it changes the shape of
@@ -123,6 +128,7 @@ function failureNote(failed: Array<{ source: SourceId }>): string {
 
 /** 整体替换：新搜索、切页签、改关键词都走这里，回到顶部、回到第 1 页。 */
 async function runSearch(): Promise<void> {
+  if (searchKind.value !== 'songs') return
   activeSearch?.abort()
   const query = keyword.value.trim(), request = ++generation
   // Recorded before the search itself: a query that finds nothing is still
@@ -165,6 +171,7 @@ async function runSearch(): Promise<void> {
  * 会不一样，而按钮存在的意义正是"自动加载坏了也还能继续"。
  */
 async function loadMore(): Promise<void> {
+  if (searchKind.value !== 'songs') return
   const query = submittedQuery.value
   // `local` 页签的答案就是整个曲库匹配集，本来就在列表里，没有下一页。
   if (!query || searching.value || loadingMore.value || activeSource.value === 'local' || atEnd.value) return
@@ -315,6 +322,7 @@ onMounted(() => {
   void refreshPlatforms().finally(() => { if (keyword.value) void runSearch() })
 })
 watch(() => route.query.q, value => {
+  if (searchKind.value !== 'songs') return
   keyword.value = typeof value === 'string' ? value : ''
   // `runSearch` writes the query back into the URL, so this watcher also fires
   // for our own edit. Re-running would ask the platforms the same question twice
@@ -344,6 +352,7 @@ onUnmounted(() => { hotGeneration++; hotRequest?.abort() })
 let hotScope: SourceId | 'all' | '' = ''
 
 async function loadHotWords(): Promise<void> {
+  if (searchKind.value !== 'songs') return
   hotRequest?.abort()
   const request = ++hotGeneration
   hotWordNote.value = ''
@@ -368,6 +377,11 @@ async function loadHotWords(): Promise<void> {
  * page that hides its own history until you reload answers a question nobody
  * asked.
  */
+watch(searchKind, kind => {
+  if (kind === 'playlists') { generation++; activeSearch?.abort(); searching.value = false; loadingMore.value = false }
+  hotGeneration++; hotRequest?.abort()
+  if (kind === 'songs' && !keyword.value.trim()) void loadHotWords()
+})
 const boxEmpty = computed(() => !keyword.value.trim())
 watch([activeSource, boxEmpty, () => library.settings.showSearchHotWords], () => {
   if (boxEmpty.value) void loadHotWords()
@@ -452,7 +466,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
 }
 </script>
 <template>
-  <div class="view search-view">
+  <div class="view search-view"><nav class="search-kinds" aria-label="搜索类型"><button class="btn" :aria-pressed="searchKind==='songs'" @click="switchKind('songs')">歌曲</button><button class="btn" :aria-pressed="searchKind==='playlists'" @click="switchKind('playlists')">歌单</button></nav><PlaylistSearchPanel v-if="searchKind==='playlists'"/><div v-show="searchKind==='songs'" class="song-search">
     <!--
       The box gets its own row, 620px wide. It was merged into the header once
       (d532d87) to buy list height, and that is the version the user did not
@@ -508,10 +522,10 @@ if (import.meta.env['VITE_E2E'] === '1') {
       <button v-else-if="!atEnd" class="btn" type="button" @click="loadMore()">加载更多（已显示 {{ onlineResults.length }} 条在线 / 共约 {{ total }} 条）</button>
       <span v-else class="load-more__hint">已经到底了（在线 {{ onlineResults.length }} 条）</span>
     </div>
-  </div>
+  </div></div>
 </template>
 <style scoped>
-.search-view{display:flex;flex-direction:column;overflow:hidden;padding-bottom:14px}.search-view :deep(.tracklist){height:auto;min-height:0;flex:1}.platforms,.notice,.view__header,.load-more,.searchbar{flex:none}.search-status{font-size:12px;color:var(--warning);margin-bottom:12px}.search-pending{display:inline-flex;align-items:center;gap:8px;margin-left:18px}.platforms{flex-wrap:wrap;align-items:center}
+.song-search{display:flex;flex-direction:column;flex:1;min-height:0}.search-kinds{display:flex;gap:8px;margin-bottom:18px;flex:none}.search-kinds [aria-pressed=true]{color:var(--accent);border-color:var(--accent)}.search-view{display:flex;flex-direction:column;overflow:hidden;padding-bottom:14px}.search-view :deep(.tracklist){height:auto;min-height:0;flex:1}.platforms,.notice,.view__header,.load-more,.searchbar{flex:none}.search-status{font-size:12px;color:var(--warning);margin-bottom:12px}.search-pending{display:inline-flex;align-items:center;gap:8px;margin-left:18px}.platforms{flex-wrap:wrap;align-items:center}
 
 .header-actions{display:flex;gap:8px;align-items:center}
 

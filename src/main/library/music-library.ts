@@ -153,6 +153,12 @@ export class MusicLibrary {
    * re-read files it would otherwise skip.
    */
   private stale = false
+  isScanning(): boolean { return this.scanInvalidations.size > 0 }
+  async reload(): Promise<void> {
+    if (this.isScanning()) throw new Error('正在扫描曲库，请稍后重新定位')
+    this.loaded = false; this.tracks.clear(); this.folders = []
+    await this.load()
+  }
 
   /** True when the index needs a rescan to gain fields from a newer schema. */
   isStale(): boolean {

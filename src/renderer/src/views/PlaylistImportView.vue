@@ -14,8 +14,9 @@ const providers=ref<Array<{id:SourceId;name:string}>>([]),providersLoading=ref(t
 /** 预览列表是可编辑副本：排序与移除只改它，导入时才按这份顺序提交。 */
 const rows=ref<OnlineMusicInfo[]>([]),removed=ref<OnlineMusicInfo[]>([])
 const library=useLibraryStore(),router=useRouter(),toast=useToastStore(),ui=useUiStore()
+function release(token?:string):void{if(token)void window.jj.playlistImport.discard(token).catch(()=>{})}
 let generation=0,request:AbortController|null=null
-onUnmounted(()=>{generation++;request?.abort()})
+onUnmounted(()=>{generation++;request?.abort();release(preview.value?.token)})
 onMounted(async()=>{
   try{
     providers.value=await window.jj.playlistImport.providers()
@@ -23,12 +24,12 @@ onMounted(async()=>{
   }catch(e){providersError.value=e instanceof Error?e.message:'无法读取可用平台'}
   finally{providersLoading.value=false}
 })
-watch([source,input],()=>{generation++;request?.abort();busy.value=false;preview.value=null;error.value='';rows.value=[];removed.value=[]})
+watch([source,input],()=>{generation++;request?.abort();busy.value=false;release(preview.value?.token);preview.value=null;error.value='';rows.value=[];removed.value=[]})
 // 顺序不同也算改过：拖动不改变数量，但提交出去的歌单顺序确实和预览不一样了。
 const edited=computed(()=>{const original=preview.value?.tracks??[];return rows.value.length!==original.length||rows.value.some((track,index)=>track.id!==original[index]?.id)})
 async function read():Promise<void>{
   request?.abort();const current=++generation,controller=new AbortController();request=controller;busy.value=true;error.value=''
-  try{const result=await cancellableMusic(controller.signal,id=>window.jj.playlistImport.preview(source.value,input.value,id));if(current===generation){preview.value=result;rows.value=[...result.tracks];removed.value=[]}}
+  try{const result=await cancellableMusic(controller.signal,id=>window.jj.playlistImport.preview(source.value,input.value,id));if(current===generation){release(preview.value?.token);preview.value=result;rows.value=[...result.tracks];removed.value=[]}else release(result.token)}
   catch(e){if(current===generation)error.value=(e instanceof Error?e.message:'读取失败')+(preview.value?'；已保留上次待导入列表。':'')}
   finally{if(current===generation){busy.value=false;request=null}}
 }

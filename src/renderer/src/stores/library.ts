@@ -1,3 +1,4 @@
+import { playlistEntryKey } from '@shared/playlist-refresh'
 /**
  * Library, playlist, 音源 and settings state.
  *
@@ -436,7 +437,7 @@ export const useLibraryStore = defineStore('library', () => {
   function toggleFavorite(track: PlayableTrack): Promise<void> {
     const snapshot = JSON.parse(JSON.stringify(track)) as PlayableTrack
     const operation = favoriteWrites.catch(() => undefined).then(async () => {
-      if (favorites.value.some(item => item.id === snapshot.id)) await window.jj.playlists.removeTracks('favorites', [snapshot.id])
+      if (favorites.value.some(item => playlistEntryKey(item) === playlistEntryKey(snapshot))) await window.jj.playlists.removeTracks('favorites', [playlistEntryKey(snapshot)], true)
       else await window.jj.playlists.addTracks('favorites', [snapshot])
       await refreshPlaylists()
     })

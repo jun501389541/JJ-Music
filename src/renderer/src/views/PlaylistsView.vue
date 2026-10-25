@@ -1,17 +1,70 @@
 <script setup lang="ts">
 /** Playlist index: create, rename, remove. */
 import { useUiStore } from '../stores/ui'
-import { ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { filterPlaylists } from '../utils/playlist-filter'
+import { useViewState } from '../composables/view-state'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import { toMediaUrl } from '@shared/media-url'
+import PlaylistRestorePanel from '../components/PlaylistRestorePanel.vue'
+import { usePlaylistExport } from '../composables/use-playlist-export'
 
 const library = useLibraryStore()
 const ui = useUiStore()
 const toast = useToastStore()
 const router = useRouter()
+const {exporting,exportPlaylists}=usePlaylistExport()
 
+const {state:remembered,save}=useViewState('saved-playlists',{query:''})
+const query=ref(typeof remembered.query==='string'?remembered.query:'')
+const visible=computed(()=>filterPlaylists(library.orderedPlaylists,query.value))
+watch(query,value=>save({query:value}))
+const bulkMode=ref(false),bulkBusy=ref(false),selected=ref(new Set<string>()),bulkMessage=ref('')
+let alive=true
+onUnmounted(()=>{alive=false})
+const ordinary=(id:string):boolean=>id!=='default'&&id!=='favorites'
+const selectable=computed(()=>visible.value.filter(p=>ordinary(p.id)))
+watch(query,()=>{selected.value=new Set()})
+watch(()=>library.playlists,()=>{const existing=new Set(library.playlists.map(p=>p.id));selected.value=new Set([...selected.value].filter(id=>existing.has(id)))})
+function toggleBulk():void{if(bulkBusy.value)return;bulkMode.value=!bulkMode.value;selected.value=new Set();bulkMessage.value=''}
+function toggleList(id:string):void{
+ if(!ordinary(id)||bulkBusy.value)return
+ const next=new Set(selected.value)
+ if(next.has(id))next.delete(id);else if(next.size<1000)next.add(id);else bulkMessage.value='一次最多选择1000个歌单'
+ selected.value=next
+}
+function selectVisible():void{
+ if(bulkBusy.value)return
+ selected.value=new Set(selectable.value.slice(0,1000).map(p=>p.id))
+ if(selectable.value.length>1000)bulkMessage.value='当前只选择前1000个普通歌单，请分批处理'
+}
+function toggleCheckbox(id:string,event:Event):void{
+ toggleList(id)
+ ;(event.currentTarget as HTMLInputElement).checked=selected.value.has(id)
+}
+function openList(id:string):void{if(bulkMode.value)toggleList(id);else void router.push('/playlist/'+id)}
+async function removeSelected():Promise<void>{
+ if(bulkBusy.value||!selected.value.size)return
+ const ids=[...selected.value],names=library.playlists.filter(p=>selected.value.has(p.id)).map(p=>p.name)
+ bulkBusy.value=true;bulkMessage.value=''
+ try{
+  const shown=names.slice(0,10).join('、')+(names.length>10?' 等'+names.length+'个':'')
+  if(!await ui.confirm('批量删除 '+ids.length+' 个歌单','将删除：'+shown+'。只删除歌单关联，不删除音乐、收藏或当前播放队列。'))return
+  if(!alive)return
+  const removed=await window.jj.playlists.removeMany(ids)
+  selected.value=new Set();bulkMode.value=false
+  const drop=new Set(ids)
+  const results=await Promise.allSettled([
+   library.updateSettings({playlistOrder:library.settings.playlistOrder.filter(id=>!drop.has(id))}),
+   library.refreshPlaylists()
+  ])
+  if(results.some(r=>r.status==='rejected'))bulkMessage.value='已删除 '+removed+' 个歌单，但顺序保存或列表刷新失败，请重启应用核对，无需重复删除。'
+  else toast.success('已删除 '+removed+' 个歌单')
+ }catch(error){bulkMessage.value=error instanceof Error?error.message:'批量删除失败'}
+ finally{if(alive)bulkBusy.value=false}
+}
 const creating = ref(false)
 const newName = ref('')
 
@@ -57,11 +110,14 @@ async function remove(id: string, name: string): Promise<void> {
         <h1 class="view__title">歌单</h1>
         <p class="view__subtitle">{{ library.playlists.length }} 个歌单</p>
       </div>
-      <button class="btn btn--primary" type="button" @click="creating = !creating">
+      <div class="playlist-index-actions"><button class="btn" :disabled="bulkBusy" @click="router.push('/missing-files')">缺失文件检查</button><button class="btn" :disabled="bulkBusy" @click="toggleBulk">{{bulkMode?'退出批量管理':'批量管理'}}</button><button class="btn" :disabled="exporting" @click="exportPlaylists()">{{ exporting?'正在备份…':'备份全部歌单' }}</button><button class="btn btn--primary" type="button" @click="creating = !creating">
         新建歌单
-      </button>
+      </button></div>
     </header>
 
+    <p v-if="bulkMessage" role="alert" class="bulk-message">{{bulkMessage}}</p>
+    <div v-if="bulkMode" class="bulk-actions"><span>已选择 {{selected.size}} 个普通歌单（内置歌单不参与）</span><button class="btn" :disabled="bulkBusy||!selectable.length" @click="selectVisible">全选当前结果</button><button class="btn" :disabled="bulkBusy||!selected.size" @click="selected=new Set()">取消选择</button><button class="btn" :disabled="bulkBusy||!selected.size" @click="removeSelected">删除选中歌单</button></div>
+    <PlaylistRestorePanel @restored="query=''" />
     <div v-if="creating" class="create">
       <input
         v-model="newName"
@@ -75,14 +131,14 @@ async function remove(id: string, name: string): Promise<void> {
       <button class="btn btn--ghost" type="button" @click="creating = false">取消</button>
     </div>
 
-    <div class="grid-cards">
+    <div class="playlist-filter"><input v-model="query" :disabled="bulkBusy" class="input" type="search" maxlength="200" aria-label="筛选已保存歌单" placeholder="按歌单名称筛选"><button v-if="query" class="btn" @click="query=''">清空筛选</button><span role="status">{{ visible.length }} / {{ library.playlists.length }} 个歌单</span></div><p v-if="library.playlists.length&&!visible.length" class="empty">没有匹配的歌单，试试其他名称或清空筛选。</p><div class="grid-cards">
       <div
-        v-for="list in library.orderedPlaylists"
+        v-for="list in visible"
         :key="list.id"
         class="plcard"
-        @dblclick="router.push(`/playlist/${list.id}`)"
+        @dblclick="!bulkMode&&router.push(`/playlist/${list.id}`)"
       >
-        <button class="plcard__body" type="button" @click="router.push(`/playlist/${list.id}`)">
+        <label v-if="bulkMode" class="bulk-checkbox"><input type="checkbox" :aria-label="'选择歌单 '+list.name" :checked="selected.has(list.id)" :disabled="bulkBusy||!ordinary(list.id)" @change="toggleCheckbox(list.id,$event)">选择</label><button class="plcard__body" type="button" :disabled="bulkMode&&(!ordinary(list.id)||bulkBusy)" @click="openList(list.id)">
           <span class="plcard__art">
             <img v-if="list.coverPath && !brokenCovers[list.coverPath]" :src="toMediaUrl(list.coverPath)" alt="" loading="lazy" @error="markCoverBroken(list.coverPath)" />
             <svg v-else width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -98,7 +154,7 @@ async function remove(id: string, name: string): Promise<void> {
           <span class="plcard__count tnum">{{ list.trackCount ?? 0 }} 首</span>
         </button>
         <button
-          v-if="!['default', 'favorites'].includes(list.id)"
+          v-if="!bulkMode&&!['default', 'favorites'].includes(list.id)"
           class="plcard__remove"
           type="button"
           title="删除歌单"
@@ -117,6 +173,8 @@ async function remove(id: string, name: string): Promise<void> {
 </template>
 
 <style scoped>
+.bulk-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.bulk-actions span{font-size:12px;color:var(--text-secondary)}.bulk-message{color:var(--danger);font-size:13px}.bulk-checkbox{display:flex;gap:6px;margin-bottom:8px;font-size:12px}.playlist-index-actions{flex-wrap:wrap}
+.playlist-index-actions{display:flex;gap:10px}.playlist-filter{display:flex;align-items:center;gap:12px;margin-bottom:20px}.playlist-filter input{max-width:480px;flex:1}.playlist-filter span{font-size:12px;color:var(--text-secondary)}
 .create {
   display: flex;
   gap: 8px;

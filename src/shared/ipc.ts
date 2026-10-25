@@ -5,6 +5,15 @@
  * a channel name is a compile error rather than a silently dead handler.
  */
 export const IPC = {
+  playlistSearchProviders: 'playlist-search:providers',
+  playlistSearch: 'playlist-search:search',
+  playlistImportDiscard: 'playlist:import-discard',
+  chartsList: 'charts:list',
+  chartsArtwork: 'charts:artwork',
+  chartsTracks: 'charts:tracks',
+  libraryRelinkBatchScan: 'library:relink-batch-scan',
+  libraryRelinkBatchPreview: 'library:relink-batch-preview',
+  libraryRelinkBatchDiscard: 'library:relink-batch-discard',
   libraryRelinkPreview: 'library:relink-preview',
   libraryRelinkApply: 'library:relink-apply',
   libraryRelinkDiscard: 'library:relink-discard',
@@ -161,6 +170,7 @@ export const IPC = {
   libraryRemoveFolder: 'library:remove-folder',
   libraryScan: 'library:scan',
   libraryTracks: 'library:tracks',
+  libraryMissingFiles: 'library:missing-files',
   /** Drop index entries by track id; never touches the file on disk. */
   libraryRemoveTracks: 'library:remove-tracks',
   libraryProgress: 'library:progress',
@@ -168,8 +178,13 @@ export const IPC = {
 
   // Playlists
   playlistList: 'playlist:list',
+  playlistExportJson: 'playlist:export-json',
+  playlistRestorePreview: 'playlist:restore-preview',
+  playlistRestoreApply: 'playlist:restore-apply',
+  playlistRestoreDiscard: 'playlist:restore-discard',
   playlistCreate: 'playlist:create',
   playlistRemove: 'playlist:remove',
+  playlistRemoveMany: 'playlist:remove-many',
   playlistRename: 'playlist:rename',
   /** Picker + copy in one: the chosen image lands in the folder media already serves. */
   playlistChooseCover: 'playlist:choose-cover',

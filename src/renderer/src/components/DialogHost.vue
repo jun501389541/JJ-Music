@@ -20,6 +20,10 @@ watch(() => ui.trackInfo, async (track) => {
   }
 })
 watch(() => ui.dialog, async dialog => { value.value = dialog?.value ?? ''; await nextTick(); input.value?.focus(); input.value?.select() })
+function submitDialog(): void {
+  const dialog = ui.dialog
+  if (dialog) ui.finishDialog(dialog.value !== undefined ? value.value.trim() : 'yes')
+}
 function trap(event: KeyboardEvent): void {
   if (event.key !== 'Tab') return
   const dialog = event.currentTarget as HTMLElement
@@ -40,7 +44,7 @@ const details = computed(() => {
 </script>
 <template><Teleport to="body">
   <div v-if="ui.dialog" class="dialog-backdrop" @keydown="trap" @mousedown.self="ui.finishDialog(null)" @keydown.esc.stop="ui.finishDialog(null)">
-    <form class="salt-dialog" role="dialog" aria-modal="true" :aria-label="ui.dialog.title" @submit.prevent="ui.finishDialog(ui.dialog.value !== undefined ? value.trim() : 'yes')">
+    <form class="salt-dialog" role="dialog" aria-modal="true" :aria-label="ui.dialog.title" @submit.prevent="submitDialog">
       <h2>{{ ui.dialog.title }}</h2><p v-if="ui.dialog.message">{{ ui.dialog.message }}</p>
       <input v-if="ui.dialog.value !== undefined" ref="input" v-model="value" class="input" aria-label="名称" required maxlength="100" />
       <footer><button class="btn" type="button" @click="ui.finishDialog(null)">取消</button><button class="btn btn--primary" type="submit">{{ ui.dialog.confirmLabel || '保存' }}</button></footer>

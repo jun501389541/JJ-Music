@@ -1,4 +1,6 @@
+import { assertPlaylistSearch } from '@shared/playlist-search'
 import { IPC } from '@shared/ipc'
+import { assertChartArgs } from '@shared/chart-types'
 import {
   LX_QUALITIES,
   ONLINE_ALBUM_MAX_PAGES,
@@ -18,6 +20,7 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const path = (value: unknown): boolean => str(value, 32767)
   const ids = (value: unknown, max = 50000): boolean =>
     Array.isArray(value) && value.length <= max && value.every((item) => str(item, 256))
+  const uuid = (value: unknown): boolean => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value)
   const source = (value: unknown): boolean => str(value, 64)
   const page = (value: unknown, max = 100): boolean =>
     Number.isInteger(value) && (value as number) >= 1 && (value as number) <= max
@@ -31,6 +34,50 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const quality = (value: unknown): boolean => LX_QUALITIES.includes(value as (typeof LX_QUALITIES)[number])
 
   switch (channel) {
+    case IPC.playlistRemoveMany:
+      if(args.length!==1||!Array.isArray(args[0])||!ids(args[0],1000)||!args[0].length||new Set(args[0]).size!==args[0].length||args[0].includes('default')||args[0].includes('favorites'))bad()
+      break
+    case IPC.libraryMissingFiles:
+      if(args.length>1||!request(args[0]))bad()
+      break
+    case IPC.playlistRestorePreview:
+      if(args.length!==0)bad()
+      break
+    case IPC.playlistRestoreApply:
+    case IPC.playlistRestoreDiscard:
+      if(args.length!==1||!uuid(args[0]))bad()
+      break
+    case IPC.playlistExportJson:
+      if(args.length>1||(args[0]!==undefined&&(!str(args[0],256)||/[/\\:]/.test(args[0] as string))))bad()
+      break
+    case IPC.playlistSearchProviders:
+      if(args.length!==0)bad()
+      break
+    case IPC.playlistSearch:
+      if(args.length<3||args.length>5||!request(args[3])||(args[4]!==undefined&&typeof args[4]!=='boolean'))bad()
+      assertPlaylistSearch(args[0],args[1],args[2])
+      break
+    case IPC.chartsArtwork:
+      if(args.length > 3 || args.length < 2 || !request(args[2])) bad()
+      assertChartArgs(args[0], args[1])
+      break
+    case IPC.chartsList:
+      if(args.length > 3 || !request(args[1]) || (args[2] !== undefined && typeof args[2] !== 'boolean')) bad()
+      assertChartArgs(args[0])
+      break
+    case IPC.chartsTracks:
+      if(args.length > 6 || args.length < 3 || !request(args[4]) || (args[5] !== undefined && typeof args[5] !== 'boolean')) bad()
+      assertChartArgs(args[0], args[1], args[2] as number, args[3] as string | undefined)
+      break
+    case IPC.libraryRelinkBatchScan:
+      if(args.length<1||args.length>2||!request(args[1])||!Array.isArray(args[0])||!args[0].length||args[0].length>50||args[0].some(r=>!r||typeof r!=='object'||Object.keys(r).sort().join(',')!=='id,path'||!str(r.id,256)||!path(r.path)))bad()
+      break
+    case IPC.libraryRelinkBatchPreview:
+      if(args.length<2||args.length>3||!request(args[2])||!uuid(args[0])||!Array.isArray(args[1])||!args[1].length||args[1].length>50||args[1].some(c=>!c||typeof c!=='object'||Object.keys(c).sort().join(',')!=='fileId,id'||!str(c.id,256)||!uuid(c.fileId)))bad()
+      break
+    case IPC.libraryRelinkBatchDiscard:
+      if(args.length!==1||typeof args[0]!=='string'||!/^[a-f0-9-]{36}$/i.test(args[0]))bad()
+      break
     case IPC.libraryRelinkPreview:
       if(args.length !== 2 || !str(args[0], 256) || !path(args[1])) bad()
       break
@@ -46,6 +93,7 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
       if(args.length>2||!str(args[0],256)||!request(args[1]))bad()
       break
     case IPC.playlistRefreshApply:
+    case IPC.playlistImportDiscard:
     case IPC.playlistRefreshDiscard:
       if(args.length!==1||typeof args[0]!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(args[0]))bad()
       break
@@ -106,7 +154,7 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
       break
     case IPC.playlistRemoveTracks:
     case IPC.playlistReorder:
-      if (!str(args[0], 256) || !ids(args[1])) bad()
+      if(args.length<2||args.length>3||!str(args[0],256)||(args[2]!==undefined&&typeof args[2]!=='boolean')||!Array.isArray(args[1])||args[1].length>50000||!args[1].every(value=>str(value,args[2]===true?512:256)))bad()
       break
     case IPC.downloadsAdd:
       if (args.length !== 2 || !Array.isArray(args[0]) || args[0].length > 500 ||

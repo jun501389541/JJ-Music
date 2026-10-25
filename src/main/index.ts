@@ -1,3 +1,6 @@
+import { PlaylistSearchService } from './online/playlist-search-service'
+import { PlaylistPreviews } from './online/playlist-previews'
+import { PLAYLIST_SEARCH_PLATFORMS, type PlaylistSource } from '@shared/playlist-search'
 /**
  * Electron main process.
  *
@@ -12,9 +15,16 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import { fileURLToPath } from 'node:url'
-import { randomUUID } from 'node:crypto'
+
 import { DownloadManager } from './downloads/download-manager'
+import { ChartsService } from './online/charts-service'
+import type { ChartSource } from '@shared/chart-types'
 import { RelinkCandidates, RelinkCommitGuard, commitLocalRelink, recoverLocalRelink } from './library/local-file-relink'
+import { MissingFiles } from './library/missing-files'
+import { PlaylistRestore } from './library/playlist-restore'
+import { PlaylistBackup } from './library/playlist-backup'
+import { BatchRelink } from './library/batch-file-relink'
+import type { RelinkReference, RelinkChoice } from '@shared/batch-file-relink'
 import { sameLocalPath } from '@shared/local-file-relink'
 import { ArtistImageStore } from './library/artist-images'
 import { resolveArtistImage } from './online/artist-image'
@@ -370,6 +380,8 @@ interface Services {
   /** Routes catalog search and hot words through onlinePlatforms. */
   searchRouter: SearchRouter
   catalogReliability: CatalogReliability
+  charts: ChartsService
+  playlistSearch: PlaylistSearchService
   capabilityHealth: CapabilityHealth
   auxiliaryRequests: AuxiliaryRequests
   onlineAssets: OnlineAssetCache
@@ -482,6 +494,9 @@ async function createServices(): Promise<Services> {
   const catalogReliability = new CatalogReliability({ dataDir, health: capabilityHealth, enabled: () => settings.get().onlineReliability !== false })
   const auxiliaryRequests = new AuxiliaryRequests({ health: capabilityHealth, diagnostics: catalogReliability.diagnostics, revision: source => ADAPTER_REVISIONS[source] ?? 'unknown' })
   await catalogReliability.load()
+  const charts = new ChartsService({ dataDir, health: capabilityHealth, diagnostics: catalogReliability.diagnostics, enabled: () => settings.get().onlineReliability !== false })
+  await charts.load()
+  const playlistSearch = new PlaylistSearchService({ health: capabilityHealth, diagnostics: catalogReliability.diagnostics, enabled: () => settings.get().onlineReliability !== false })
   await catalogReliability.diagnostics.load()
   catalogReliability.diagnostics.setEnabled(settings.get().onlineDiagnostics !== false)
   const onlineAssets = new OnlineAssetCache({ dataDir, health: capabilityHealth, diagnostics: catalogReliability.diagnostics, enabled: () => settings.get().onlineReliability !== false })
@@ -663,7 +678,7 @@ async function createServices(): Promise<Services> {
     }
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, charts, playlistSearch, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -1752,7 +1767,7 @@ function registerIpc(): void {
     if (!(writable.showSearchHistory ?? settings.get().showSearchHistory)) writable.searchHistory = []
     const after = await settings.update(writable)
     if (patch.onlineDiagnostics !== undefined) requireServices().catalogReliability.diagnostics.setEnabled(after.onlineDiagnostics !== false)
-    if (patch.onlineReliability !== undefined) requireServices().catalogReliability.clear()
+    if (patch.onlineReliability !== undefined) { requireServices().catalogReliability.clear(); requireServices().playlistSearch.clear(); requireServices().charts.clear() }
     if (patch.onlineReliability !== undefined) requireServices().capabilityHealth.clear()
     if (patch.onlineReliability !== undefined) { clearAutomaticLyricCache(); await requireServices().onlineAssets.clear() }
     if (patch.onlineReliability !== undefined) { requireServices().playlistRefresh.clear();requireServices().libraryRouter.clear() }
@@ -2198,6 +2213,7 @@ function registerIpc(): void {
     requireServices().libraryRouter.clear()
     hotWords.clear()
     catalogReliability.clear(); await catalogReliability.flush()
+    requireServices().playlistSearch.clear(); requireServices().charts.clear(); await requireServices().charts.flush()
   })
 
   /**
@@ -2378,6 +2394,19 @@ function registerIpc(): void {
     })
   })
 
+  const missingFiles=new MissingFiles()
+  let checkingMissingFiles=false
+  handle(IPC.libraryMissingFiles,(requestId?:string)=>cancellableRequest(requestId,async signal=>{
+    if(checkingMissingFiles)throw Error('正在检查本地引用，请稍后重试')
+    checkingMissingFiles=true
+    try{
+      const current=requireServices(),saved=await current.playlists.localReferences()
+      signal?.throwIfAborted()
+      const tracks=current.library.getAll()
+      const references=tracks.slice(0,50000).map(t=>({track:{id:t.id,path:t.path,name:t.name,singer:t.singer,...(t.albumName?{albumName:t.albumName}:{})},origin:{id:'library',name:'本地曲库'}}))
+      return await missingFiles.check({references:[...references,...saved.references],limited:saved.limited||tracks.length>50000},signal)
+    }finally{checkingMissingFiles=false}
+  }))
   handle(IPC.libraryTracks, () => requireServices().library.getAll())
   const findLocalReference = async (id: string, path?: string): Promise<LocalMusicInfo | undefined> => {
       const { library, playlists, settings } = requireServices()
@@ -2394,25 +2423,36 @@ function registerIpc(): void {
     findTarget: id => findLocalReference(id),
     readTrack: path => requireServices().library.readTrack(path)
   })
+  const batchRelinkCandidates = new RelinkCandidates({findOld:findLocalReference,findTarget:id=>findLocalReference(id),readTrack:path=>requireServices().library.readTrack(path)})
+  const batchRelink = new BatchRelink({source:(id,path)=>batchRelinkCandidates.source(id,path),preview:(id,path,chosen)=>batchRelinkCandidates.preview(id,path,chosen,true),discard:token=>batchRelinkCandidates.discard(token)})
+  handle(IPC.libraryRelinkBatchScan,(refs:RelinkReference[],requestId?:string)=>cancellableRequest(requestId,async signal=>{
+    const selected=await dialog.showOpenDialog({title:'选择重新定位候选目录',properties:['openDirectory']})
+    if(selected.canceled||selected.filePaths.length!==1)return null
+    return batchRelink.scan(refs,selected.filePaths[0],signal)
+  }))
+  handle(IPC.libraryRelinkBatchPreview,(token:string,choices:RelinkChoice[],requestId?:string)=>cancellableRequest(requestId,signal=>batchRelink.preview(token,choices,signal)))
+  handle(IPC.libraryRelinkBatchDiscard,(token:string)=>batchRelink.discard(token))
   handle(IPC.libraryRelinkPreview, async (id: string, path: string) => {
     await relinkCandidates.source(id, path)
     const selected = await dialog.showOpenDialog({ title: '重新定位音乐文件', properties: ['openFile'], filters: [{ name: '音乐文件', extensions: ['mp3', 'flac', 'wav', 'm4a', 'aac', 'ogg', 'opus'] }] })
     if (selected.canceled || selected.filePaths.length !== 1) return null
     return relinkCandidates.preview(id, path, selected.filePaths[0])
   })
-  handle(IPC.libraryRelinkDiscard, (token: string) => relinkCandidates.discard(token))
+  handle(IPC.libraryRelinkDiscard, (token: string) => {relinkCandidates.discard(token);batchRelinkCandidates.discard(token)})
   handle(IPC.libraryRelinkApply, async (token: string) => {
     const current = requireServices()
+    const candidates = relinkCandidates.has(token) ? relinkCandidates : batchRelinkCandidates
     relinkCommit = relinkGuard.run(async () => {
       await Promise.allSettled([...inFlightIpc])
       await assetOperations.flush(); await assetCommits.flush(); await flushAssetWrites()
       if (quitting) throw new Error('播放器正在退出')
       if (current.library.isScanning() || current.downloads.isBusy()) throw new Error('请等待曲库扫描和下载完成后重新定位')
       await current.playlists.flush(); await flushJsonWrites()
-      return relinkCandidates.confirm(token)
+      if(candidates===batchRelinkCandidates)await batchRelink.assertPreview(token)
+      return candidates.confirm(token)
     }, change => commitLocalRelink(current.dataDir, change), async change => {
       await current.library.reload(); await current.playlists.reload(); await current.settings.reload()
-      relinkCandidates.discard(token)
+      candidates.discard(token)
       rememberPicked([change.next.path])
       return { ...change, settings: current.settings.get() }
     }, () => existsSync(join(current.dataDir, 'local-relink.pending.json')))
@@ -2472,7 +2512,7 @@ function registerIpc(): void {
     await settings.update({ downloadFolder: result.filePaths[0] })
     return settings.get().downloadFolder
   })
-  const importPreviews = new Map<string, ImportedPlaylist>()
+  const importPreviews = new PlaylistPreviews<ImportedPlaylist>()
   handle(IPC.playlistImportProviders, () => {
     const admitted = new Set(requireServices().libraryRouter.playablePlatforms())
     return searchProviders().filter((item) => admitted.has(item.id))
@@ -2487,7 +2527,6 @@ function registerIpc(): void {
     const routed = await requireServices().libraryRouter.importTracks(source, input, listId,signal)
     if(signal?.aborted)throw new Error('请求已取消')
     if (routed.servedBy === 'none') throw Error(routed.message ?? '无法读取该歌单')
-    const token = randomUUID()
     const preview: ImportedPlaylist = {
       name: routed.name ?? `导入歌单 ${listId}`,
       source,
@@ -2499,8 +2538,7 @@ function registerIpc(): void {
       complete: routed.complete,
       reliability: routed.reliability
     }
-    if(importPreviews.size>=10)importPreviews.delete(importPreviews.keys().next().value!)
-    importPreviews.set(token,preview)
+    const token=importPreviews.add(preview)
     return {...preview,token}
   }))
   handle(IPC.playlistImportSave, async (token: string, ids: unknown) => {
@@ -2509,7 +2547,7 @@ function registerIpc(): void {
     // 渲染层只提交「要哪几首、什么顺序」；歌曲内容仍以主进程缓存的预览为准。
     const tracks=applyImportOrder(preview,ids)
     if(!tracks.length)throw Error('没有可导入的歌曲')
-    importPreviews.delete(token)
+    importPreviews.take(token)
     const { library, playlists } = requireServices()
     const playlist=await playlists.create(preview.name,{source:preview.source,sourceListId:preview.sourceListId})
     try { await playlists.addTracks(playlist.id,tracks) } catch(error) {await playlists.remove(playlist.id);throw error}
@@ -2523,11 +2561,52 @@ function registerIpc(): void {
     }
     return {...playlist,trackCount:tracks.length,coverFailed}
   })
+  handle(IPC.playlistImportDiscard, (token:string) => { importPreviews.discard(token) })
+  handle(IPC.playlistSearchProviders, () => PLAYLIST_SEARCH_PLATFORMS)
+  handle(IPC.playlistSearch, (source:PlaylistSource, keyword:string, page:number, requestId?:string, force=false) => cancellableRequest(requestId,signal => requireServices().playlistSearch.search(source,keyword,page,signal,force)))
   handle(IPC.playlistRefreshPreview,(id:string,requestId?:string)=>cancellableRequest(requestId,signal=>requireServices().playlistRefresh.preview(id,signal)))
   handle(IPC.playlistRefreshApply,(token:string)=>requireServices().playlistRefresh.apply(token))
   handle(IPC.playlistRefreshDiscard,(token:string)=>requireServices().playlistRefresh.discard(token))
+  const restore = new PlaylistRestore({
+    assertReady:()=>{if(quitting||relinkGuard.blocked)throw Error('应用正在退出或修复本地文件，请稍后再恢复')},
+    choose:async()=>{
+      const result=await dialog.showOpenDialog({title:'选择 JJ-Music JSON 歌单备份',properties:['openFile'],filters:[{name:'JSON 歌单备份',extensions:['json']}]})
+      return result.canceled?null:result.filePaths[0]??null
+    },
+    commit:snapshots=>requireServices().playlists.restoreBackup(snapshots)
+  })
+  let choosingRestore=false
+  handle(IPC.playlistRestorePreview,async()=>{
+    if(choosingRestore)throw Error('正在选择备份文件，请稍后')
+    choosingRestore=true
+    try{return await restore.preview()}finally{choosingRestore=false}
+  })
+  handle(IPC.playlistRestoreApply,(token:string)=>restore.apply(token))
+  handle(IPC.playlistRestoreDiscard,(token:string)=>restore.discard(token))
+  let exportingPlaylists=false
+  handle(IPC.playlistExportJson,async(id?:string)=>{
+    if(exportingPlaylists)throw Error('正在导出歌单，请稍后')
+    exportingPlaylists=true
+    try{
+      const current=requireServices()
+      return await new PlaylistBackup({dataDir:current.dataDir,snapshot:id=>current.playlists.backupSnapshot(id),assertReady:()=>{if(quitting)throw Error('应用正在退出，导出已取消')},choose:async defaultPath=>{
+        const result=await dialog.showSaveDialog({title:id?'导出完整歌单信息':'备份全部歌单信息',defaultPath,filters:[{name:'JSON 歌单信息',extensions:['json']}],properties:['showOverwriteConfirmation']})
+        return result.canceled?null:result.filePath??null
+      }}).export(id)
+    }finally{exportingPlaylists=false}
+  })
   handle(IPC.playlistList, () => requireServices().playlists.list())
-  // Keep the legacy IPC shape for callers while F1's platform-backed leaderboard route is unavailable.
+  handle(IPC.chartsList, (source: ChartSource, requestId?: string, force = false) => cancellableRequest(requestId, signal => requireServices().charts.list(source, signal, force)))
+  handle(IPC.chartsArtwork, (source: ChartSource, id: string, requestId?: string) => cancellableRequest(requestId, async signal => {
+    const { charts, platformCover } = requireServices()
+    const list = await charts.list(source, signal)
+    const url = list.data?.find(board => board.id === id)?.coverUrl
+    if (!url) return ''
+    const cover = await platformCover({ source, picUrl: url }, signal)
+    return cover ? `data:${cover.mimeType};base64,${Buffer.from(cover.data).toString('base64')}` : ''
+  }))
+  handle(IPC.chartsTracks, (source: ChartSource, id: string, page: number, period = '', requestId?: string, force = false) => cancellableRequest(requestId, signal => requireServices().charts.tracks(source, id, page, period, signal, force)))
+  // Retired JJ-only IPC remains unavailable; platform charts use their own contract.
   handle(IPC.leaderboardList, (source?: SourceId) =>
     requireServices().libraryRouter.leaderboards(source)
   )
@@ -2540,6 +2619,7 @@ function registerIpc(): void {
     )
   })
   handle(IPC.playlistCreate, (name: string) => requireServices().playlists.create(name))
+  handle(IPC.playlistRemoveMany,(ids:string[])=>requireServices().playlists.removeMany(ids))
   handle(IPC.playlistRemove, (id: string) => requireServices().playlists.remove(id))
   handle(IPC.playlistRename, (id: string, name: string) =>
     requireServices().playlists.rename(id, name)
@@ -2548,14 +2628,15 @@ function registerIpc(): void {
   handle(IPC.playlistAddTracks, (id: string, tracks: PlayableTrack[]) =>
     requireServices().playlists.addTracks(id, tracks)
   )
-  handle(IPC.playlistRemoveTracks, (id: string, trackIds: string[]) =>
+  handle(IPC.playlistRemoveTracks, (id: string, trackIds: string[], byEntryKey = false) =>
     requireServices().playlists.removeTracks(
       id,
-      Array.isArray(trackIds) ? trackIds.filter((trackId) => typeof trackId === 'string') : []
+      Array.isArray(trackIds) ? trackIds.filter((trackId) => typeof trackId === 'string') : [],
+      byEntryKey
     )
   )
-  handle(IPC.playlistReorder, (id: string, trackIds: string[]) =>
-    requireServices().playlists.reorder(id, trackIds)
+  handle(IPC.playlistReorder, (id: string, trackIds: string[], byEntryKey = false) =>
+    requireServices().playlists.reorder(id, trackIds, byEntryKey)
   )
   /**
    * 补一个歌单里"不知道有哪些音质档"的在线曲目。
@@ -3075,6 +3156,7 @@ if (!app.requestSingleInstanceLock()) {
       ...(relinkCommit ? [relinkCommit] : []),
       current.downloads.shutdown(),
       current.catalogReliability.flush(),
+      current.charts.flush(),
       current.onlineAssets.flush(),
       current.libraryRouter.flush(),
       current.hotWords.flush(),

@@ -9,6 +9,9 @@ export type OnlineCapability =
   | 'artistImage'
   | 'artistDetail'
   | 'albumDetail'
+  | 'playlistSearch'
+  | 'chartList'
+  | 'chartTracks'
 
 export interface OnlineSourceRuntime {
   apiId: string
@@ -21,11 +24,11 @@ export interface OnlinePlatformRegistryOptions {
 }
 
 export const ONLINE_PLATFORM_CAPABILITIES: Readonly<Record<string, readonly OnlineCapability[]>> = {
-  tx: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage'],
-  wy: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'artistDetail', 'albumDetail'],
-  kw: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport'],
-  kg: ['search', 'hotWords', 'cover', 'playlistImport', 'artistImage'],
-  mg: ['search', 'lyrics', 'cover', 'playlistImport', 'artistImage']
+  tx: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'chartList', 'chartTracks'],
+  wy: ['playlistSearch', 'search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'artistDetail', 'albumDetail', 'chartList', 'chartTracks'],
+  kw: ['playlistSearch', 'search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'chartList', 'chartTracks'],
+  kg: ['playlistSearch', 'search', 'hotWords', 'cover', 'playlistImport', 'artistImage', 'chartList', 'chartTracks'],
+  mg: ['playlistSearch', 'search', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'chartList', 'chartTracks']
 }
 
 const PLATFORM_ORDER: SourceId[] = ['tx', 'wy', 'kw', 'kg', 'mg']

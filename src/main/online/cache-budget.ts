@@ -2,6 +2,8 @@
 const MiB = 1024 * 1024
 export const ONLINE_CACHE_DISK_LIMIT = 256 * MiB
 export const ONLINE_CACHE_BYTES = Object.freeze({
+  charts: 2 * MiB,
+  playlistSearch: MiB,
   artistDetail: 16 * MiB,
   albumDetail: 16 * MiB,
   playlists: 8 * MiB,

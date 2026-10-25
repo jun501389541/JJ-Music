@@ -8,7 +8,10 @@ export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/discover' },
+    { path: '/missing-files', component: () => import('../views/MissingFilesView.vue'), meta: { title: '缺失文件检查' } },
+    { path: '/local-relink-batch', component: () => import('../views/LocalRelinkBatchView.vue'), meta: { title: '批量重新定位' } },
     { path: '/downloads', component: () => import('../views/DownloadsView.vue'), meta: { title: '下载管理' } },
+    { path: '/online-playlist/:source/:id', component: () => import('../views/OnlinePlaylistView.vue'), meta: { title: '在线歌单' } },
     { path: '/playlist-import', component: () => import('../views/PlaylistImportView.vue'), meta: { title: '导入歌单' } },
     {
       path: '/discover',
@@ -29,9 +32,9 @@ export const router = createRouter({
       meta: { title: '最近播放' }
     },
     {
-      // Preserve old bookmarks while the retired JJ-only leaderboard feature is unavailable.
       path: '/charts',
-      redirect: '/discover'
+      component: () => import('../views/ChartsView.vue'),
+      meta: { title: '排行榜' }
     },
     {
       path: '/library',

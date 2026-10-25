@@ -122,3 +122,16 @@ test('candidate validates actual audio, cancel/expiry, reappeared old path and c
     await assert.rejects(candidates.preview(missing.id, missing.path, chosen), /音频/)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('retained batch previews coexist and discard cannot invalidate an unrelated manual preview',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'jj-retain-'))
+ try{
+  const a={...old,id:hashPath(join(dir,'a.wav')),path:join(dir,'a.wav')},b={...old,id:hashPath(join(dir,'b.wav')),path:join(dir,'b.wav')}
+  const first=join(dir,'next-a.wav'),second=join(dir,'next-b.wav');await writeFile(first,wav());await writeFile(second,wav())
+  const deps={findOld:async id=>id===a.id?a:b,findTarget:async()=>undefined,readTrack:async path=>({...next,path,id:hashPath(path)})}
+  const batch=new RelinkCandidates(deps),manual=new RelinkCandidates(deps)
+  const m=await manual.preview(a.id,a.path,first),one=await batch.preview(a.id,a.path,first,true),two=await batch.preview(b.id,b.path,second,true)
+  assert.equal(batch.has(one.token),true);assert.equal(batch.has(two.token),true);assert.equal((await batch.confirm(one.token)).next.path,first)
+  batch.discard(one.token);assert.equal(batch.has(two.token),true);assert.equal((await manual.confirm(m.token)).next.path,first)
+ }finally{await rm(dir,{recursive:true,force:true})}
+})

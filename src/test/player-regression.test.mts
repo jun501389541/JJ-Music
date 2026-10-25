@@ -962,7 +962,7 @@ test('rapid favorite toggles run sequentially and cancel each other', async () =
  window.jj.playlists={
    list:async()=>[], items:async()=>[...favorites],
    addTracks:async(_,tracks)=>{await flush();favorites.push(...tracks)},
-   removeTracks:async(_,ids)=>{await flush();const drop=new Set(ids);favorites=favorites.filter(t=>!drop.has(t.id))}
+   removeTracks:async(_,ids,byEntryKey)=>{await flush();const drop=new Set(ids);favorites=favorites.filter(t=>!drop.has(byEntryKey?(t.path?'local:'+t.id:'online:'+t.source+':'+t.id):t.id))}
  }
  await Promise.all([library.toggleFavorite(local('a')),library.toggleFavorite(local('a'))])
  assert.deepEqual(favorites,[])
@@ -1248,4 +1248,65 @@ test('a stored history that is half-written is dropped, not displayed', () => {
   assert.deepEqual(player.queueHistory.map(entry => entry.label), ['好的一页'])
   player.restoreQueueHistory(undefined)
   assert.equal(player.queueHistory.length, 0)
+})
+
+test('restored compound identities remain distinct in queue append, insert-next and remove',async()=>{
+ setup();const player=usePlayerStore(),a=local('same'),b=online('same')
+ await player.addToQueue([a,b,a]);assert.deepEqual(player.queue,[a,b])
+ player.insertNext([b,a]);assert.equal(player.queue.length,2);assert.deepEqual(player.queue,[b,a])
+ player.removeFromQueue('online:tx:same',true);assert.deepEqual(player.queue,[a])
+})
+
+test('playTrack selects the existing complete identity when local and online IDs collide',async()=>{
+ const player=setup(),a=local('same'),b=online('same')
+ await player.playQueue([a,b],0)
+ await player.playTrack(b)
+ assert.equal(player.currentIndex,1);assert.equal(player.currentTrack.source,'tx');assert.equal(player.queue.length,2)
+})
+test('random pass and previous distinguish restored entries sharing a raw ID',async()=>{
+ const player=setup(),tracks=[local('same'),online('same'),{...online('same'),source:'wy'},local('other')]
+ const originalRandom=Math.random;Math.random=()=>0
+ try{
+  player.setPlayMode('random');await player.playQueue(tracks,0)
+  const seen=[player.currentIndex]
+  for(let i=1;i<tracks.length;i++){await player.next();if(i===1)assert.equal(player.currentIndex,2,'fixed shuffle must not silently fall back to sequential next');assert.ok(!seen.includes(player.currentIndex),'every complete identity must play before repeating');seen.push(player.currentIndex)}
+  assert.equal(new Set(seen).size,4)
+  await player.previous();assert.equal(player.currentIndex,seen[seen.length-2])
+ }finally{Math.random=originalRandom}
+})
+test('queue history keeps local and online lists with matching raw IDs separate',async()=>{
+ const player=setup(),a=local('same'),b=online('same')
+ await player.playQueue([a],0,'Local')
+ await player.playQueue([b],0,'Online')
+ assert.equal(player.queueHistory.length,1);assert.equal(player.queueHistory[0].label,'Local');assert.equal(player.queueHistory[0].queue[0].path,a.path)
+})
+
+test('media-expiry retry stays on the online identity beside a local row with the same ID',async()=>{
+ const player=setup(),a=local('same'),b=online('same');let calls=0
+ window.jj.music.url=async()=>({url:'jjstream://audio/collision'+(++calls),quality:'320k'})
+ window.jj.music.mediaFailure=async()=>({code:'urlExpired'})
+ await player.playQueue([a,b],1);FakeAudio.instances[0].fail(4);await flush();await flush()
+ assert.equal(player.currentIndex,1);assert.equal(player.currentTrack.source,'tx');assert.equal(calls,2)
+})
+test('source failure retries the same online identity instead of its local ID collision',async()=>{
+ const player=setup(),a=local('same'),b=online('same');let calls=0
+ player.setQuality('128k')
+ window.jj.music.url=async()=>{if(++calls===1)throw Error('transient source error');return{url:'https://test/retry-online',quality:'128k'}}
+ await player.playQueue([a,b],1)
+ assert.equal(player.currentIndex,1);assert.equal(player.currentTrack.source,'tx');assert.equal(calls,2)
+})
+test('enriched art and lyric provenance update only the matching platform identity',async()=>{
+ const player=setup(),a={...online('same'),source:'wy'},b=online('same')
+ const cover={origin:'remote',provider:'fixture',at:1},asset={origin:'remote',provider:'fixture',at:2}
+ window.jj.music.enrich=async track=>({...track,picUrl:'https://test/cover',cover,asset,lyric:'[00:01.00]Fixture'})
+ await player.playQueue([a,b],1);await flush()
+ assert.equal(player.queue[0].picUrl,undefined);assert.equal(player.queue[0].assets,undefined)
+ assert.equal(player.queue[1].picUrl,'https://test/cover');assert.deepEqual(player.queue[1].assets.cover,[cover]);assert.deepEqual(player.queue[1].assets.lyrics.main,[asset])
+})
+test('manual lyric source belongs to full platform identity and does not leak across equal IDs',async()=>{
+ const player=setup(),a=online('same'),b={...online('same'),source:'wy'},calls=[]
+ window.jj.music.enrich=async(track,source)=>{calls.push({platform:track.source,source});return track}
+ await player.playQueue([a,b],0);await flush();await player.useLyricSource('script')
+ await player.playTrack(b);await flush()
+ assert.deepEqual(calls[calls.length-1],{platform:'wy',source:undefined});assert.equal(player.lyricSourceChoice,null)
 })

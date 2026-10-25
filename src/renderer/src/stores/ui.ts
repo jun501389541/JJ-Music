@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef } from 'vue'
+import type { RelinkReference } from '@shared/batch-file-relink'
 import type { LocalMusicInfo, PlayableTrack } from '@shared/types'
 
 export interface MenuItem {
@@ -15,6 +16,8 @@ export interface MenuItem {
 }
 export const useUiStore = defineStore('ui', () => {
   const nowPlaying = ref(false)
+  const batchRelinkTargets = shallowRef<RelinkReference[]>([])
+  const localRelinkBatch = ref<{completed:number;total:number;stopRequested:boolean}|null>(null)
   const localRelinkBusy = ref(false)
   const playbackPanel = ref<'eq' | 'queue' | null>(null)
   const menu = shallowRef<{ x: number; y: number; items: MenuItem[] } | null>(null)
@@ -34,5 +37,5 @@ export const useUiStore = defineStore('ui', () => {
     return new Promise(resolve => { dialog.value = { title, message, confirmLabel: '确认', resolve } })
   }
   function finishDialog(value: string | null): void { dialog.value?.resolve(value); dialog.value = null }
-  return { localRelinkBusy, nowPlaying, playbackPanel, menu, trackInfo, matchTrack, dialog, openMenu, prompt, confirm, finishDialog }
+  return { localRelinkBatch, batchRelinkTargets, localRelinkBusy, nowPlaying, playbackPanel, menu, trackInfo, matchTrack, dialog, openMenu, prompt, confirm, finishDialog }
 })

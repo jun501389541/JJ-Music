@@ -106,7 +106,7 @@ export class RelinkCandidates {
     await assertMissing(path)
     return old
   }
-  async preview(id: string, path: string, chosen: string): Promise<LocalRelinkPreview> {
+  async preview(id: string, path: string, chosen: string, retain = false): Promise<LocalRelinkPreview> {
     const old = await this.source(id, path)
     if (await this.deps.findTarget(hashPath(chosen))) throw Error('所选文件已在曲库中，不能自动合并')
     const before = await fingerprint(chosen)
@@ -118,10 +118,12 @@ export class RelinkCandidates {
     const preview = { token: randomUUID(), old: structuredClone(old), next }
     validateChange(preview)
     if (before !== await fingerprint(chosen)) throw Error('所选文件已变化，请重新选择')
-    this.candidates.clear()
+    if (!retain) this.candidates.clear()
+    while (this.candidates.size >= 50) this.candidates.delete(this.candidates.keys().next().value!)
     this.candidates.set(preview.token, { preview: structuredClone(preview), fingerprint: before, expires: (this.deps.now?.() ?? Date.now()) + 5 * 60_000 })
     return preview
   }
+  has(token: string): boolean { return this.candidates.has(token) }
   discard(token: string): void { this.candidates.delete(token) }
   async confirm(token: string): Promise<LocalRelinkChange> {
     const candidate = this.candidates.get(token)

@@ -1,5 +1,5 @@
 /**
- * Headless test of the local music library against a real folder.
+ * Headless test using the runner-generated music fixture, or an explicitly supplied folder.
  *
  * Verifies the half of the product that LX Music gets wrong: recursive
  * scanning, tag reading, cover extraction, incremental rescans and
@@ -28,7 +28,7 @@ function check(name, condition, detail = '') {
   }
 }
 
-const folder = process.argv[2] ?? 'D:\\Music\\华语歌曲'
+const folder = process.argv[2] ?? process.env.JJ_TEST_MUSIC_DIR ?? ''
 
 console.log('='.repeat(72))
 console.log('Local music library test')

@@ -292,7 +292,7 @@ check('坏数据一条条挡掉', kept.length === 1 && kept[0].trackId === 'ok',
 
 console.log('\n--- 7. 真实文件的标签往返 ---')
 
-const libraryFolder = process.argv[2] ?? 'D:\\Music\\华语歌曲'
+const libraryFolder = process.argv[2] ?? process.env.JJ_TEST_MUSIC_DIR ?? ''
 
 if (!existsSync(libraryFolder)) {
   skip('MP3 / FLAC 标签往返', `找不到曲库样本目录 ${libraryFolder}`)

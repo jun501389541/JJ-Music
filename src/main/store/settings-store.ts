@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   volume: 0.8,
   playMode: 'list',
   shortAudioTransitions: true,
+  crossfadeDurationMs: 0,
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
@@ -52,6 +53,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   playlistOrder: []
 }
 
+function sanitizeCrossfadeDuration(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= 0 && value <= 12_000 && value % 1_000 === 0
+    ? value
+    : 0
+}
+
 export class SettingsStore {
   async reload(): Promise<AppSettings> { this.loaded = false; return this.load() }
   private readonly filePath: string
@@ -71,7 +79,11 @@ export class SettingsStore {
       const current = { ...parsed } as Partial<AppSettings> & Record<string, unknown>
       delete current.onlineCatalogConsent
       delete current.onlineCatalogConsentPrompted
-      this.settings = { ...DEFAULT_SETTINGS, ...current }
+      this.settings = {
+        ...DEFAULT_SETTINGS,
+        ...current,
+        crossfadeDurationMs: sanitizeCrossfadeDuration(current.crossfadeDurationMs)
+      }
     }
     return this.settings
   }
@@ -85,6 +97,9 @@ export class SettingsStore {
     const current = { ...patch } as Partial<AppSettings> & Record<string, unknown>
     delete current.onlineCatalogConsent
     delete current.onlineCatalogConsentPrompted
+    if ('crossfadeDurationMs' in current) {
+      current.crossfadeDurationMs = sanitizeCrossfadeDuration(current.crossfadeDurationMs)
+    }
     this.settings = { ...this.settings, ...current }
     await this.persist()
     return this.get()

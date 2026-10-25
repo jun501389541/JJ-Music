@@ -45,7 +45,8 @@ test('reset cancels delayed effects while finish applies the current intent imme
 
 class Audio extends EventTarget {
   static last
-  constructor() { super(); Audio.last = this }
+  static instances = []
+  constructor() { super(); Audio.instances.push(this); Audio.last = Audio.instances[0] }
   paused = true; ended = false; src = ''; currentTime = 0; duration = 180; error = null
   getAttribute() { return this.src || null }
   removeAttribute() { this.src = '' }
@@ -65,6 +66,8 @@ class Context {
 }
 function engine() {
   globalThis.Audio = Audio
+  Audio.instances = []
+  Audio.last = undefined
   globalThis.window = { AudioContext: Context, setInterval: () => 1, clearInterval: () => {} }
   return new WebAudioEngine()
 }
@@ -75,8 +78,9 @@ test('user volume and mute remain independent of the fade gain', async context =
     await audio.load({ url: 'test://a' })
     audio.setVolume(0.4)
     await audio.play(300)
-    assert.equal(Context.last.gains.length, 2)
-    const [volume, fade] = Context.last.gains
+    assert.equal(Context.last.gains.length, 4)
+    const volume = Context.last.gains[2]
+    const fade = Context.last.gains[3]
     audio.setVolume(0.7)
     audio.setMuted(true)
     assert.equal(volume.gain.value, 0)
@@ -117,6 +121,6 @@ test('disabling fades finishes the requested pause immediately', async context =
     await pausing
     assert.equal(Audio.last.paused, true)
     await audio.play(300)
-    assert.equal(Context.last.gains[1].gain.value, 1)
+    assert.equal(Context.last.gains[3].gain.value, 1)
   } finally { audio.destroy() }
 })

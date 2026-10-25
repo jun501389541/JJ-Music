@@ -37,6 +37,7 @@
 **Files:**
 - Modify: `src/shared/audio-engine.ts`
 - Create: `src/shared/crossfade.ts`
+- Modify: `tools/build-test.mjs` (bundle shared modules used by the production test suites)
 - Test: `src/test/audio-crossfade-contract.test.mts`
 - Test: `src/test/player-regression.test.mts` (update typed engine fixtures only if required)
 
@@ -48,19 +49,19 @@
 - Add `CROSSFADE_DURATION_MIN_MS = 0`, `CROSSFADE_DURATION_MAX_MS = 12_000`, `CROSSFADE_DURATION_STEP_MS = 1_000`, `DEFAULT_CROSSFADE_DURATION_MS = 0`, `normalizeCrossfadeDurationMs(value: unknown): number`, and `crossfadeGains(progress: number): { outgoing: number; incoming: number }` to `src/shared/crossfade.ts`.
 - Contract: `started` resolves when the incoming deck emits its first valid `playing` event and the fade has begun; `completed` resolves after the outgoing deck is released. Failure before completion rejects `completed`; `cancel()` restores the outgoing deck, while `finish()` promotes the incoming deck and releases the outgoing one immediately.
 
-- [ ] **Step 1: Add failing tests for the optional engine contract, duration normalization, and gain curve**
+- [x] **Step 1: Add failing tests for the optional engine contract, duration normalization, and gain curve**
 
-Tests: `engines without crossfade methods remain on the legacy path`, `crossfade capability without all methods is unsupported`, `duration normalization clamps and quantizes to whole seconds`, `equal-power gains start on outgoing only`, `equal-power gains end on incoming only`, and `equal-power midpoint keeps both gains finite and balanced`.
+Tests: `engines without crossfade methods remain on the legacy path`, `crossfade capability without all methods is unsupported`, `duration normalization clamps and quantizes to whole seconds`, `equal-power gains start on outgoing only`, `equal-power gains end on incoming only`, `equal-power midpoint keeps both gains finite and balanced`, and `gain progress clamps and non-finite values stay finite`.
 
-- [ ] **Step 2: Run the offline suite and confirm the new contract suite fails**
+- [x] **Step 2: Run the offline suite and confirm the new contract suite fails**
 
 Run: `npm test`
 
 Expected: the new `audio-crossfade-contract.test.mjs` suite fails because the optional contract and shared helpers do not exist; unrelated suites remain green.
 
-- [ ] **Step 3: Add the optional engine types, capability guard, shared constants, normalizer, and pure gain curve**
+- [x] **Step 3: Add the optional engine types, capability guard, shared constants, normalizer, and pure gain curve**
 
-- [ ] **Step 4: Run the offline suite and web typecheck**
+- [x] **Step 4: Run the offline suite and web typecheck**
 
 Run: `npm test`
 
@@ -74,6 +75,7 @@ Expected: exit 0.
 
 **Files:**
 - Create: `src/renderer/src/audio/crossfade-controller.ts`
+- Modify: `tools/build-test.mjs` (bundle the controller for production-source tests)
 - Test: `src/test/crossfade-controller.test.mts`
 
 **Interfaces:**
@@ -81,21 +83,21 @@ Expected: exit 0.
 - Export `CrossfadeController` to schedule, pause/resume, finish, and cancel the two gain envelopes using an injected audio clock and scheduler.
 - Use the shared equal-power curve: outgoing `cos(progress * π / 2)`, incoming `sin(progress * π / 2)`, with progress clamped to `[0, 1]`.
 
-- [ ] **Step 1: Add failing tests for envelope scheduling and lifecycle**
+- [x] **Step 1: Add failing tests for envelope scheduling and lifecycle**
 
 Tests: `controller schedules both decks from the injected audio clock`, `pause and resume preserve remaining envelope time`, `finish promotes incoming and releases once`, `cancel restores outgoing gain`, and `cancelled callbacks cannot finish a newer transition`.
 
-- [ ] **Step 2: Run the offline suite and confirm the new controller tests fail**
+- [x] **Step 2: Run the offline suite and confirm the new controller tests fail**
 
 Run: `npm test`
 
 Expected: the new `crossfade-controller.test.mjs` suite fails because the controller does not exist.
 
-- [ ] **Step 3: Implement the cancellable envelope controller**
+- [x] **Step 3: Implement the cancellable envelope controller**
 
 Keep master volume and mute outside the controller. Pausing must hold both gain values; resuming continues only the remaining duration. `finish()` promotes incoming; `cancel()` restores outgoing.
 
-- [ ] **Step 4: Run the offline suite**
+- [x] **Step 4: Run the offline suite**
 
 Run: `npm test`
 
@@ -109,30 +111,30 @@ Expected: all offline suites pass.
 - Test: `src/test/audio-engine-crossfade.test.mts`
 
 **Interfaces:**
-- `prepareTrack(options)` loads one inactive deck and resolves to an engine-owned token only after metadata and `canplay`; it must not change active progress, emit active `playing`, or replace the current deck.
+- `prepareTrack(options, signal?)` loads one inactive deck and resolves to an engine-owned token only after metadata and `canplay`; it must not change active progress, emit active `playing`, or replace the current deck. An optional `AbortSignal` cancels a preparation before a token exists.
 - `crossfadeTo(token, durationMs)` returns the `CrossfadeOperation` from Task 1 and uses the controller from Task 2.
 - `discardPreparedTrack(token)` aborts and releases only that prepared deck.
 - `capabilities.crossfade` is `true` for `WebAudioEngine`.
 
-- [ ] **Step 1: Add fake media-element and fake Web Audio graph tests**
+- [x] **Step 1: Add fake media-element and fake Web Audio graph tests**
 
-Tests: `prepared deck shares the active AudioContext`, `preparation failure leaves the active deck audible`, and `only the promoted deck emits active progress and ended events`.
+Tests: `prepared deck shares the active AudioContext`, `preparation failure leaves the active deck audible`, `abort cancels an inactive preparation without stopping the active deck`, and `only the promoted deck emits active progress and ended events`.
 
-- [ ] **Step 2: Run the offline suite and confirm the new deck tests fail**
+- [x] **Step 2: Run the offline suite and confirm the new deck tests fail**
 
 Run: `npm test`
 
 Expected: the new deck tests fail because there is only one media element.
 
-- [ ] **Step 3: Implement two deck records in `WebAudioEngine`**
+- [x] **Step 3: Implement two deck records in `WebAudioEngine`**
 
 Create each `MediaElementAudioSourceNode` once. Route both decks through per-deck crossfade gain, the shared equalizer, shared user-volume/mute gain, analyser, and destination. Keep active-deck identity separate from prepared-deck identity.
 
-- [ ] **Step 4: Cover all shared controls and teardown paths**
+- [x] **Step 4: Cover all shared controls and teardown paths**
 
-Tests: `volume mute equalizer and rate apply to both decks`, `load and stop discard any prepared deck`, `destroy releases both media elements`, and `outgoing ended during crossfade cannot advance twice`.
+Tests: `volume mute equalizer and rate apply to both decks`, `changing rate during a crossfade retimes it before either media deck can end`, `load and stop discard any prepared deck`, `destroy releases both media elements`, `outgoing ended before a pending incoming deck starts cancels it and advances once`, and `outgoing ended during crossfade completes the handoff without advancing twice`.
 
-- [ ] **Step 5: Run tests and web typecheck**
+- [x] **Step 5: Run tests and web typecheck**
 
 Run: `npm test`
 
@@ -159,21 +161,21 @@ Expected: exit 0.
 - Add a playback setting control with an explicit `关闭` option and 1-second increments. Keep `shortAudioTransitions` unchanged.
 - Add `player.setCrossfadeDuration(durationMs: number)` and synchronize it from the settings watcher and startup initialization in `App.vue`.
 
-- [ ] **Step 1: Test old settings migration, invalid values, persistence, and independence from short fades**
+- [x] **Step 1: Test old settings migration, invalid values, persistence, and independence from short fades**
 
 Tests: `legacy settings load with crossfade disabled`, `invalid crossfade durations normalize to zero`, `crossfade duration persists in whole seconds`, and `short transition preference stays independent`.
 
-- [ ] **Step 2: Run the offline suite and confirm new settings assertions fail**
+- [x] **Step 2: Run the offline suite and confirm new settings assertions fail**
 
 Run: `npm test`
 
 Expected: the new `crossfade-settings.test.mjs` suite fails before the setting exists.
 
-- [ ] **Step 3: Add the setting to the shared type, both defaults, store normalization, settings page, and App initialization/watchers**
+- [x] **Step 3: Add the setting to the shared type, both defaults, store normalization, settings page, and App initialization/watchers**
 
 In `settings-store.ts`, preserve all existing playlist changes; make a focused edit to `DEFAULT_SETTINGS`, load normalization, and update normalization only.
 
-- [ ] **Step 4: Run settings tests and typechecks**
+- [x] **Step 4: Run settings tests and typechecks**
 
 Run: `npm test`
 
@@ -195,29 +197,29 @@ Expected: both node and web typechecks pass.
 - Use the existing `resolveWithTimeout`, `playbackUrlLease`, `pickNextIndex`, and `playlistEntryKey`; do not add a second resolver or a separate random-selection algorithm.
 - Commit `currentIndex`, progress ownership, lyrics, media controls, and play history when `operation.started` resolves. Keep incoming play history if it became audible; on `completed` rejection restore the outgoing snapshot only if its identity is still present and valid.
 
-- [ ] **Step 1: Add failing tests for eligibility, bounded reservation, URL expiry, and random selection**
+- [x] **Step 1: Add failing tests for eligibility, bounded reservation, URL expiry, and random selection**
 
 Tests: `ineligible modes and durations use the existing ended path`, `reservation prepares at most one next track`, `expired or late prepared URL leaves the outgoing track unchanged`, and `queue edits invalidate stale reservations without drawing random twice`.
 
-- [ ] **Step 2: Run the offline suite and confirm the new player tests fail**
+- [x] **Step 2: Run the offline suite and confirm the new player tests fail**
 
 Run: `npm test`
 
 Expected: the named crossfade player tests fail while existing queue and URL-resolution tests remain green.
 
-- [ ] **Step 3: Add bounded next-track reservation and preparation**
+- [x] **Step 3: Add bounded next-track reservation and preparation**
 
 Start resolution within the existing `RESOLUTION_BUDGET_MS` lead plus the configured overlap. Recheck source epoch, queue identity, playback generation, and URL lease before passing the prepared track to the engine. Do not change outgoing gain until preparation is ready.
 
-- [ ] **Step 4: Add handoff, rollback, and user-operation cancellation**
+- [x] **Step 4: Add handoff, rollback, and user-operation cancellation**
 
 Tests: `handoff commits on incoming playing only`, `mid-crossfade failure restores outgoing playback state`, `incoming audible history is not rolled back`, `seek before handoff cancels preparation`, `seek after handoff finishes transition`, `pause resume stop and manual selection cancel or preserve the correct operation`, and `late deck events cannot overwrite a newer selection`.
 
-- [ ] **Step 5: Verify queue modes and settings interactions**
+- [x] **Step 5: Verify queue modes and settings interactions**
 
 Tests: list tail stops, repeat/random reuse the reservation, single-repeat and audition do not crossfade, duplicate identity is skipped, 0 ms disables automatic crossfade and finishes an active transition, disabling during preparation discards its reservation, and `shortAudioTransitions` still controls only short fades.
 
-- [ ] **Step 6: Run the offline suite and typechecks**
+- [x] **Step 6: Run the offline suite and typechecks**
 
 Run: `npm test`
 
@@ -232,29 +234,31 @@ Expected: both node and web typechecks pass.
 **Files:**
 - Create: `tools/probe/crossfade-lifecycle.mjs`
 - Create: `tools/probe/crossfade-lifecycle-main.cjs`
+- Create: `tools/probe/crossfade-lifecycle-bundle.ts`
+- Modify: `tools/build-test.mjs` (browser IIFE bundle of production player + audio engine)
 - Create: `docs/development/2026-10-26-crossfade.md`
 - Modify: `docs/superpowers/specs/2026-10-26-crossfade-design.md` (mark implementation status and link evidence after acceptance)
 
 **Interfaces:**
 - The probe uses the production test bundle, generated local audio fixtures, an isolated Electron profile, and zero external requests. It must assert actual simultaneous deck playback and release, not just controller math.
 
-- [ ] **Step 1: Add the isolated native Electron probe**
+- [x] **Step 1: Add the isolated native Electron probe**
 
-Cases: overlap start and completion, disabled setting, next-deck decode failure with outgoing restore, manual skip during overlap, seek after handoff, and teardown with no active media requests.
+Cases: overlap start and completion, disabled setting, next-deck decode failure with outgoing restore, manual skip during overlap, seek after handoff, playback-rate wall-time and mid-fade retiming, and teardown with no active media requests.
 
-- [ ] **Step 2: Run the native probe and inspect its evidence**
+- [x] **Step 2: Run the native probe and inspect its evidence**
 
 Run: `node tools/probe/crossfade-lifecycle.mjs`
 
 Expected: all cases pass under Electron with `blockedExternalRequests=0` and no leftover generated profile.
 
-- [ ] **Step 3: Run complete offline validation**
+- [x] **Step 3: Run complete offline validation**
 
 Run: `npm run verify`
 
 Expected: node/web typechecks, production build, all offline test suites, and built-in gates pass.
 
-- [ ] **Step 4: Record evidence and scope boundaries**
+- [x] **Step 4: Record evidence and scope boundaries**
 
 Record commands, case counts, Electron version, and probe run id in `docs/development/2026-10-26-crossfade.md`. State that live sources, installation, and human listening remain separate acceptance. Do not commit or publish.
 
@@ -266,4 +270,4 @@ Record commands, case counts, Electron version, and probe run id in `docs/develo
 - Review Focus: all five risks above have a named regression test in the task that owns the behavior.
 - Type consistency: Tasks 1 and 3 use the same `PreparedAudioTrack` and `CrossfadeOperation` contract; Task 5 owns the queue reservation and consumes the Task 3 engine token.
 - Validation: `npm test` uses `tools/run-tests.mjs`, which bundles production engine modules with `tools/build-test.mjs`; final `npm run verify` adds production build and built-in gates.
-- Dirty worktree: the current branch is `main` with unrelated uncommitted work. Before implementation, use an isolated workspace that retains the intended baseline; do not reset, stage, or overwrite the existing playlist and OR8 work.
+- Dirty worktree: implementation and verification ran on isolated worktree `codex/crossfade-reliability` at `C:\Users\50138\.codex\visualizations\2026\10\15\01a13e60-2e94-7fe2-bcb9-3c5ac39a2fc8\jj-music-crossfade`. The original checkout and its pre-existing playlist and OR8 work were preserved; this branch was not committed or pushed.

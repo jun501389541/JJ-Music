@@ -111,7 +111,8 @@ test('抓封面把该平台的 CDN 根域交给校验器（每一跳都按它判
     ['kw', 'https://img1.kuwo.cn/star/albumcover/x.jpg', ['kuwo.cn']],
     ['kg', 'https://imge.kugou.com/x.jpg', ['kugou.com']],
     ['mg', 'https://d.musicapp.migu.cn/x.jpg', ['migu.cn']],
-    ['tx', 'https://y.gtimg.cn/music/photo_new/x.jpg', ['gtimg.cn']]
+    ['tx', 'https://y.gtimg.cn/music/photo_new/x.jpg', ['gtimg.cn', 'qpic.y.qq.com']],
+    ['tx', 'https://qpic.y.qq.com/music_cover/x/300', ['gtimg.cn', 'qpic.y.qq.com']]
   ]
   for (const [source, picUrl, hosts] of cases) {
     const get = stub('image/jpeg')

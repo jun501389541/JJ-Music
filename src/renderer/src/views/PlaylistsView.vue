@@ -8,6 +8,9 @@ import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import { toMediaUrl } from '@shared/media-url'
+import PlaylistDerivePanel from '../components/PlaylistDerivePanel.vue'
+import PlaylistBulkRenamePanel from '../components/PlaylistBulkRenamePanel.vue'
+import type {PlaylistDeriveResult} from '@shared/playlist-derive'
 import PlaylistRestorePanel from '../components/PlaylistRestorePanel.vue'
 import { usePlaylistExport } from '../composables/use-playlist-export'
 
@@ -21,14 +24,29 @@ const {state:remembered,save}=useViewState('saved-playlists',{query:''})
 const query=ref(typeof remembered.query==='string'?remembered.query:'')
 const visible=computed(()=>filterPlaylists(library.orderedPlaylists,query.value))
 watch(query,value=>save({query:value}))
-const bulkMode=ref(false),bulkBusy=ref(false),selected=ref(new Set<string>()),bulkMessage=ref('')
+const bulkMode=ref(false),bulkBusy=ref(false),bulkTool=ref<'derive'|'rename'>('derive'),selected=ref(new Set<string>()),bulkMessage=ref('')
 let alive=true
 onUnmounted(()=>{alive=false})
+const deriveIds=computed(()=>library.orderedPlaylists.filter(p=>selected.value.has(p.id)).map(p=>p.id))
+function createdDerived(result:PlaylistDeriveResult,warning:string):void{
+ if(!alive)return
+ selected.value=new Set();bulkMode.value=false;bulkBusy.value=false;query.value=''
+ bulkMessage.value=warning
+ if(warning)toast.error(warning)
+ else{toast.success('已创建 '+result.playlists+' 个新歌单、'+result.tracks+' 首曲目');if(result.mode==='merge')void router.push('/playlist/'+result.ids[0])}
+}
+function renamedBulk(count:number,warning:string):void{
+ if(!alive)return
+ selected.value=new Set();bulkMode.value=false;bulkBusy.value=false;query.value=''
+ bulkMessage.value=warning
+ if(warning)toast.error(warning);else toast.success('已改名 '+count+' 个歌单')
+}
 const ordinary=(id:string):boolean=>id!=='default'&&id!=='favorites'
 const selectable=computed(()=>visible.value.filter(p=>ordinary(p.id)))
 watch(query,()=>{selected.value=new Set()})
 watch(()=>library.playlists,()=>{const existing=new Set(library.playlists.map(p=>p.id));selected.value=new Set([...selected.value].filter(id=>existing.has(id)))})
-function toggleBulk():void{if(bulkBusy.value)return;bulkMode.value=!bulkMode.value;selected.value=new Set();bulkMessage.value=''}
+function toggleBulk():void{if(bulkBusy.value)return;bulkMode.value=!bulkMode.value;if(bulkMode.value)bulkTool.value='derive';selected.value=new Set();bulkMessage.value=''}
+function switchBulkTool(next:'derive'|'rename'):void{if(bulkBusy.value||!bulkMode.value||bulkTool.value===next)return;bulkTool.value=next;bulkMessage.value=''}
 function toggleList(id:string):void{
  if(!ordinary(id)||bulkBusy.value)return
  const next=new Set(selected.value)
@@ -116,7 +134,9 @@ async function remove(id: string, name: string): Promise<void> {
     </header>
 
     <p v-if="bulkMessage" role="alert" class="bulk-message">{{bulkMessage}}</p>
-    <div v-if="bulkMode" class="bulk-actions"><span>已选择 {{selected.size}} 个普通歌单（内置歌单不参与）</span><button class="btn" :disabled="bulkBusy||!selectable.length" @click="selectVisible">全选当前结果</button><button class="btn" :disabled="bulkBusy||!selected.size" @click="selected=new Set()">取消选择</button><button class="btn" :disabled="bulkBusy||!selected.size" @click="removeSelected">删除选中歌单</button></div>
+    <div v-if="bulkMode" class="bulk-actions"><span>已选择 {{selected.size}} 个普通歌单（内置歌单不参与）</span><button class="btn" :aria-pressed="bulkTool==='derive'" :disabled="bulkBusy||bulkTool==='derive'" @click="switchBulkTool('derive')">复制与合并</button><button class="btn" :aria-pressed="bulkTool==='rename'" :disabled="bulkBusy||bulkTool==='rename'" @click="switchBulkTool('rename')">批量改名</button><button class="btn" :disabled="bulkBusy||!selectable.length" @click="selectVisible">全选当前结果</button><button class="btn" :disabled="bulkBusy||!selected.size" @click="selected=new Set()">取消选择</button><button class="btn" :disabled="bulkBusy||!selected.size" @click="removeSelected">删除选中歌单</button></div>
+    <PlaylistDerivePanel v-if="bulkMode&&bulkTool==='derive'" :ids="deriveIds" :disabled="bulkBusy" @busy="bulkBusy=$event" @created="createdDerived" />
+    <PlaylistBulkRenamePanel v-if="bulkMode&&bulkTool==='rename'" :ids="deriveIds" :disabled="bulkBusy" @busy="bulkBusy=$event" @renamed="renamedBulk" />
     <PlaylistRestorePanel @restored="query=''" />
     <div v-if="creating" class="create">
       <input
@@ -131,7 +151,7 @@ async function remove(id: string, name: string): Promise<void> {
       <button class="btn btn--ghost" type="button" @click="creating = false">取消</button>
     </div>
 
-    <div class="playlist-filter"><input v-model="query" :disabled="bulkBusy" class="input" type="search" maxlength="200" aria-label="筛选已保存歌单" placeholder="按歌单名称筛选"><button v-if="query" class="btn" @click="query=''">清空筛选</button><span role="status">{{ visible.length }} / {{ library.playlists.length }} 个歌单</span></div><p v-if="library.playlists.length&&!visible.length" class="empty">没有匹配的歌单，试试其他名称或清空筛选。</p><div class="grid-cards">
+    <div class="playlist-filter"><input v-model="query" :disabled="bulkBusy" class="input" type="search" maxlength="200" aria-label="筛选已保存歌单" placeholder="按歌单名称筛选"><button v-if="query" class="btn" :disabled="bulkBusy" @click="query=''">清空筛选</button><span role="status">{{ visible.length }} / {{ library.playlists.length }} 个歌单</span></div><p v-if="library.playlists.length&&!visible.length" class="empty">没有匹配的歌单，试试其他名称或清空筛选。</p><div class="grid-cards">
       <div
         v-for="list in visible"
         :key="list.id"

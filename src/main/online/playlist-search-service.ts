@@ -20,7 +20,7 @@ export class PlaylistSearchService {
  clear():void{this.cache.clear()}
  async search(source:PlaylistSource,keyword:string,page=1,signal?:AbortSignal,force=false):Promise<ResourceEnvelope<PlaylistSearchPage>>{
   assertPlaylistSearch(source,keyword,page);keyword=keyword.trim()
-  const context=onlineContext(source,'playlistSearch',`playlist-search-${source}-v1`),started=performance.now();let attempt=0
+  const context=onlineContext(source,'playlistSearch',`playlist-search-${source}-${source==='tx'?'v2':'v1'}`),started=performance.now();let attempt=0
   const load=(shared:AbortSignal):Promise<PlaylistSearchPage>=>this.health.run(context,(observe,beforeAttempt)=>runOnlineRequest(async s=>{
    const value=await this.adapter.search(source,keyword,page,s);if(!valid(value,source,keyword,page))throw new OnlineRequestError({...context,code:'schemaChanged'});return value
   },context,{signal:shared,beforeAttempt,onAttempt:(n,error)=>{attempt=n;if(error)observe(error)}}),{signal:shared,manual:force})

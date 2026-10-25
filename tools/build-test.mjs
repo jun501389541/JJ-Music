@@ -105,6 +105,8 @@ await build({
     join(repoRoot, 'src', 'main', 'library', 'batch-file-relink.ts'),
     join(repoRoot, 'src', 'main', 'library', 'playlist-backup.ts'),
     join(repoRoot, 'src', 'main', 'library', 'playlist-restore.ts'),
+    join(repoRoot, 'src', 'main', 'library', 'playlist-derive.ts'),
+    join(repoRoot, 'src', 'main', 'library', 'playlist-bulk-rename.ts'),
     join(repoRoot, 'src', 'main', 'library', 'missing-files.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
@@ -140,6 +142,7 @@ await build({
   ...shared,
   entryPoints: [
         join(repoRoot, 'src', 'shared', 'types.ts'),
+        join(repoRoot, 'src', 'shared', 'playlist-bulk-rename.ts'),
         join(repoRoot, 'src', 'shared', 'playback-reliability.ts'),
         join(repoRoot, 'src', 'shared', 'persisted-track.ts'),
         join(repoRoot, 'src', 'shared', 'media-url.ts'),

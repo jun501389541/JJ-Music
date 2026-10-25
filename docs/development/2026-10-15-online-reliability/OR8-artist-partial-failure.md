@@ -16,6 +16,7 @@
 - 空结果测试替身改为各平台对应的合法结构，避免将错误结构当成成功空结果。
 - 完整 npm run verify 退出0：类型检查、生产构建、90/90离线套件和5/5门禁通过。日志：.cache/artist-partial-verify.log。
 - 独立只读复核未发现P1/P2。补充“前平台为空、后平台失败”的反向顺序后，目标套件再次24/24通过；生产代码未再改变。日志：.cache/artist-partial-green-final.log。
+- 2026-10-26 后续核对：当前解析器对非 2xx HTTP 和无效 JSON 保持失败语义，继续查询后续获准平台；若没有任何平台找到头像且其中存在失败，最终抛错，不写永久未命中。200 错误信封、缺失结果数组及平台详情结构错误也有回归覆盖。`AuxiliaryRequests.run` 原样重抛异常，`ArtistImageStore` 仅对确证的全平台合法空结果保存 `null`。对应 `artist-image.test.mts` 的 HTTP/JSON、错误信封和部分失败恢复用例已包含在最近完整 `npm run verify` 中，117/117 套件及5/5门禁通过；因此本次没有额外生产代码改动。
 - git diff --check 通过。GraphFlow 增量索引两次均返回 Transport closed，索引刷新未完成；连接恢复后需补做。本轮未提交或推送。
 - 后续状态（2026-10-17）：GraphFlow 连接已恢复，增量索引已补跑；上条保留当时失败观察。
 - 首轮沙箱测试另有临时目录原子 rename 的 EPERM；有效 RED/GREEN 在获批正常权限下运行，未将沙箱持久化失败当作产品缺陷证据。

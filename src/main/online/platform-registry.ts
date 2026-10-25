@@ -24,7 +24,7 @@ export interface OnlinePlatformRegistryOptions {
 }
 
 export const ONLINE_PLATFORM_CAPABILITIES: Readonly<Record<string, readonly OnlineCapability[]>> = {
-  tx: ['search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'chartList', 'chartTracks'],
+  tx: ['playlistSearch', 'search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'chartList', 'chartTracks'],
   wy: ['playlistSearch', 'search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'artistImage', 'artistDetail', 'albumDetail', 'chartList', 'chartTracks'],
   kw: ['playlistSearch', 'search', 'hotWords', 'lyrics', 'cover', 'playlistImport', 'chartList', 'chartTracks'],
   kg: ['playlistSearch', 'search', 'hotWords', 'cover', 'playlistImport', 'artistImage', 'chartList', 'chartTracks'],

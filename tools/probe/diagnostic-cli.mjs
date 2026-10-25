@@ -102,7 +102,7 @@ async function sourceSession(options, adapters = {}) {
     }
     const checks = [{platform:options.platforms[0],capability:'initialize',level,providerVersion,run:async signal=>{
       if (signal.aborted) throw Error('cancelled')
-      initialization = engine.startAll()
+      initialization = engine.startAll(signal)
       await initialization
       if (!engine.isInitialized(imported.id)) throw new OnlineRequestError({...onlineContext(options.platforms[0],'initialize'),code:'providerUnavailable'})
     }}]

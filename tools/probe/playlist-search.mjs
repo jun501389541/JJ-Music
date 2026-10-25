@@ -64,6 +64,8 @@ const wy=i=>({id:i,name:'Generated song '+i,ar:[{id:1,name:'Generated artist'}],
 globalThis.fetch=async(raw,init)=>{init?.signal?.throwIfAborted();const u=new URL(raw),mode=JSON.parse(fs.readFileSync(${JSON.stringify(control)},'utf8')).mode;let value;if(mode==='slow')await new Promise(r=>setTimeout(r,1200));fs.appendFileSync(${JSON.stringify(join(owned,'http.log'))},u.pathname+'\\n');
 if(u.hostname==='music.163.com'&&u.pathname==='/api/search/get/web'&&u.searchParams.get('type')==='1')value={code:200,result:{songCount:3,songs:[wy(1),wy(2),wy(3)]}};
 else if(u.hostname==='music.163.com'&&u.pathname==='/api/search/get/web'){if(mode==='failure'&&Number(u.searchParams.get('offset'))===40||mode==='refresh-failure'&&Number(u.searchParams.get('offset'))===0)return new Response('{}',{status:503});value={code:200,result:{playlistCount:300,playlists:Array.from({length:20},(_,i)=>({id:Number(u.searchParams.get('offset'))+i+1,name:'Generated WY list '+(Number(u.searchParams.get('offset'))+i+1),trackCount:3,creator:{nickname:'Generated curator'}}))}};}
+else if(u.hostname==='c.y.qq.com'&&u.pathname==='/soso/fcgi-bin/client_music_search_songlist'){const page=Number(u.searchParams.get('page_no'));value={code:0,subcode:0,data:{sum:60,page_no:page,num_per_page:20,list:Array.from({length:page===0?15:17},(_,i)=>({dissid:String(page*20+i+1),dissname:'Generated&#32;QQ list '+(page*20+i+1),creator:{name:'Generated QQ curator'},song_count:3}))}};}
+else if(u.hostname==='c.y.qq.com'&&u.pathname==='/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg')value={code:0,cdlist:[{dissname:'Generated QQ preview',total_song_num:3,songlist:[1,2,3].map(i=>({mid:'qq'+i,title:'QQ song '+i,singer:[{name:'QQ artist'}],album:{mid:'album',name:'QQ album'},interval:180,file:{media_mid:'media'+i}}))}]};
 else if(u.hostname==='msearch.kugou.com'){value={status:1,data:{total:20,info:Array.from({length:20},(_,i)=>({specialid:i+1,specialname:'Generated KG list '+(i+1),songcount:3}))}};}
 else if(u.hostname==='search.kuwo.cn'){value={TOTAL:'20',abslist:Array.from({length:20},(_,i)=>({playlistid:String(i+1),name:'Generated KW list '+(i+1),songnum:'3'}))};}
 else if(u.hostname==='app.u.nf.migu.cn'){value={code:'000000',songListResultData:{totalCount:'20',result:Array.from({length:20},(_,i)=>({id:String(i+1),name:'Generated MG list '+(i+1),musicNum:'3'}))}};}
@@ -92,8 +94,23 @@ import(${JSON.stringify(pathToFileURL(join(appDir,'main/index.js')).href)}).catc
   await click(name);await setQuery('Generated');await wait(()=>count(20),name)
   check(name+' summaries keep platform identity',await evaluate(`return document.querySelector('.playlist-card strong').textContent==='Generated ${prefix} list 1'`))
  }
- await click('QQ 音乐');await wait(()=>evaluate('return document.body.innerText.includes("QQ 歌单搜索暂未接通")'),'QQ pending')
- check('QQ pending differs from zero matches',await evaluate('return !document.body.innerText.includes("未找到公开歌单")'))
+ await click('QQ 音乐');await setQuery('Generated');await wait(()=>count(15),'QQ first sparse page')
+ check('QQ native summaries use decoded titles',await evaluate('return document.querySelector(".playlist-card strong").textContent==="Generated QQ list 1"'))
+ check('QQ search is available without playback sources',await evaluate('return !document.body.innerText.includes("暂未接通")'))
+ await click('加载更多歌单');await wait(()=>count(32),'QQ second sparse page')
+ check('QQ sparse pagination appends native next page',await evaluate('return [...document.querySelectorAll(".playlist-card strong")].some(x=>x.textContent==="Generated QQ list 21")'))
+ await evaluate('document.querySelector(".playlist-card").click()');await wait(()=>evaluate('return document.querySelectorAll(".online-playlist .track-row").length===3'),'QQ readonly detail')
+ check('QQ browsing does not save or auto play',(await lists()).length===initial&&await evaluate('return navigator.mediaSession.playbackState!=="playing"'))
+ await click('导入为本地歌单');await wait(()=>evaluate('return !!document.querySelector("[role=dialog]")'),'QQ confirm')
+ await evaluate('document.querySelector("[role=dialog]").dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}))')
+ await wait(async()=>(await lists()).length===initial+1,'QQ saved')
+ await wait(()=>evaluate('return location.hash.startsWith("#/playlist/")'),'QQ saved route')
+ const qqSaved=(await lists()).find(p=>p.name==='Generated QQ preview')
+ check('QQ confirmed import keeps source list identity',qqSaved?.source==='tx'&&qqSaved.sourceListId==='1')
+ check('QQ imported tracks retain native playback IDs',(await evaluate(`return await window.jj.playlists.items(${JSON.stringify(qqSaved.id)})`)).map(t=>t.id).join(',')==='tx_qq1,tx_qq2,tx_qq3')
+ await evaluate(`await window.jj.playlists.remove(${JSON.stringify(qqSaved.id)});location.hash="#/search?kind=playlists"`)
+ await wait(()=>evaluate('return !!document.querySelector(".playlist-search")'),'QQ back')
+ check('QQ synthetic import cleanup restores baseline list count',(await lists()).length===initial)
  await click('网易云音乐');await wait(()=>count(60),'restored')
  await click('酷狗音乐');await wait(()=>count(20),'KG before clearing')
  await click('清空搜索');await wait(()=>count(0),'KG cleared')

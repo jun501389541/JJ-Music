@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, sep } from 'node:path'
 import { executeDiagnostic } from '../../tools/probe/diagnostic-cli.mjs'
+import { SourceEngine } from './sources/source-engine.js'
 
 const generated=`/*!\n * @name Diagnostic single platform\n * @version 1\n */
 const {on,send,EVENT_NAMES}=globalThis.lx;
@@ -44,4 +45,23 @@ test('explicit media uses the current resolved URL once, preserves unsupported s
   assert.equal(report.levels.media.find(x=>x.platform==='tx').code,'unsupported')
   assert.equal(report.levels.listening[0].status,'notRun')
   assert.ok(!JSON.stringify(report).includes('PRIVATE'))
+})
+
+test('live source initialization passes its cancellation signal into SourceEngine',async()=>{
+  const original=SourceEngine.prototype.startAll
+  const control=new AbortController(),cancel=setTimeout(()=>control.abort(),50)
+  let received
+  SourceEngine.prototype.startAll=function(signal){
+    received=signal
+    return new Promise(resolve=>signal?signal.addEventListener('abort',resolve,{once:true}):setTimeout(resolve,100))
+  }
+  try{
+    const report=await fixture(generated,args=>executeDiagnostic('source',args,{signal:control.signal}))
+    assert.ok(received instanceof AbortSignal)
+    assert.equal(received.aborted,true)
+    assert.equal(report.levels.resolution.find(x=>x.capability==='initialize').status,'cancelled')
+  }finally{
+    clearTimeout(cancel)
+    SourceEngine.prototype.startAll=original
+  }
 })

@@ -44,6 +44,8 @@ const ACCEPTED_MIME: Record<string, string> = {
  * wy `p1/p2.music.126.net`, kw `img1.kuwo.cn`, kg `imge/singerimg.kugou.com`,
  * mg `d.musicapp.migu.cn`. 只有 tx 是例外 —— 它的地址是我们自己拼出来的
  * （`search.ts:199-200` 的 `y.gtimg.cn` 字面量），那两条实测轮次没返回封面。
+ * 2026-10-25 QQ公开歌单搜索实测另返回 qpic.y.qq.com，仅追加该主机，
+ * 不扩大为 qq.com 家族；上述2026-09-24观察保留为历史依据。
  *
  * A source missing from this map gets **no cover**, including the 音源脚本 platforms
  * (`qs`, `qsvip`): their hosts are whatever a user-imported script returns, which is
@@ -58,7 +60,7 @@ const ACCEPTED_MIME: Record<string, string> = {
  * it unpinned would make the hole this map closes reachable through either of them.
  */
 export const COVER_HOSTS: Partial<Record<SourceId, string[]>> = {
-  tx: ['gtimg.cn'],
+  tx: ['gtimg.cn', 'qpic.y.qq.com'], // QQ playlist artwork observed 2026-10-25; no qq.com wildcard.
   wy: ['126.net'],
   kw: ['kuwo.cn'],
   kg: ['kugou.com'],

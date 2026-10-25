@@ -1,3 +1,7 @@
+import {PlaylistDerive} from './library/playlist-derive'
+import type {PlaylistDeriveMode} from '@shared/playlist-derive'
+import {PlaylistBulkRename} from './library/playlist-bulk-rename'
+import type {PlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
 import { PlaylistSearchService } from './online/playlist-search-service'
 import { PlaylistPreviews } from './online/playlist-previews'
 import { PLAYLIST_SEARCH_PLATFORMS, type PlaylistSource } from '@shared/playlist-search'
@@ -394,6 +398,8 @@ interface Services {
   /** Routes playlist imports; leaderboard support is deferred to F1. */
   libraryRouter: LibraryRouter
   playlistRefresh: PlaylistRefreshService
+  playlistDerive: PlaylistDerive
+  playlistBulkRename: PlaylistBulkRename
   downloads: DownloadManager
   /**
    * Lyrics for an online track, from the sources the user ranked in Settings.
@@ -561,6 +567,9 @@ async function createServices(): Promise<Services> {
     registry: onlinePlatforms, dataDir, health: capabilityHealth, enabled:()=>settings.get().onlineReliability!==false
   })
   await libraryRouter.load()
+  const assertPlaylistOperationReady=():void=>{if(quitting||movingData||relinkGuard.blocked)throw Error('应用正在退出、迁移资料或修复本地文件，请稍后再处理歌单')}
+  const playlistDerive=new PlaylistDerive({playlists,assertReady:assertPlaylistOperationReady})
+  const playlistBulkRename=new PlaylistBulkRename({playlists,assertReady:assertPlaylistOperationReady})
   const playlistRefresh=new PlaylistRefreshService({playlists,readSnapshot:(source,input,signal,force)=>libraryRouter.readSnapshot(source,input,signal,force)})
 
   await Promise.all([settings.load(), playlists.load(), library.load(), artistImages.load(),
@@ -678,7 +687,7 @@ async function createServices(): Promise<Services> {
     }
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, charts, playlistSearch, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, charts, playlistSearch, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, playlistDerive, playlistBulkRename, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -1452,6 +1461,7 @@ function fromMainWindow(event: { sender: Electron.WebContents; senderFrame: Elec
 
 /** Wrap a handler so every rejection becomes a typed `IpcResult`. */
 const relinkGuard = new RelinkCommitGuard()
+let movingData=false
 let relinkCommit: Promise<unknown> | undefined
 const inFlightIpc = new Set<Promise<unknown>>()
 function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): void {
@@ -1812,6 +1822,7 @@ function registerIpc(): void {
    * from the renderer.
    */
   handle(IPC.dataDirMove, async () => {
+    if(movingData)throw Error('正在迁移数据目录，请稍后')
     const current = requireServices().dataDir
     const picked = await dialog.showOpenDialog({
       title: '选择数据目录',
@@ -1844,6 +1855,12 @@ function registerIpc(): void {
     if (response !== 0) return { moved: false, reason: 'cancelled' }
     // Anything still buffered would be missing from the copy, and the next write
     // after this would go to the old directory until the app restarts.
+    if(movingData)throw Error('正在迁移数据目录，请稍后')
+    movingData=true
+    const currentServices=requireServices()
+    currentServices.playlistDerive.clear();currentServices.playlistBulkRename.clear()
+    try{
+    await requireServices().playlists.flush()
     await assetOperations.flush()
     await assetCommits.flush()
     await flushAssetWrites()
@@ -1852,6 +1869,7 @@ function registerIpc(): void {
     await copyDataForRelocation(current, target, source => !isSkippedForMigration(current, source))
     writeFileSync(dataPointerFile, JSON.stringify({ dir: target, movedAt: Date.now() }, null, 2))
     return { moved: true, dir: target }
+    }finally{movingData=false}
   })
 
   /* ---------------- 音源 scripts ---------------- */
@@ -2442,6 +2460,9 @@ function registerIpc(): void {
   handle(IPC.libraryRelinkApply, async (token: string) => {
     const current = requireServices()
     const candidates = relinkCandidates.has(token) ? relinkCandidates : batchRelinkCandidates
+    // RelinkCommitGuard.run sets blocked synchronously before its first await;
+    // clear this lease in the same stack so it cannot cross the gate.
+    current.playlistBulkRename.clear()
     relinkCommit = relinkGuard.run(async () => {
       await Promise.allSettled([...inFlightIpc])
       await assetOperations.flush(); await assetCommits.flush(); await flushAssetWrites()
@@ -2567,6 +2588,12 @@ function registerIpc(): void {
   handle(IPC.playlistRefreshPreview,(id:string,requestId?:string)=>cancellableRequest(requestId,signal=>requireServices().playlistRefresh.preview(id,signal)))
   handle(IPC.playlistRefreshApply,(token:string)=>requireServices().playlistRefresh.apply(token))
   handle(IPC.playlistRefreshDiscard,(token:string)=>requireServices().playlistRefresh.discard(token))
+  handle(IPC.playlistBulkRenamePreview,(ids:string[],transform:PlaylistBulkRenameTransform,requestId?:string)=>cancellableRequest(requestId,signal=>requireServices().playlistBulkRename.preview(ids,transform,signal)))
+  handle(IPC.playlistBulkRenameApply,(token:string)=>requireServices().playlistBulkRename.apply(token))
+  handle(IPC.playlistBulkRenameDiscard,(token:string)=>requireServices().playlistBulkRename.discard(token))
+  handle(IPC.playlistDerivePreview,(mode:PlaylistDeriveMode,ids:string[],name:string,requestId?:string)=>cancellableRequest(requestId,signal=>requireServices().playlistDerive.preview(mode,ids,name,signal)))
+  handle(IPC.playlistDeriveApply,(token:string)=>requireServices().playlistDerive.apply(token))
+  handle(IPC.playlistDeriveDiscard,(token:string)=>requireServices().playlistDerive.discard(token))
   const restore = new PlaylistRestore({
     assertReady:()=>{if(quitting||relinkGuard.blocked)throw Error('应用正在退出或修复本地文件，请稍后再恢复')},
     choose:async()=>{
@@ -3151,6 +3178,8 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault()
     shutdownStarted = true
     const current = services
+    current.playlistDerive.clear()
+    current.playlistBulkRename.clear()
     // The source lifecycle owns child processes, so stop it before quitting.
     void Promise.allSettled([
       ...(relinkCommit ? [relinkCommit] : []),

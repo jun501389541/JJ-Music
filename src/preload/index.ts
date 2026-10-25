@@ -1,3 +1,5 @@
+import type {PlaylistDeriveMode,PlaylistDerivePreview,PlaylistDeriveResult} from '@shared/playlist-derive'
+import type {PlaylistBulkRenamePreview,PlaylistBulkRenameResult,PlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
 import type {MissingFilesResult} from '@shared/missing-files'
 import type { PlaylistSource, PlaylistSearchPage } from '@shared/playlist-search'
 /**
@@ -401,6 +403,12 @@ const api = {
   },
 
   playlists: {
+    bulkRenamePreview: (ids:string[],transform:PlaylistBulkRenameTransform,requestId?:string) => invoke<PlaylistBulkRenamePreview>(IPC.playlistBulkRenamePreview,ids,transform,requestId),
+    bulkRenameApply: (token:string) => invoke<PlaylistBulkRenameResult>(IPC.playlistBulkRenameApply,token),
+    bulkRenameDiscard: (token:string) => invoke<void>(IPC.playlistBulkRenameDiscard,token),
+    derivePreview: (mode:PlaylistDeriveMode,ids:string[],name:string,requestId?:string) => invoke<PlaylistDerivePreview>(IPC.playlistDerivePreview,mode,ids,name,requestId),
+    deriveApply: (token:string) => invoke<PlaylistDeriveResult>(IPC.playlistDeriveApply,token),
+    deriveDiscard: (token:string) => invoke<void>(IPC.playlistDeriveDiscard,token),
     restorePreview: () => invoke<PlaylistRestorePreview | null>(IPC.playlistRestorePreview),
     restoreApply: (token: string) => invoke<PlaylistRestoreResult>(IPC.playlistRestoreApply, token),
     restoreDiscard: (token: string) => invoke<void>(IPC.playlistRestoreDiscard, token),

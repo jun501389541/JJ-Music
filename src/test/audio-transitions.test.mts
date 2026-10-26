@@ -78,9 +78,11 @@ test('user volume and mute remain independent of the fade gain', async context =
     await audio.load({ url: 'test://a' })
     audio.setVolume(0.4)
     await audio.play(300)
-    assert.equal(Context.last.gains.length, 4)
+    assert.equal(Context.last.gains.length, 5)
     const volume = Context.last.gains[2]
     const fade = Context.last.gains[3]
+    const sleep = Context.last.gains[4]
+    audio.setSleepGain(0.3)
     audio.setVolume(0.7)
     audio.setMuted(true)
     assert.equal(volume.gain.value, 0)
@@ -90,6 +92,7 @@ test('user volume and mute remain independent of the fade gain', async context =
     assert.equal(volume.gain.value, 0)
     audio.setMuted(false)
     assert.equal(volume.gain.value, 0.7)
+    assert.equal(sleep.gain.value, 0.3)
   } finally { audio.destroy() }
 })
 test('immediate resume cancels a pending pause and stop cancels all fade callbacks', async context => {

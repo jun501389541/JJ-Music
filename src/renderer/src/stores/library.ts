@@ -422,6 +422,12 @@ export const useLibraryStore = defineStore('library', () => {
     return playlist
   }
 
+  async function createPlaylistFromQueue(name:string,tracks:PlayableTrack[]):Promise<import('@shared/queue-playlist').QueuePlaylistResult>{
+    const result=await window.jj.playlists.createFromQueue(name,tracks)
+    try{await refreshPlaylists()}catch{useToastStore().info('歌单已保存，列表暂未刷新，请重新打开歌单页')}
+    return result
+  }
+
   async function removePlaylist(id: string): Promise<void> {
     await window.jj.playlists.remove(id)
     await refreshPlaylists()
@@ -495,6 +501,7 @@ export const useLibraryStore = defineStore('library', () => {
     clearSourceQuarantine,
     validateSource,
     createPlaylist,
+    createPlaylistFromQueue,
     removePlaylist,
     addToPlaylist
   }

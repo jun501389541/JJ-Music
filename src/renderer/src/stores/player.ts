@@ -6,6 +6,8 @@
  */
 import { playlistEntryKey } from '@shared/playlist-refresh'
 import { normalizeCrossfadeDurationMs } from '@shared/crossfade'
+import type {LoopEditContext} from '@shared/loop-time'
+import {assertQueueEditSelection,planQueueEdit,type QueueEditAction,type QueueEditContext} from '@shared/queue-edit'
 import { useLibraryStore } from './library'
 import { relinkTrack, type LocalRelinkChange } from '@shared/local-file-relink'
 import { useToastStore } from './toast'
@@ -158,6 +160,8 @@ export const usePlayerStore = defineStore('player', () => {
   const manualCrossfadeDurationMs = ref(0)
   const abLoop = shallowRef<LoopRange | null>(null)
   let pausePending = false
+  let stoppingPlayback = false
+  let editingQueue = false
   let toggleGeneration = 0
   const muted = ref(false)
   const playMode = ref<PlayMode>('list')
@@ -216,7 +220,12 @@ export const usePlayerStore = defineStore('player', () => {
     typeof window.jj?.sources?.onChanged === 'function'
     ? window.jj.sources.onChanged(event => { if(event?.kind==='metadata')return;sourceEpoch++; urlCache.clear(); resolutionAbort?.abort(); cancelCrossfadeReservation() })
     : undefined
-  onScopeDispose(() => { unsubscribeSourcesChanged?.(); resolutionAbort?.abort(); cancelCrossfadeReservation() })
+  onScopeDispose(() => {
+    unsubscribeSourcesChanged?.()
+    stopPlayback()
+    engine.value?.destroy()
+    engine.value=null
+  })
 
   function cacheUrl(key: string, source: ResolvedSource): void {
     const lease=playbackUrlLease(source,Date.now())
@@ -269,6 +278,7 @@ export const usePlayerStore = defineStore('player', () => {
       if (!isLoadedCurrentTrack()) return
       duration.value = total
       loading.value = false
+      updateSleepFade()
     })
     instance.on('playing', () => {
       // The incoming deck can emit playing synchronously inside crossfadeTo,
@@ -290,6 +300,7 @@ export const usePlayerStore = defineStore('player', () => {
     instance.on('paused', () => {
       playing.value = false
       clearStallTimer()
+      updateSleepFade()
     })
     instance.on('waiting', (isWaiting) => {
       if (!isLoadedCurrentTrack()) return
@@ -307,6 +318,7 @@ export const usePlayerStore = defineStore('player', () => {
     })
 
     instance.setVolume(volume.value)
+    instance.setSleepGain?.(sleepGain.value)
     instance.setTransitionsEnabled?.(transitionsEnabled.value)
     instance.setEqualizer(equalizer.value)
     instance.setMuted(muted.value)
@@ -834,6 +846,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function maybeReserveCrossfade(time: number, total: number): void {
+    if(editingQueue||stoppingPlayback)return
     if (crossfadeReservation?.origin === 'manual' || abLoop.value?.enabled || sleepWaiting.value) return
     const instance = engine.value
     const outgoing = currentTrack.value
@@ -1551,6 +1564,21 @@ export const usePlayerStore = defineStore('player', () => {
     abLoop.value = { key: playlistEntryKey(currentTrack.value!), a: currentTime.value, b: null, enabled: false }
   }
 
+  function loopEditContext():LoopEditContext|null{
+    if(sleepWaiting.value||!currentTrack.value||!isLoadedCurrentTrack()||!Number.isFinite(duration.value)||duration.value<1)return null
+    const key=playlistEntryKey(currentTrack.value),loop=abLoop.value?.key===key?abLoop.value:null
+    return{key,generation:playGeneration,name:currentTrack.value.name,duration:duration.value,a:loop?.a??0,b:loop?.b??duration.value}
+  }
+
+  function applyLoopRange(context:LoopEditContext,a:number,b:number):void{
+    if(!context||context.generation!==playGeneration||!currentTrack.value||context.key!==playlistEntryKey(currentTrack.value)||!isLoadedCurrentTrack())throw Error('播放已变更，时间窗口已失效，请重新打开')
+    if(sleepWaiting.value)throw Error('请先取消睡眠等待')
+    if(!Number.isFinite(a)||!Number.isFinite(b)||!Number.isFinite(duration.value)||a<0||b-a<1||b>duration.value)throw Error('请设置 0≤A<B≤曲长，片段至少1秒')
+    cancelCrossfadeReservation()
+    abLoop.value={key:context.key,a,b,enabled:true}
+    if(currentTime.value<a||currentTime.value>=b)seek(a)
+  }
+
   function setLoopB(): void {
     if (!loopEndpointReady()) return
     const loop = abLoop.value
@@ -1595,6 +1623,7 @@ export const usePlayerStore = defineStore('player', () => {
     // for engines that do not publish a seek progress event.
     suppressSeekProgressReservation = false
     currentTime.value = clamped
+    updateSleepFade()
   }
 
   function seekRatio(ratio: number): void {
@@ -1675,6 +1704,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (!Number.isFinite(value)) return
     rate.value = Math.min(4, Math.max(0.25, value))
     engine.value?.setRate(rate.value)
+    updateSleepFade()
   }
 
   function setQuality(value: Quality): void {
@@ -1758,6 +1788,33 @@ export const usePlayerStore = defineStore('player', () => {
     if (removingCurrent) clearSession()
   }
 
+  function queueEditContext(keys:readonly string[]):QueueEditContext{
+    if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
+    assertQueueEditSelection(queue.value,keys)
+    return Object.freeze({revision:queueRevision,generation:playGeneration,currentKey:currentTrack.value?playlistEntryKey(currentTrack.value):null,currentIndex:currentIndex.value,keys:Object.freeze([...keys])})
+  }
+
+  function applyQueueEdit(context:QueueEditContext,action:QueueEditAction):number{
+    if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
+    if(!context||context.revision!==queueRevision||context.generation!==playGeneration||context.currentIndex!==currentIndex.value||context.currentKey!==(currentTrack.value?playlistEntryKey(currentTrack.value):null))throw Error('播放列表或当前歌曲已变更，请重新选择')
+    const plan=planQueueEdit(queue.value,currentIndex.value,context.keys,action)
+    if(!plan.changed)return 0
+    editingQueue=true
+    try{
+      if(plan.removesCurrent||!plan.queue.length)stopPlayback()
+      else cancelCrossfadeReservation()
+      queue.value=plan.queue
+      currentIndex.value=plan.currentIndex
+      const valid=new Set(plan.queue.map(playlistEntryKey))
+      randomPool=randomPool.filter(key=>valid.has(key))
+      randomHistory=randomHistory.filter(key=>valid.has(key))
+      noteQueueMutation()
+      if(plan.removesCurrent||!plan.queue.length)clearSession()
+      else flushSession()
+    }finally{editingQueue=false}
+    return plan.affected
+  }
+
   function clearQueue(): void {
     if (localRelinkBusy) return
     stop()
@@ -1790,11 +1847,51 @@ export const usePlayerStore = defineStore('player', () => {
   const sleepAt = ref<number | null>(null)
   const sleepMode = ref<'immediate' | 'track-end'>('immediate')
   const sleepWaiting = ref(false)
+  const sleepFadeDurationMs=ref(0)
+  const sleepGain=ref(1)
+  const sleepFading=computed(()=>sleepGain.value<1)
+  const sleepFadeAvailable=computed(()=>!engine.value||typeof engine.value.setSleepGain==='function')
+  let sleepGeneration=0
+  let sleepFadeTimer:number|undefined
   let sleepTimer: ReturnType<typeof setTimeout> | undefined
+  function updateSleepFade():void{
+    // Cancelling an unstarted handoff emits ready/playing synchronously.
+    // Keep attenuation until stopPlayback has actually released both decks.
+    if(stoppingPlayback)return
+    let target=1
+    const seconds=sleepFadeDurationMs.value/1000
+    if(sleepAt.value!==null&&seconds>0&&sleepFadeAvailable.value){
+      if(sleepMode.value==='immediate')target=Math.max(0,Math.min(1,(sleepAt.value-Date.now())/1000/seconds))
+      else if(sleepWaiting.value&&isLoadedCurrentTrack()&&Number.isFinite(duration.value)&&duration.value>0){
+        const time=engine.value?.getCurrentTime()??currentTime.value
+        target=Math.max(0,Math.min(1,(duration.value-time)/rate.value/seconds))
+      }
+    }
+    sleepGain.value=target
+    engine.value?.setSleepGain?.(target)
+  }
+  function syncSleepFadeTimer():void{
+    if(sleepAt.value===null||sleepFadeDurationMs.value===0||!sleepFadeAvailable.value){
+      if(sleepFadeTimer!==undefined)window.clearInterval(sleepFadeTimer)
+      sleepFadeTimer=undefined
+    }else if(sleepFadeTimer===undefined){
+      const generation=sleepGeneration
+      sleepFadeTimer=window.setInterval(()=>{if(generation===sleepGeneration)checkSleepDeadline()},100)
+    }
+    updateSleepFade()
+  }
+  function setSleepFadeDuration(value:number):void{
+    if(![0,5000,10000,20000,30000,60000].includes(value))return
+    sleepFadeDurationMs.value=value
+    syncSleepFadeTimer()
+  }
   function setSleepMinutes(minutes: number): void {
+    if(!Number.isFinite(minutes)||minutes<0)return
     cancelSleepTimer()
     sleepAt.value = minutes > 0 ? Date.now() + minutes * 60_000 : null
-    if (minutes > 0) sleepTimer = setTimeout(() => { sleepTimer = undefined; checkSleepDeadline() }, minutes * 60_000)
+    const generation=sleepGeneration
+    if (minutes > 0) sleepTimer = setTimeout(() => { if(generation!==sleepGeneration)return; sleepTimer = undefined; checkSleepDeadline() }, minutes * 60_000)
+    syncSleepFadeTimer()
   }
 
   /**
@@ -1805,11 +1902,12 @@ export const usePlayerStore = defineStore('player', () => {
     if (mode !== 'immediate' && mode !== 'track-end') return
     sleepMode.value = mode
     if (sleepWaiting.value && mode === 'immediate') stop()
+    else updateSleepFade()
   }
 
   /** Returns true only when expiry stopped playback, never for a waiting track. */
   function checkSleepDeadline(): boolean {
-    if (sleepAt.value === null || sleepWaiting.value || Date.now() < sleepAt.value) return false
+    if (sleepAt.value === null || sleepWaiting.value || Date.now() < sleepAt.value) {updateSleepFade();return false}
     if (sleepTimer !== undefined) clearTimeout(sleepTimer)
     sleepTimer = undefined
     if (sleepMode.value === 'immediate' || !isLoadedCurrentTrack() || !Number.isFinite(duration.value) || duration.value <= 0) {
@@ -1820,14 +1918,19 @@ export const usePlayerStore = defineStore('player', () => {
     cancelCrossfadeReservation()
     if (abLoop.value) abLoop.value = { ...abLoop.value, enabled: false }
     sleepWaiting.value = true
+    updateSleepFade()
     return false
   }
 
-  function cancelSleepTimer(): void {
+  function cancelSleepTimer(resetGain=true): void {
+    sleepGeneration++
     if (sleepTimer !== undefined) clearTimeout(sleepTimer)
+    if(sleepFadeTimer!==undefined)window.clearInterval(sleepFadeTimer)
+    sleepFadeTimer=undefined
     sleepTimer = undefined
     sleepAt.value = null
     sleepWaiting.value = false
+    if(resetGain)updateSleepFade()
   }
 
   /* ------------------------------------------------------------ *
@@ -2022,7 +2125,10 @@ export const usePlayerStore = defineStore('player', () => {
     stopPlayback()
   }
   function stopPlayback(): void {
-    cancelSleepTimer()
+    if(stoppingPlayback)return
+    stoppingPlayback=true
+    try{
+    cancelSleepTimer(false)
     clearLoop()
     cancelCrossfadeReservation()
     localRelinkResume = null
@@ -2052,6 +2158,8 @@ export const usePlayerStore = defineStore('player', () => {
     lyricError.value = null
     resolvedSourceName.value = null
     resolvedResource.value = null
+    }finally{stoppingPlayback=false}
+    updateSleepFade()
   }
 
   /* ------------------------------------------------------------ *
@@ -2349,10 +2457,13 @@ export const usePlayerStore = defineStore('player', () => {
     applyEqualizerPreset,
     addToQueue,
     removeFromQueue,
+    queueEditContext,applyQueueEdit,
     clearQueue,
     insertNext,
     moveInQueue,
     restoreQueueHistory,
+    loopEditContext,applyLoopRange,
+    sleepFadeDurationMs,sleepFading,sleepFadeAvailable,setSleepFadeDuration,
     sleepAt, sleepMode, sleepWaiting, setSleepMode,
     setSleepMinutes,
     stop,

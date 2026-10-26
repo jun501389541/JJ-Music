@@ -1,4 +1,6 @@
 import {assertDeriveSelection,DERIVE_MAX_LISTS,DERIVE_MAX_TRACKS,DERIVE_MAX_BYTES,type DerivedPlaylist} from '@shared/playlist-derive'
+import {prepareQueuePlaylist} from '../library/queue-playlist'
+import type {QueuePlaylistResult} from '@shared/queue-playlist'
 import {assertPlaylistBulkRenameName,assertPlaylistBulkRenameSelection,PLAYLIST_BULK_RENAME_MAX_BYTES,PLAYLIST_BULK_RENAME_MAX_LISTS} from '@shared/playlist-bulk-rename'
 import { playlistEntryKey } from '@shared/playlist-refresh'
 import { UI_DEFAULTS } from '@shared/preferences'
@@ -293,6 +295,19 @@ export class PlaylistStore {
       .slice()
       .sort((a, b) => a.position - b.position)
       .map((list) => ({ ...list, trackCount: this.items.get(list.id)?.length ?? 0 }))
+  }
+
+  async createFromQueue(name:string,tracks:PlayableTrack[]):Promise<QueuePlaylistResult>{
+    const snapshot=prepareQueuePlaylist(name,tracks)
+    return this.mutate(()=>{
+      const position=this.playlists.reduce((max,p)=>Math.max(max,p.position),-1)+1
+      if(!Number.isSafeInteger(position)||position<0)throw Error('现有歌单顺序无效')
+      let id:string
+      do{id='list_'+randomUUID()}while(this.items.has(id)||this.playlists.some(p=>p.id===id))
+      const playlist:Playlist={id,name:snapshot.name,source:'local',position}
+      this.playlists.push(playlist);this.items.set(id,snapshot.tracks)
+      return{playlist:{...playlist},inputTracks:snapshot.inputTracks,tracks:snapshot.tracks.length,duplicates:snapshot.inputTracks-snapshot.tracks.length}
+    })
   }
 
   async create(name: string, origin?: Pick<Playlist, 'source' | 'sourceListId'>): Promise<Playlist> {

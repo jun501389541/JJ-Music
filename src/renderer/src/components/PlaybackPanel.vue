@@ -28,6 +28,10 @@ import { playlistEntryKey } from '@shared/playlist-refresh'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { PlayableTrack, QueueSnapshot } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
+import { useLibraryStore } from '../stores/library'
+import { useToastStore } from '../stores/toast'
+import {QUEUE_PLAYLIST_MAX_BYTES,QUEUE_PLAYLIST_MAX_TRACKS} from '@shared/queue-playlist'
+import type {QueueEditAction,QueueEditContext} from '@shared/queue-edit'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
 import EqualizerPanel from './EqualizerPanel.vue'
@@ -36,6 +40,28 @@ import {filterPlaylistTracks,playlistTrackIndex} from '../utils/playlist-track-f
 
 const ui = useUiStore()
 const player = usePlayerStore()
+const library = useLibraryStore(), toast = useToastStore()
+const savingQueue=ref(false)
+async function saveQueue():Promise<void>{
+ const source=shown.value
+ if(savingQueue.value||!source.tracks.length)return
+ savingQueue.value=true
+ try{
+  if(source.tracks.length>QUEUE_PLAYLIST_MAX_TRACKS)throw Error('队列超过50000首，请减少后再保存')
+  const raw=JSON.stringify(source.tracks)
+  if(new TextEncoder().encode(raw).byteLength>QUEUE_PLAYLIST_MAX_BYTES)throw Error('队列资料超过20MiB上限')
+  const snapshot=JSON.parse(raw) as PlayableTrack[]
+  const count=new Set(snapshot.map(playlistEntryKey)).size
+  const date=new Date(),pad=(n:number):string=>String(n).padStart(2,'0')
+  const prefix=source.live?'播放队列':'历史队列',label=source.live?'当前队列':`历史队列 · ${source.label}`
+  const defaultName=`${prefix} ${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  const name=await ui.prompt('保存为新歌单',defaultName,`${label}：保存打开窗口时的完整队列，共 ${snapshot.length} 首，去重后 ${count} 首；搜索筛选不改变保存范围。`,4096)
+  if(name===null)return
+  const result=await library.createPlaylistFromQueue(name,snapshot)
+  toast.success(`已保存到「${result.playlist.name}」，共 ${result.tracks} 首`)
+ }catch(error){toast.error(error instanceof Error?error.message:'队列保存失败')}
+ finally{savingQueue.value=false}
+}
 
 /** 0 is the live queue; 1..n are the older ones, newest first. */
 const page = ref(0)
@@ -82,8 +108,30 @@ function playFiltered(track:PlayableTrack):void{
 function removeTrack(track:PlayableTrack):void{
  if(onLivePage.value)player.removeFromQueue(playlistEntryKey(track),true)
 }
-function queueActions(track:PlayableTrack):MenuItem[]{
- return onLivePage.value?[{label:'从播放列表移除',icon:'trash',action:()=>removeTrack(track)}]:[]
+function queueActions(track:PlayableTrack,_index:number,selection:PlayableTrack[]):MenuItem[]{
+ if(!onLivePage.value)return[]
+ const chosen=selection.length?selection:[track],keys=chosen.map(playlistEntryKey)
+ let context:QueueEditContext
+ try{context=player.queueEditContext(keys)}catch(error){
+  const reason=error instanceof Error?error.message:'当前无法批量编辑队列'
+  return[...(chosen.length===1?[{label:'从播放列表移除',icon:'trash',disabled:!reason.includes('重复'),action:()=>removeTrack(track)}]:[]),{label:reason,disabled:true}]
+ }
+ const perform=(action:QueueEditAction):void=>{
+  try{
+   const count=player.applyQueueEdit(context,action)
+   if(count)toast.success(action==='remove'?`已从队列移除 ${count} 首`:`已移动 ${count} 首`)
+   else toast.info('所选条目已在目标位置')
+  }catch(error){toast.error(error instanceof Error?error.message:'队列编辑失败')}
+ }
+ return[
+  {label:keys.length>1?`从队列移除 ${keys.length} 首`:'从播放列表移除',icon:'trash',action:async()=>{
+   if(keys.length>1&&!await ui.confirm('批量移除队列歌曲',`将从当前播放队列移除 ${keys.length} 首。${context.currentKey&&keys.includes(context.currentKey)?'包含当前歌曲，确认后停止播放。':'当前歌曲继续播放。'}音乐文件和来源歌单保留。`))return
+   perform('remove')
+  }},
+  {label:'移到当前曲之后',icon:'next',disabled:context.currentIndex<0||keys.every(key=>key===context.currentKey),action:()=>perform('after-current')},
+  {label:'移到队尾',icon:'list',action:()=>perform('to-end')},
+  ...(player.playMode==='random'?[{label:'随机模式仍按随机规则播放',disabled:true}]:[])
+ ]
 }
 function reorder(from:number,to:number):void{
  if(onLivePage.value&&!filtering.value)player.moveInQueue(from,to)
@@ -188,6 +236,7 @@ function playThisList(): void {
           </div>
           <small class="np-panel__page-name">{{ shown.label }}</small>
           <div class="np-panel__actions">
+            <button class="btn" type="button" :title="onLivePage?'保存打开窗口时的完整当前队列，搜索筛选不影响范围':'保存打开窗口时的完整历史队列，搜索筛选不影响范围'" :disabled="!shown.tracks.length || savingQueue" @click="saveQueue">保存为新歌单</button>
             <button v-if="!onLivePage" class="btn btn--primary" type="button" @click="playThisList">播放这份列表</button>
             <button class="btn" type="button" :disabled="!onLivePage || player.currentIndex < 0" title="定位到正在播放的曲目" @click="locatePlaying">当前播放</button>
             <button class="btn" type="button" :disabled="player.queue.length === 0" @click="clearQueue">清空播放队列</button>

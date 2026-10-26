@@ -1,4 +1,5 @@
 import {assertDeriveArgs} from '@shared/playlist-derive'
+import {assertQueuePlaylistArgs} from './library/queue-playlist'
 import {assertPlaylistBulkRenameSelection,parsePlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
 import { assertPlaylistSearch } from '@shared/playlist-search'
 import { IPC } from '@shared/ipc'
@@ -36,6 +37,10 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const quality = (value: unknown): boolean => LX_QUALITIES.includes(value as (typeof LX_QUALITIES)[number])
 
   switch (channel) {
+    case IPC.playlistCreateFromQueue:
+      if(args.length!==2)bad()
+      assertQueuePlaylistArgs(args[0],args[1])
+      break
     case IPC.playlistRemoveMany:
       if(args.length!==1||!Array.isArray(args[0])||!ids(args[0],1000)||!args[0].length||new Set(args[0]).size!==args[0].length||args[0].includes('default')||args[0].includes('favorites'))bad()
       break

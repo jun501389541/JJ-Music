@@ -115,6 +115,8 @@ export interface AudioEngine {
   /** 0..1 */
   setVolume(volume: number): void
   getVolume(): number
+  /** Independent shared output attenuation for session-only sleep fading. 0..1. */
+  setSleepGain?(value:number):void
   setMuted(muted: boolean): void
   isMuted(): boolean
 

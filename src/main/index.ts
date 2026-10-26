@@ -2646,6 +2646,7 @@ function registerIpc(): void {
     )
   })
   handle(IPC.playlistCreate, (name: string) => requireServices().playlists.create(name))
+  handle(IPC.playlistCreateFromQueue, (name:string,tracks:PlayableTrack[]) => requireServices().playlists.createFromQueue(name,tracks))
   handle(IPC.playlistRemoveMany,(ids:string[])=>requireServices().playlists.removeMany(ids))
   handle(IPC.playlistRemove, (id: string) => requireServices().playlists.remove(id))
   handle(IPC.playlistRename, (id: string, name: string) =>

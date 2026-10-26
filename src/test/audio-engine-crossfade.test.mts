@@ -129,6 +129,27 @@ async function prepare(engine, url = 'test://incoming', options = {}) {
   return { token: await preparing, incoming }
 }
 
+test('sleep gain initializes before load and is a separate shared output stage',async()=>{
+ const engine=makeEngine()
+ try{
+  engine.setSleepGain(0.25);engine.setVolume(0.6);await loadActive(engine)
+  const c=FakeContext.instances[0],sleep=c.gains[4];assert.equal(c.gains.length,5);assert.equal(sleep.gain.value,0.25)
+  assert.equal(c.gains[3].connections[0],sleep);assert.equal(c.gains[2].gain.value,0.6)
+  engine.setMuted(true);assert.equal(c.gains[2].gain.value,0);assert.equal(sleep.gain.value,0.25)
+  engine.setSleepGain(NaN);assert.equal(sleep.gain.value,0.25);engine.setSleepGain(2);assert.equal(sleep.gain.value,1)
+  engine.destroy();assert.equal(sleep.disconnected,true)
+ }finally{engine.destroy()}
+})
+test('sleep gain survives crossfade rollback and short pause transitions independently',async()=>{
+ const engine=makeEngine()
+ try{
+  await loadActive(engine);engine.setSleepGain(0.4);const c=FakeContext.instances[0],{token,incoming}=await prepare(engine)
+  const op=engine.crossfadeTo(token,3000);await op.started;const rejected=assert.rejects(op.completed);incoming.signalError(3);await rejected
+  assert.equal(c.gains[4].gain.value,0.4);assert.equal(engine.getVolume(),0.8)
+  engine.setTransitionsEnabled(false);await engine.pause();assert.equal(c.gains[4].gain.value,0.4)
+ }finally{engine.destroy()}
+})
+
 test('prepared deck shares the active AudioContext', async () => {
   const engine = makeEngine()
   try {
@@ -352,7 +373,7 @@ test('volume mute equalizer and rate apply to both decks', async () => {
     assert.equal(FakeAudio.instances.length, 2)
     assert.deepEqual(FakeAudio.instances.map((audio) => audio.playbackRate), [1.75, 1.75])
     assert.deepEqual(FakeAudio.instances.map((audio) => audio.preservesPitch), [false, false])
-    assert.equal(context.gains.length, 4)
+    assert.equal(context.gains.length, 5)
     assert.equal(context.gains[2].gain.value, 0)
     engine.setMuted(false)
     assert.equal(context.gains[2].gain.value, 0.45)

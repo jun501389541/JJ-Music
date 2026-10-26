@@ -51,7 +51,7 @@ class FakeAudio extends EventTarget {
   fail(code = 2) { this.error = { code }; this.dispatchEvent(new Event('error')) }
 }
 const param = () => ({ value: 0, curves: [], cancelScheduledValues() {}, setValueAtTime(value) { this.value = value }, setValueCurveAtTime(values, startTime, duration) { this.curves.push({ startTime, duration, values: [...values] }); this.value = values.at(-1) }, setTargetAtTime(value) { this.value = value } })
-const node = () => ({ connect() {}, disconnect() {}, frequency: param(), Q: param(), gain: param() })
+const node = () => ({ disconnected:false,connect() {}, disconnect() {this.disconnected=true}, frequency: param(), Q: param(), gain: param() })
 class FakeAudioContext {
   static instances = []
   constructor() { FakeAudioContext.instances.push(this) }
@@ -64,7 +64,7 @@ class FakeAudioContext {
   createGain() { const value = node(); this.gains.push(value); return value }
   createAnalyser() { return { ...node(), frequencyBinCount: 1024 } }
   async resume() {}
-  async close() {}
+  async close() {this.state='closed'}
 }
 globalThis.Audio = FakeAudio
 globalThis.MediaError = { MEDIA_ERR_ABORTED: 1, MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 }
@@ -82,8 +82,8 @@ function setup() {
     // The engine samples playback position on a timer. Kept inert: no test
     // asserts on the progress loop, and letting it tick for real would emit
     // 'progress' after the test body has finished.
-    setInterval: callback => { progressCallbacks.push(callback); return progressCallbacks.length - 1 },
-    clearInterval: id => { progressCallbacks[id] = undefined },
+    setInterval: callback => { progressCallbacks.push(callback); return progressCallbacks.length },
+    clearInterval: id => { progressCallbacks[id - 1] = undefined },
     jj: {
       music: { cancel: () => {}, url: async () => ({ url: 'https://test/audio', quality: '320k' }), enrich: async track => track },
       lyric: { resolve: async () => emptyLyric, searchOnline: async () => emptyLyric, importFile: async () => null },
@@ -117,6 +117,141 @@ function setLoopAt(player, outgoing, a, b) {
   outgoing.currentTime = a; pulseAudioProgress(); player.setLoopA()
   outgoing.currentTime = b; pulseAudioProgress(); player.setLoopB()
 }
+
+test('queue bulk edits preserve live identity time AB and sleep while moving current with a block',async()=>{
+ const {player,outgoing}=await startManualQueue();await player.addToQueue([local('d'),local('e')]);player.applyLoopRange(player.loopEditContext(),5,30);player.setSleepMinutes(1)
+ const deadline=player.sleepAt,clock=player.currentTime,plays=outgoing.playCalls
+ player.applyQueueEdit(player.queueEditContext(['local:manual-c','local:manual-b']),'to-end')
+ assert.deepEqual(player.queue.map(v=>v.id),['manual-a','d','e','manual-b','manual-c'])
+ player.applyQueueEdit(player.queueEditContext(['local:manual-c','local:manual-a']),'to-end')
+ assert.deepEqual(player.queue.map(v=>v.id),['d','e','manual-b','manual-a','manual-c']);assert.equal(player.currentIndex,3);assert.equal(player.currentTrack.id,'manual-a')
+ assert.equal(player.currentTime,clock);assert.equal(player.sleepAt,deadline);assert.equal(player.abLoop.enabled,true);assert.equal(outgoing.playCalls,plays)
+})
+test('queue bulk removal preserves unrelated media but stops when current is selected',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();await player.addToQueue([local('d')]);player.setSleepMinutes(1)
+ player.applyQueueEdit(player.queueEditContext(['local:manual-b','local:manual-c']),'remove');assert.deepEqual(player.queue.map(v=>v.id),['manual-a','d']);assert.equal(player.playing,true);assert.equal(player.currentTime,20)
+ player.applyQueueEdit(player.queueEditContext(['local:manual-a']),'remove');assert.equal(player.currentIndex,-1);assert.equal(player.currentTrack,null);assert.equal(player.playing,false);assert.equal(player.sleepAt,null);assert.equal(outgoing.src,'');assert.equal(incoming.src,'');assert.deepEqual(player.queue.map(v=>v.id),['d'])
+})
+test('queue bulk stale revision generation and invalid selection reject before side effects',async()=>{
+ const {player,outgoing}=await startManualQueue();const old=player.queueEditContext(['local:manual-b']);await player.addToQueue([local('d')]);const before=player.queue.map(v=>v.id)
+ assert.throws(()=>player.applyQueueEdit(old,'remove'),/变更|失效/);assert.deepEqual(player.queue.map(v=>v.id),before)
+ const context=player.queueEditContext(['local:manual-b']);assert.throws(()=>player.applyQueueEdit({...context,keys:['local:missing']},'remove'));assert.deepEqual(player.queue.map(v=>v.id),before)
+ await player.playTrackAt(0);outgoing.signalReady();await flush();assert.throws(()=>player.applyQueueEdit(context,'remove'),/变更|失效/)
+})
+test('queue bulk no-op preserves pending request and revision; actual edit cancels late readiness',async()=>{
+ const {player,incoming}=await startManualQueue();player.next();await flush();const target=player.manualSwitchTarget.id,context=player.queueEditContext(['local:manual-c'])
+ assert.equal(player.applyQueueEdit(context,'to-end'),0);assert.equal(player.manualSwitchTarget.id,target);assert.equal(player.queueEditContext(['local:manual-c']).revision,context.revision)
+ player.applyQueueEdit(player.queueEditContext(['local:manual-b']),'remove');incoming.signalReady();await flush();assert.equal(player.manualSwitchTarget,null);assert.equal(player.currentTrack.id,'manual-a');assert.equal(player.queue.some(v=>v.id==='manual-b'),false)
+})
+test('queue bulk finalizes active crossqueue handoff before mutation and cannot roll edits back',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();await player.playUserQueue(['new-a','new-b','new-c'].map(local));incoming.signalReady();await flush();assert.equal(player.currentTrack.id,'new-a')
+ player.applyQueueEdit(player.queueEditContext(['local:new-b']),'to-end');assert.deepEqual(player.queue.map(v=>v.id),['new-a','new-c','new-b']);assert.equal(outgoing.src,'')
+ incoming.fail(3);await flush();assert.deepEqual(player.queue.map(v=>v.id),['new-a','new-c','new-b']);assert.equal(player.currentTrack.id,'new-a')
+})
+test('queue bulk cancels manual random draws once and retains the unused draw order',async()=>{
+ const {player}=await startManualQueue();await player.addToQueue([local('d')]);player.setPlayMode('random');player.next();await flush();const first=player.manualSwitchTarget.id
+ player.next();await flush();const second=player.manualSwitchTarget.id;assert.notEqual(first,second)
+ player.applyQueueEdit(player.queueEditContext(['local:'+second]),'remove');player.next();await flush();assert.equal(player.manualSwitchTarget.id,first)
+})
+test('queue bulk rejects duplicate full identities and maintenance without partial mutation',async()=>{
+ const {player,outgoing}=await startManualQueue(),context=player.queueEditContext(['local:manual-b'])
+ player.beginLocalRelink({old:local('manual-a'),next:local('relocated-a')});assert.throws(()=>player.applyQueueEdit(context,'remove'),/维护|定位|变更|失效/);assert.deepEqual(player.queue.map(v=>v.id),['manual-a','manual-b','manual-c']);player.finishLocalRelink()
+ await player.playQueue([local('duplicate'),local('duplicate')]);outgoing.signalReady();assert.throws(()=>player.queueEditContext(['local:duplicate']),/重复/)
+})
+
+function atClock(now,action){const original=Date.now;Date.now=()=>now;try{return action()}finally{Date.now=original}}
+const sleepLevel=()=>FakeAudioContext.instances[0].gains[4].gain.value
+test('sleep fade immediate countdown uses wall time while preserving user volume and mute',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();player.setVolume(0.6);player.toggleMute();player.setSleepFadeDuration(10000);player.setSleepMinutes(1)
+ const deadline=player.sleepAt;atClock(deadline-5000,pulseAudioProgress)
+ assert.equal(sleepLevel(),0.5);assert.equal(player.sleepFading,true);assert.equal(player.volume,0.6);assert.equal(player.muted,true)
+ player.setTransitionsEnabled(false);await player.toggle();atClock(deadline,pulseAudioProgress)
+ assert.equal(player.playing,false);assert.equal(outgoing.src,'');assert.equal(incoming.src,'');assert.equal(sleepLevel(),1);assert.equal(player.sleepAt,null)
+})
+test('sleep fade track-end waits until deadline and recalculates its rate-adjusted media tail',async()=>{
+ const {player,outgoing}=await startManualQueue();player.setSleepFadeDuration(10000);player.setSleepMinutes(1);const deadline=player.sleepAt
+ atClock(deadline-5000,pulseAudioProgress);assert.equal(sleepLevel(),0.5)
+ player.setSleepMode('track-end');assert.equal(sleepLevel(),1)
+ atClock(deadline,pulseAudioProgress);assert.equal(player.sleepWaiting,true);assert.equal(sleepLevel(),1)
+ outgoing.currentTime=175;pulseAudioProgress();assert.equal(sleepLevel(),0.5)
+ player.setRate(2);assert.equal(sleepLevel(),0.25);player.seek(160);assert.equal(sleepLevel(),1)
+ player.setTransitionsEnabled(false);await player.toggle();outgoing.currentTime=178;pulseAudioProgress();assert.equal(sleepLevel(),0.1);assert.equal(player.playing,false)
+ outgoing.finish();await flush();assert.equal(player.sleepWaiting,false);assert.equal(sleepLevel(),1)
+})
+test('sleep fade timer generation rejects stale callbacks after rearm and cancellation',async()=>{
+ const {player}=await startManualQueue();player.setSleepFadeDuration(10000);player.setSleepMinutes(1);const stale=progressCallbacks.at(-1)
+ player.setSleepMinutes(2);const nextDeadline=player.sleepAt
+ atClock(nextDeadline+1,stale);assert.equal(player.playing,true);assert.equal(player.sleepAt,nextDeadline)
+ atClock(nextDeadline-5000,pulseAudioProgress);assert.equal(sleepLevel(),0.5)
+ player.setSleepMinutes(0);assert.equal(sleepLevel(),1);assert.equal(player.sleepFading,false)
+ atClock(nextDeadline+1,stale);assert.equal(player.playing,true)
+})
+test('sleep fade remains independent through protected cross-queue commit and rollback',async()=>{
+ const {player,incoming}=await startManualQueue();player.setVolume(0.7);player.setSleepFadeDuration(10000);player.setSleepMinutes(1)
+ const original=Date.now;Date.now=()=>player.sleepAt-5000
+ try{
+  pulseAudioProgress();assert.equal(sleepLevel(),0.5)
+  await player.playUserQueue([local('sleep-new')]);incoming.signalReady();await flush();assert.equal(player.currentTrack.id,'sleep-new');assert.equal(sleepLevel(),0.5)
+  incoming.fail(3);await flush();assert.equal(player.currentTrack.id,'manual-a');assert.equal(sleepLevel(),0.5);assert.equal(player.volume,0.7)
+ }finally{Date.now=original}
+})
+test('sleep fade unknown duration retains deadline stop and allowed session choices do not reset clock',async()=>{
+ const {player,outgoing}=await startManualQueue();player.setSleepMinutes(1);const deadline=player.sleepAt
+ for(const value of [-1,NaN,1000,120000])player.setSleepFadeDuration(value)
+ assert.equal(player.sleepFadeDurationMs,0);player.setSleepFadeDuration(10000);assert.equal(player.sleepAt,deadline)
+ player.setSleepMode('track-end');outgoing.duration=0;pulseAudioProgress();atClock(deadline,pulseAudioProgress)
+ assert.equal(player.playing,false);assert.equal(player.sleepWaiting,false);assert.equal(sleepLevel(),1)
+})
+test('sleep fade stop releases audio before resetting attenuation and dispose removes its interval',async()=>{
+ const {player,outgoing}=await startManualQueue();player.setSleepFadeDuration(10000);player.setSleepMinutes(1);atClock(player.sleepAt-5000,pulseAudioProgress)
+ const parameter=FakeAudioContext.instances[0].gains[4].gain,write=parameter.setTargetAtTime;let soundedAtReset=false
+ parameter.setTargetAtTime=function(value,...args){if(value===1&&outgoing.src&&!outgoing.paused)soundedAtReset=true;return write.call(this,value,...args)}
+ player.stop();assert.equal(soundedAtReset,false);assert.equal(sleepLevel(),1)
+ await player.playTrackAt(0);outgoing.signalReady();await flush();player.setSleepMinutes(1);const callback=progressCallbacks.at(-1)
+ player.$dispose();assert.equal(progressCallbacks.includes(callback),false);atClock(Date.now()+120000,callback);assert.equal(player.sleepAt,null)
+})
+test('sleep fade stop blocks gain reset reentry from an unstarted handoff cancellation',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();player.setSleepFadeDuration(10000);player.setSleepMinutes(1)
+ const original=Date.now,now=player.sleepAt-5000;Date.now=()=>now
+ try{
+  pulseAudioProgress();incoming.play=function(){this.playCalls++;this.paused=false;return new Promise(()=>{})}
+  player.next();await flush();incoming.signalReady();await flush();assert.equal(incoming.playCalls,1);assert.equal(player.currentTrack.id,'manual-a')
+  const p=FakeAudioContext.instances[0].gains[4].gain,write=p.setTargetAtTime;let restoredWhileAudible=false
+  p.setTargetAtTime=function(value,...args){if(value===1&&outgoing.src&&!outgoing.paused)restoredWhileAudible=true;return write.call(this,value,...args)}
+  player.stop();await flush();assert.equal(restoredWhileAudible,false);assert.equal(outgoing.src,'');assert.equal(incoming.src,'');assert.equal(p.value,1)
+ }finally{Date.now=original}
+})
+test('sleep fade dispose releases actual media and graph before clearing attenuation',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();player.setSleepFadeDuration(10000);player.setSleepMinutes(1);atClock(player.sleepAt-5000,pulseAudioProgress)
+ const c=FakeAudioContext.instances[0],parameter=c.gains[4].gain,write=parameter.setTargetAtTime;let soundedAtReset=false
+ parameter.setTargetAtTime=function(value,...args){if(value===1&&outgoing.src&&!outgoing.paused)soundedAtReset=true;return write.call(this,value,...args)}
+ player.$dispose();assert.equal(soundedAtReset,false);assert.equal(outgoing.src,'');assert.equal(incoming.src,'');assert.equal(player.playing,false);assert.equal(c.state,'closed');assert.equal(c.gains[4].disconnected,true)
+})
+
+test('AB time input atomically enables a precise range without starting paused playback',async()=>{
+ const {player,outgoing}=await startManualQueue();player.setTransitionsEnabled(false);await player.toggle();const before=outgoing.playCalls
+ const context=player.loopEditContext();assert.ok(context)
+ player.applyLoopRange(context,1.125,3.375)
+ assert.equal(player.abLoop.a,1.125);assert.equal(player.abLoop.b,3.375);assert.equal(player.abLoop.enabled,true)
+ assert.equal(outgoing.currentTime,1.125);assert.equal(outgoing.playCalls,before);assert.equal(player.playing,false)
+})
+test('AB time input rejects bad ranges before canceling a pending manual target',async()=>{
+ const {player}=await startManualQueue();setLoopAt(player,FakeAudio.instances[0],5,10);const before={...player.abLoop},context=player.loopEditContext()
+ player.next();await flush();assert.ok(player.manualSwitchTarget)
+ for(const [a,b] of [[-1,3],[3,3.999],[2,181],[NaN,3],[4,3]])assert.throws(()=>player.applyLoopRange(context,a,b))
+ assert.deepEqual(player.abLoop,before);assert.ok(player.manualSwitchTarget)
+ player.applyLoopRange(context,4,8);assert.equal(player.manualSwitchTarget,null);assert.equal(player.abLoop.a,4)
+})
+test('AB time input rejects old playback generations even when full track identity matches',async()=>{
+ const {player,outgoing}=await startManualQueue();const context=player.loopEditContext()
+ await player.playTrackAt(0);outgoing.signalReady();await flush()
+ assert.throws(()=>player.applyLoopRange(context,1,3),/变更|失效/);assert.equal(player.abLoop,null)
+})
+test('AB time input revalidates current duration and sleep waiting without changing the old loop',async()=>{
+ const {player,outgoing}=await startManualQueue();setLoopAt(player,outgoing,5,10);const context=player.loopEditContext(),before={...player.abLoop}
+ outgoing.duration=8;pulseAudioProgress();assert.throws(()=>player.applyLoopRange(context,1,9));assert.deepEqual(player.abLoop,before)
+ player.sleepWaiting=true;assert.throws(()=>player.applyLoopRange(context,1,4));assert.deepEqual(player.abLoop,before)
+})
 
 test('AB loop progress returns to A without changing queue identity', async () => {
   const { player, outgoing } = await startManualQueue()

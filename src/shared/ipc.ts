@@ -189,6 +189,7 @@ export const IPC = {
   playlistRestoreApply: 'playlist:restore-apply',
   playlistRestoreDiscard: 'playlist:restore-discard',
   playlistCreate: 'playlist:create',
+  playlistCreateFromQueue: 'playlist:create-from-queue',
   playlistRemove: 'playlist:remove',
   playlistRemoveMany: 'playlist:remove-many',
   playlistRename: 'playlist:rename',

@@ -142,6 +142,8 @@ await build({
   ...shared,
   entryPoints: [
         join(repoRoot, 'src', 'shared', 'audio-engine.ts'),
+        join(repoRoot, 'src', 'shared', 'loop-time.ts'),
+        join(repoRoot, 'src', 'shared', 'queue-edit.ts'),
         join(repoRoot, 'src', 'shared', 'crossfade.ts'),
         join(repoRoot, 'src', 'shared', 'types.ts'),
         join(repoRoot, 'src', 'shared', 'playlist-bulk-rename.ts'),

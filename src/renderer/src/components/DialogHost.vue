@@ -46,7 +46,7 @@ const details = computed(() => {
   <div v-if="ui.dialog" class="dialog-backdrop" @keydown="trap" @mousedown.self="ui.finishDialog(null)" @keydown.esc.stop="ui.finishDialog(null)">
     <form class="salt-dialog" role="dialog" aria-modal="true" :aria-label="ui.dialog.title" @submit.prevent="submitDialog">
       <h2>{{ ui.dialog.title }}</h2><p v-if="ui.dialog.message">{{ ui.dialog.message }}</p>
-      <input v-if="ui.dialog.value !== undefined" ref="input" v-model="value" class="input" aria-label="名称" required maxlength="100" />
+      <input v-if="ui.dialog.value !== undefined" ref="input" v-model="value" class="input" aria-label="名称" required :maxlength="ui.dialog.maxLength ?? 100" />
       <footer><button class="btn" type="button" @click="ui.finishDialog(null)">取消</button><button class="btn btn--primary" type="submit">{{ ui.dialog.confirmLabel || '保存' }}</button></footer>
     </form>
   </div>

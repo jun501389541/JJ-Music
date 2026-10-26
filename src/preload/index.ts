@@ -415,6 +415,7 @@ const api = {
     exportJson: (id?: string) => invoke<PlaylistBackupResult | null>(IPC.playlistExportJson, id),
     list: () => invoke<Playlist[]>(IPC.playlistList),
     create: (name: string) => invoke<Playlist>(IPC.playlistCreate, name),
+    createFromQueue: (name:string,tracks:PlayableTrack[]) => invoke<import('@shared/queue-playlist').QueuePlaylistResult>(IPC.playlistCreateFromQueue,name,tracks),
     remove: (id: string) => invoke<void>(IPC.playlistRemove, id),
     removeMany: (ids:string[]) => invoke<number>(IPC.playlistRemoveMany,ids),
     rename: (id: string, name: string) => invoke<void>(IPC.playlistRename, id, name),

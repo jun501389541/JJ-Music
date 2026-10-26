@@ -92,6 +92,8 @@ export class WebAudioEngine implements AudioEngine {
   private filters: BiquadFilterNode[] = []
   private gain: GainNode | null = null
   private transitionGain: GainNode | null = null
+  private sleepGain: GainNode | null = null
+  private sleepLevel = 1
   private transition: GainTransition | null = null
   private transitionsEnabled = true
   private transportGeneration = 0
@@ -228,7 +230,11 @@ export class WebAudioEngine implements AudioEngine {
     const transitionGain = context.createGain()
     transitionGain.gain.value = 1
     gain.connect(transitionGain)
-    transitionGain.connect(analyser)
+    const sleepGain=context.createGain()
+    sleepGain.gain.value=this.sleepLevel
+    transitionGain.connect(sleepGain)
+    sleepGain.connect(analyser)
+    this.sleepGain=sleepGain
     this.transitionGain = transitionGain
     this.transition = new GainTransition(transitionGain.gain, () => context.currentTime)
     this.analyser = analyser
@@ -760,6 +766,14 @@ export class WebAudioEngine implements AudioEngine {
     return this.volume
   }
 
+  setSleepGain(value:number):void{
+    if(!Number.isFinite(value))return
+    const level=Math.max(0,Math.min(1,value))
+    if(level===this.sleepLevel)return
+    this.sleepLevel=level
+    if(this.sleepGain&&this.context)this.sleepGain.gain.setTargetAtTime(level,this.context.currentTime,0.015)
+  }
+
   setMuted(muted: boolean): void {
     this.muted = muted
     this.applyGain()
@@ -968,6 +982,8 @@ export class WebAudioEngine implements AudioEngine {
     this.filters.forEach((filter) => filter.disconnect())
     this.gain?.disconnect()
     this.transitionGain?.disconnect()
+    this.sleepGain?.disconnect()
+    this.sleepGain=null
     this.analyser?.disconnect()
     void this.context?.close().catch(() => undefined)
     this.context = null

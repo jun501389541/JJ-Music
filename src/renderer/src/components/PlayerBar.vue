@@ -39,6 +39,7 @@ onMounted(() => { statusTimer = setInterval(() => { statusNow.value = Date.now()
 onUnmounted(() => { if (statusTimer !== undefined) clearInterval(statusTimer) })
 const playbackStatus = computed(() => {
   const parts: string[] = []
+  if(player.sleepFading)parts.push('睡眠渐弱中')
   if (player.sleepWaiting) parts.push('播完当前曲后停止')
   else if (player.sleepAt) parts.push(`睡眠定时 ${Math.max(0, Math.ceil((player.sleepAt - statusNow.value) / 60000))} 分钟`)
   if (player.manualSwitchTarget) parts.push(`正在准备切换至 ${player.manualSwitchTarget.name}${player.manualSwitchQueueLabel ? ` · ${player.manualSwitchQueueLabel}` : ''}`)

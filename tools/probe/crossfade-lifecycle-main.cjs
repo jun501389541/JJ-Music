@@ -155,7 +155,14 @@ function setupProbe() {
     return Math.max(...values.slice(Math.max(0, bin - 2), Math.min(values.length, bin + 3)))
   }
   function snapshot() {
+    const samples=new Float32Array(state.analyser?.fftSize??32)
+    state.analyser?.getFloatTimeDomainData(samples)
+    const outputRms=Math.sqrt(samples.reduce((sum,v)=>sum+v*v,0)/samples.length)
     return {
+      outputRms,
+      volume:state.player?.volume??null,
+      sleepFading:state.player?.sleepFading??false,
+      contextStates:state.contexts.map(context=>context.state),
       currentIndex: state.player?.currentIndex ?? -1,
       currentId: state.player?.currentTrack?.id ?? null,
       playing: state.player?.playing ?? false,
@@ -166,6 +173,7 @@ function setupProbe() {
       queueIds: state.player?.queue.map(track => track.id) ?? [],
       historyIds: state.player?.queueHistory.map(entry => entry.queue.map(track => track.id)) ?? [],
       sleepWaiting: state.player?.sleepWaiting ?? false,
+      sleepAt:state.player?.sleepAt??null,
       loop: state.player?.abLoop ?? null,
       pendingId: state.player?.manualSwitchTarget?.id ?? null,
       curveSchedules: state.curves.slice(state.curveOffset),
@@ -552,6 +560,63 @@ app.whenReady().then(async () => {
   await finishCase('sleep-exits-AB-and-stops-at-natural-end', { loopExited: true, nextNotStarted: true, allDecksReleased: true })
   await reset()
 
+  await begin(['a', 'b'],0)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.setVolume(0.7);p.setSleepFadeDuration(5000);p.setSleepMode("immediate");p.setSleepMinutes(6.5/60)})()')
+  await sleep(1200)
+  const fadeEarly=await snapshot()
+  await sleep(1500)
+  const fadeMiddle=await snapshot()
+  await js('window.__crossfadeProbe.stageQueue(["b"],2000)')
+  await wait(async()=>{const s=await snapshot();return s.audio.filter(a=>!a.paused&&a.currentSrc).length===2?s:null},'sleep fade overlaps actual decks')
+  await sleep(1300)
+  const fadeLate=await snapshot()
+  assert.ok(fadeEarly.outputRms>0.01&&fadeMiddle.outputRms<fadeEarly.outputRms*0.9&&fadeLate.outputRms<fadeMiddle.outputRms*0.8,'sleep output energy decreases throughout the countdown and actual crossfade')
+  assert.ok(fadeLate.energy440>0&&fadeLate.energy880>0,'both tones remain present during attenuated overlap')
+  await js('window.__crossfadeProbe.player().setSleepMinutes(0)')
+  await sleep(250)
+  const fadeRecovered=await snapshot()
+  assert.ok(fadeRecovered.outputRms>fadeLate.outputRms*1.3,'cancel restores shared gain without changing user volume')
+  assert.equal(fadeRecovered.volume,0.7)
+  await js('window.__crossfadeProbe.player().setSleepMinutes(0.02)')
+  await wait(async()=>{const s=await snapshot();return !s.playing&&s.audio.every(a=>!a.src)?s:null},'sleep fade stops at rearmed deadline')
+  await sleep(100)
+  const fadeStopped=await snapshot()
+  assert.ok(fadeStopped.outputRms<0.001,'stopped output is silent')
+  await finishCase('sleep-countdown-energy-overlap-cancel-and-stop',{rms:[fadeEarly.outputRms,fadeMiddle.outputRms,fadeLate.outputRms],recoveredRms:fadeRecovered.outputRms,userVolume:fadeRecovered.volume,stoppedRms:fadeStopped.outputRms})
+  await reset()
+
+  await begin(['a','b'],0)
+  await sleep(200)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.setSleepFadeDuration(5000);p.setSleepMode("track-end");p.setSleepMinutes(0.0001)})()')
+  await wait(async()=>{const s=await snapshot();return s.sleepWaiting?s:null},'fade waits for whole track')
+  await js('window.__crossfadeProbe.player().seek(9)')
+  await sleep(250)
+  const tailNormal=await snapshot()
+  await js('window.__crossfadeProbe.player().setRate(2)')
+  await sleep(200)
+  const tailFast=await snapshot()
+  assert.ok(tailNormal.outputRms>0.01&&tailFast.outputRms<tailNormal.outputRms*0.8,'rate changes recompute wall-clock tail attenuation')
+  await js('window.__crossfadeProbe.player().seek(5)')
+  await sleep(200)
+  const tailSeek=await snapshot()
+  assert.ok(tailSeek.outputRms>tailFast.outputRms*1.5,'backward seek recomputes remaining tail')
+  await js('window.__crossfadeProbe.player().seek(11.6)')
+  const tailStop=await wait(async()=>{const s=await snapshot();return !s.playing&&s.audio.every(a=>!a.src)?s:null},'faded whole track stops without successor')
+  assert.equal(tailStop.currentId,'a')
+  await finishCase('sleep-whole-track-tail-rate-and-seek',{rmsNormal:tailNormal.outputRms,rmsAt2x:tailFast.outputRms,rmsAfterBackwardSeek:tailSeek.outputRms,allDecksReleased:true})
+  await reset()
+
+  await begin(['a'],0)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.setSleepFadeDuration(5000);p.setSleepMinutes(0.02)})()')
+  await sleep(100)
+  assert.equal((await snapshot()).sleepFading,true)
+  await js('window.__crossfadeProbe.dispose();void 0')
+  const disposedFade=await wait(async()=>{const s=await snapshot();return s.audio.every(a=>!a.src)&&s.contextStates.at(-1)==='closed'?s:null},'dispose releases attenuated media and context')
+  assert.equal(disposedFade.playing,false)
+  await wait(()=>activeMedia.size===0,'dispose releases attenuated media request')
+  await finishCase('sleep-fading-dispose-releases-graph',{allDecksReleased:true,contextClosed:true,activeMediaRequests:activeMedia.size})
+  await reset()
+
   await begin(['a', 'b'], 0)
   await js('(()=>{const p=window.__crossfadeProbe.player();p.seek(1);p.setLoopA();p.seek(3);p.setLoopB()})()')
   await wait(async () => {
@@ -597,6 +662,29 @@ app.whenReady().then(async () => {
   assert.ok(previousChoice.pendingId === 'skip-c' || previousChoice.currentId === 'skip-c', 'previous must retain the audible failed target instead of restarting the restored track')
   await waitForIndex(2, 'random previous plays the expected history entry')
   await finishCase('random-rollback-history-cursor', { outgoingRestored: true, audibleFailedTargetRetained: true, previousPlayedExpectedTrack: true })
+  await reset()
+
+  await begin(['a','b'],0)
+  await js('window.__crossfadeProbe.player().setSleepMinutes(1);window.__crossfadeProbe.stageQueue(["b","a","skip-c"],3000)')
+  await wait(async()=>{const s=await snapshot();return s.currentId==='b'&&s.audio.filter(a=>!a.paused&&a.src).length===2?s:null},'bulk edit begins during actual crossqueue overlap')
+  const beforeBulk=await snapshot(),beforeBulkClock=beforeBulk.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueEdit(p.queueEditContext(["online:wy:a","online:wy:b"]),"to-end")})()')
+  await sleep(100)
+  const afterBulk=await snapshot()
+  assert.deepEqual(afterBulk.queueIds,['skip-c','b','a'])
+  assert.equal(afterBulk.currentId,'b')
+  assert.equal(afterBulk.currentIndex,1)
+  assert.equal(afterBulk.audio.filter(a=>!a.paused&&a.src).length,1)
+  assert.ok(afterBulk.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime>=beforeBulkClock)
+  assert.equal(afterBulk.sleepAt,beforeBulk.sleepAt)
+  assert.deepEqual(afterBulk.historyIds,beforeBulk.historyIds)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueEdit(p.queueEditContext(["online:wy:a","online:wy:b"]),"remove")})()')
+  const removedBulk=await snapshot()
+  assert.deepEqual(removedBulk.queueIds,['skip-c'])
+  assert.equal(removedBulk.currentIndex,-1)
+  assert.equal(removedBulk.sleepAt,null)
+  assert.ok(removedBulk.audio.every(a=>a.paused&&!a.src))
+  await finishCase('queue-bulk-edit-during-native-handoff',{finalOrder:afterBulk.queueIds,currentPreserved:true,currentIndex:afterBulk.currentIndex,clockContinued:true,sleepPreservedOnMove:true,historyPreserved:true,currentRemovalReleasedBothDecks:true})
   await reset()
 
   // Stop must cancel a deliberately slow local media request and clear both element sources.

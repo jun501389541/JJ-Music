@@ -15,6 +15,7 @@ import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContextMenu from './components/ContextMenu.vue'
 import DialogHost from './components/DialogHost.vue'
+import LoopRangeDialog from './components/LoopRangeDialog.vue'
 import { useUiStore } from './stores/ui'
 import { useToastStore } from './stores/toast'
 import TitleBar from './components/TitleBar.vue'
@@ -566,7 +567,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
 /** Global shortcuts, mirroring the conveniences of a desktop player. */
 function onKeydown(event: KeyboardEvent): void {
   if (ui.localRelinkBusy) { event.preventDefault(); return }
-  if (ui.menu || ui.dialog || ui.trackInfo || ui.matchTrack) return
+  if (ui.menu || ui.dialog || ui.loopRangeEdit || ui.trackInfo || ui.matchTrack) return
   // A focused control already handled this key (for example a slider arrow).
   if (event.defaultPrevented) return
   if (event.key === 'F11') { event.preventDefault(); void window.jj.window.fullscreen(); return }
@@ -678,6 +679,7 @@ const contentKey = computed(() => route.path)
 
     <ContextMenu />
     <DialogHost />
+    <LoopRangeDialog v-if="ui.loopRangeEdit" :context="ui.loopRangeEdit" @close="ui.loopRangeEdit=null" />
     <PlaybackPanel />
     <!--
       Mounts once here rather than inside the playback page: the cover has to

@@ -211,6 +211,56 @@ test('only the promoted deck emits active progress and ended events', async () =
   }
 })
 
+test('an asynchronous zero-duration handoff commits started before completion cleanup', async () => {
+  const engine = makeEngine()
+  try {
+    const outgoing = await loadActive(engine)
+    const { token, incoming } = await prepare(engine)
+    let releasePlay = () => {}
+    incoming.play = () => {
+      incoming.paused = false
+      incoming.ended = false
+      incoming.readyState = 4
+      return new Promise((resolve) => { releasePlay = () => resolve() })
+    }
+    const operation = engine.crossfadeTo(token, 0)
+    const events = []
+    void operation.started.then(() => events.push('started'))
+    void operation.completed.then(() => events.push('completed'))
+
+    incoming.dispatchEvent(new Event('playing'))
+    releasePlay()
+    await operation.started
+    await operation.completed
+    assert.deepEqual(events, ['started', 'completed'])
+    assert.equal(outgoing.src, '')
+    assert.equal(incoming.src, 'test://incoming')
+    assert.equal(engine.isPlaying(), true)
+  } finally {
+    engine.destroy()
+  }
+})
+
+test('a zero-duration incoming play failure before playing preserves the outgoing deck', async () => {
+  const engine = makeEngine()
+  try {
+    const outgoing = await loadActive(engine)
+    outgoing.currentTime = 41
+    const { token, incoming } = await prepare(engine)
+    incoming.play = async () => { throw new DOMException('incoming denied', 'NotAllowedError') }
+    const operation = engine.crossfadeTo(token, 0)
+    await assert.rejects(operation.started, /incoming denied/)
+    await operation.completed
+    assert.equal(outgoing.src, 'test://active')
+    assert.equal(outgoing.paused, false)
+    assert.equal(engine.getCurrentTime(), 41)
+    assert.equal(engine.isPlaying(), true)
+    assert.equal(incoming.src, '')
+  } finally {
+    engine.destroy()
+  }
+})
+
 test('incoming failure after audible handoff restores the outgoing deck and rejects completion', async () => {
   const engine = makeEngine()
   try {

@@ -151,7 +151,7 @@ function movePage(nextPage: number): void {
 }
 
 async function playAt(_track: PlayableTrack, index: number): Promise<void> {
-  await player.playQueue(tracks.value, index, `${platformLabel.value} · ${title.value}`)
+  await player.playUserQueue(tracks.value, index, `${platformLabel.value} · ${title.value}`)
 }
 
 watch(

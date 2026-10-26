@@ -47,7 +47,10 @@ interface ResolvedSource extends PlaybackUrlTimes {
   ephemeral: boolean
 }
 
+interface LoopRange { key: string; a: number; b: number | null; enabled: boolean }
+
 interface OutgoingPlaybackSnapshot {
+  abLoop: LoopRange | null
   track: PlayableTrack
   key: string
   index: number
@@ -76,7 +79,28 @@ interface OutgoingPlaybackSnapshot {
   mayRetryUrl: boolean
 }
 
+interface QueuePlaybackSnapshot {
+  queue: PlayableTrack[]
+  history: QueueSnapshot[]
+  label: string
+  mode: PlayMode
+  audition: boolean
+  randomPool: string[]
+  randomHistory: string[]
+}
+interface QueueChange {
+  tracks: PlayableTrack[]
+  label: string
+  mode: PlayMode
+  audition: boolean
+  outgoing: QueuePlaybackSnapshot
+}
+
 interface CrossfadeReservation {
+  queueChange?: QueueChange
+  origin?: 'automatic' | 'manual'
+  durationMs?: number
+  historyBack?: boolean
   generation: number
   queueRevision: number
   outgoingKey: string
@@ -131,6 +155,8 @@ export const usePlayerStore = defineStore('player', () => {
   const volume = ref(0.8)
   const transitionsEnabled = ref(true)
   const crossfadeDurationMs = ref(0)
+  const manualCrossfadeDurationMs = ref(0)
+  const abLoop = shallowRef<LoopRange | null>(null)
   let pausePending = false
   let toggleGeneration = 0
   const muted = ref(false)
@@ -229,12 +255,14 @@ export const usePlayerStore = defineStore('player', () => {
       if (!isLoadedCurrentTrack()) return
       currentTime.value = time
       duration.value = total
+      if (checkSleepDeadline()) return
       // Throttled inside `snapshotSession`; the call itself is cheap.
       snapshotSession()
       if (suppressSeekProgressReservation) {
         suppressSeekProgressReservation = false
         return
       }
+      if (handleLoopBoundary(time)) return
       maybeReserveCrossfade(time, total)
     })
     instance.on('ready', (total) => {
@@ -243,6 +271,11 @@ export const usePlayerStore = defineStore('player', () => {
       loading.value = false
     })
     instance.on('playing', () => {
+      // The incoming deck can emit playing synchronously inside crossfadeTo,
+      // before its operation handle is returned. Commit through started first;
+      // only that identity may own a simultaneous sleep deadline.
+      const reservation = crossfadeReservation
+      if (reservation && !reservation.handedOff && (reservation.starting || reservation.operation)) return
       const confirmedTrack = currentTrack.value
       if (!confirmedTrack || !isLoadedCurrentTrack()) return
       recordAudibleTrack(confirmedTrack, playGeneration)
@@ -251,6 +284,7 @@ export const usePlayerStore = defineStore('player', () => {
       waiting.value = false
       // Audio is flowing again, so the stall watchdog has nothing to watch.
       clearStallTimer()
+      if (checkSleepDeadline()) return
       maybeReserveCrossfade(instance.getCurrentTime(), instance.getDuration())
     })
     instance.on('paused', () => {
@@ -343,6 +377,14 @@ export const usePlayerStore = defineStore('player', () => {
   let playGeneration = 0
   let queueRevision = 0
   let crossfadeReservation: CrossfadeReservation | null = null
+  const manualSwitchTarget = shallowRef<PlayableTrack | null>(null)
+  const manualSwitchQueueLabel = ref<string | null>(null)
+  const manualSwitchFailure = shallowRef<{ sequence: number; message: string } | null>(null)
+  let manualNavigation: string[] = []
+  let manualDraws: string[] = []
+  let manualFailureSequence = 0
+  let failedManualGeneration = -1
+  const failedManualTargets = new Set<string>()
   let lyricGeneration = 0
   let lyricAbort: AbortController | null = null
   let failureGeneration = -1
@@ -409,6 +451,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   function captureOutgoingSnapshot(track: PlayableTrack, index: number): OutgoingPlaybackSnapshot {
     return {
+      abLoop: abLoop.value ? { ...abLoop.value } : null,
       track,
       key: playlistEntryKey(track),
       index,
@@ -439,14 +482,14 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function reservationFitsCurrentQueue(reservation: CrossfadeReservation): boolean {
-    if (singleTrackAudition.value || playMode.value === 'single' || queue.value.length < 2) return false
+    if (reservation.origin !== 'manual' && (singleTrackAudition.value || playMode.value === 'single' || queue.value.length < 2)) return false
     const current = currentTrack.value
     if (!current || playlistEntryKey(current) !== reservation.outgoingKey) return false
     const currentIndexInQueue = queue.value.findIndex(track => playlistEntryKey(track) === reservation.outgoingKey)
-    const selectedIndex = queue.value.findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
+    const selectedIndex = (reservation.queueChange?.tracks ?? queue.value).findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
     if (currentIndexInQueue < 0 || selectedIndex < 0 || reservation.selectedKey === reservation.outgoingKey) return false
-    if (playMode.value === 'list' && currentIndexInQueue === queue.value.length - 1) return false
-    if (playMode.value !== 'random') {
+    if (reservation.origin !== 'manual' && playMode.value === 'list' && currentIndexInQueue === queue.value.length - 1) return false
+    if (reservation.origin !== 'manual' && playMode.value !== 'random') {
       const expected = playMode.value === 'list' && currentIndexInQueue === queue.value.length - 1
         ? -1
         : (currentIndexInQueue + 1) % queue.value.length
@@ -461,7 +504,7 @@ export const usePlayerStore = defineStore('player', () => {
     queueRevision += 1
     const reservation = crossfadeReservation
     if (!reservation) return
-    if (reservation.handedOff || !reservationFitsCurrentQueue(reservation)) {
+    if (reservation.queueChange || reservation.handedOff || !reservationFitsCurrentQueue(reservation)) {
       cancelCrossfadeReservation()
       return
     }
@@ -485,19 +528,39 @@ export const usePlayerStore = defineStore('player', () => {
     reservation.disabled = disabled
   }
 
-  function cancelCrossfadeReservation(restoreRandomSelection = true): void {
+  function returnManualDraws(audibleKey?: string): void {
+    const unused = [...new Set(manualDraws)].filter(key => key !== audibleKey &&
+      queue.value.some(track => playlistEntryKey(track) === key))
+    randomPool = [...unused, ...randomPool.filter(key => key !== audibleKey && !unused.includes(key))]
+    manualDraws = []
+    manualNavigation = []
+  }
+
+  function cancelCrossfadeReservation(restoreRandomSelection = true, preserveManualChain = false): void {
     const reservation = crossfadeReservation
     if (!reservation) return
     crossfadeReservation = null
+    manualSwitchTarget.value = null
+    manualSwitchQueueLabel.value = null
     reservation.resolutionController?.abort()
     if (reservation.handedOff) reservation.operation?.finish()
     else reservation.operation?.cancel()
     if (reservation.prepared) engine.value?.discardPreparedTrack?.(reservation.prepared)
-    if (restoreRandomSelection && !reservation.handedOff && playMode.value === 'random' &&
+    if (!preserveManualChain && reservation.origin === 'manual') returnManualDraws(reservation.handedOff || !restoreRandomSelection ? reservation.selectedKey : reservation.outgoingKey)
+    if (restoreRandomSelection && reservation.origin !== 'manual' && !reservation.handedOff && playMode.value === 'random' &&
       queue.value.some(track => playlistEntryKey(track) === reservation.selectedKey) &&
       !randomPool.includes(reservation.selectedKey)) {
       randomPool.unshift(reservation.selectedKey)
     }
+  }
+
+  function failManualReservation(reservation: CrossfadeReservation): void {
+    if (reservation.origin !== 'manual' || crossfadeReservation !== reservation) return
+    if (failedManualGeneration !== playGeneration) failedManualTargets.clear()
+    failedManualGeneration = playGeneration
+    failedManualTargets.add(reservation.selectedKey)
+    manualSwitchFailure.value = { sequence: ++manualFailureSequence, message: `未能切换至 ${reservation.track.name}，当前歌曲继续播放` }
+    cancelCrossfadeReservation()
   }
 
   function invalidateReservationForSeek(): void {
@@ -506,6 +569,10 @@ export const usePlayerStore = defineStore('player', () => {
     if (reservation.handedOff) {
       reservation.operation?.finish()
       crossfadeReservation = null
+      return
+    }
+    if (reservation.origin === 'manual') {
+      cancelCrossfadeReservation()
       return
     }
     // Keep the already selected queue identity so a random pass is not drawn a
@@ -561,6 +628,7 @@ export const usePlayerStore = defineStore('player', () => {
         if (crossfadeReservation === reservation && reservation.resolutionController === controller && !controller.signal.aborted) {
           reservation.failed = true
           reservation.prepared = undefined
+          failManualReservation(reservation)
         }
       } finally {
         if (reservation.resolutionController === controller) {
@@ -572,7 +640,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function commitCrossfadeHandoff(reservation: CrossfadeReservation, instance: AudioEngine): void {
-    const selectedIndex = queue.value.findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
+    const selectedIndex = (reservation.queueChange?.tracks ?? queue.value).findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
     if (crossfadeReservation !== reservation || selectedIndex < 0 ||
       reservation.queueRevision !== queueRevision || reservation.generation !== playGeneration ||
       !reservationFitsCurrentQueue(reservation)) {
@@ -580,12 +648,32 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
 
+    if (reservation.queueChange) {
+      const change = reservation.queueChange
+      flushSession()
+      rememberQueue(change.tracks)
+      queue.value = change.tracks
+      queueLabel.value = change.label
+      playMode.value = change.mode
+      singleTrackAudition.value = change.audition
+      resetRandomPass()
+      queueRevision += 1
+    }
     reservation.handedOff = true
+    clearLoop()
+    manualSwitchTarget.value = null
+    manualSwitchQueueLabel.value = null
+    if (reservation.origin === 'manual') returnManualDraws(reservation.selectedKey)
     playGeneration += 1
     reservation.generation = playGeneration
     reservation.queueRevision = queueRevision
     currentIndex.value = selectedIndex
-    if (playMode.value === 'random') rememberRandomDraw(reservation.selectedKey)
+    if (playMode.value === 'random') {
+      if (reservation.historyBack) {
+        const index = randomHistory.lastIndexOf(reservation.selectedKey)
+        if (index >= 0) randomHistory = randomHistory.slice(0, index + 1)
+      } else rememberRandomDraw(reservation.selectedKey)
+    }
     loadedTrackId = reservation.track.id
     loadedTrackKey = reservation.selectedKey
     loadedMediaUrl = reservation.source?.url ?? null
@@ -612,21 +700,39 @@ export const usePlayerStore = defineStore('player', () => {
     clearStallTimer()
     if (playing.value) armStallTimer(playGeneration)
     void loadLyrics(reservation.track)
+    if (checkSleepDeadline()) return
+    if (reservation.queueChange) flushSession()
   }
 
   function rollbackCrossfadeHandoff(reservation: CrossfadeReservation, instance: AudioEngine): void {
     if (crossfadeReservation !== reservation || !reservation.handedOff ||
       playGeneration !== reservation.generation || loadedTrackKey !== reservation.selectedKey) return
+    if (reservation.queueChange) {
+      const savedQueue = reservation.queueChange.outgoing
+      queue.value = savedQueue.queue
+      queueHistory.value = savedQueue.history
+      queueLabel.value = savedQueue.label
+      playMode.value = savedQueue.mode
+      singleTrackAudition.value = savedQueue.audition
+      randomPool = [...savedQueue.randomPool]
+      randomHistory = [...savedQueue.randomHistory]
+      queueRevision += 1
+      persistQueueHistory()
+    }
     const outgoingIndex = queue.value.findIndex(track => playlistEntryKey(track) === reservation.outgoingKey)
     if (outgoingIndex < 0) {
       crossfadeReservation = null
       return
     }
     const saved = reservation.outgoing
+    abLoop.value = saved.abLoop ? { ...saved.abLoop, enabled: saved.abLoop.enabled && !sleepWaiting.value } : null
     playGeneration += 1
     lyricGeneration += 1
     lyricAbort?.abort()
     currentIndex.value = outgoingIndex
+    // Keep the restored current track at the shuffle cursor while retaining
+    // the incoming track that really played before the failed transition.
+    if (playMode.value === 'random') rememberRandomDraw(saved.key)
     loadedTrackId = saved.loadedTrackId
     loadedTrackKey = saved.key
     loadedMediaUrl = saved.loadedMediaUrl
@@ -652,7 +758,9 @@ export const usePlayerStore = defineStore('player', () => {
     mayRetryUrl = saved.mayRetryUrl
     failureGeneration = -1
     recordedGeneration = playGeneration
+    failManualReservation(reservation)
     crossfadeReservation = null
+    if (reservation.queueChange) flushSession()
     clearStallTimer()
     if (playing.value) armStallTimer(playGeneration)
     if (!saved.lyrics && saved.lyricLoading) {
@@ -673,17 +781,22 @@ export const usePlayerStore = defineStore('player', () => {
       reservation.prepared = undefined
       reservation.source = undefined
       reservation.failed = true
+      failManualReservation(reservation)
       return
     }
     const playbackRate = Math.max(0.25, Math.min(4, rate.value))
     const remainingMs = (instance.getDuration() - instance.getCurrentTime()) * 1_000 / playbackRate
-    if (!Number.isFinite(remainingMs) || remainingMs > crossfadeDurationMs.value) return
-    const transitionMs = Math.min(
-      crossfadeDurationMs.value,
+    const manual = reservation.origin === 'manual'
+    if (!manual && (!Number.isFinite(remainingMs) || remainingMs > crossfadeDurationMs.value)) return
+    let transitionMs = Math.min(
+      manual ? reservation.durationMs! : crossfadeDurationMs.value,
       remainingMs,
       reservation.prepared.durationSeconds * 1_000 / playbackRate
     )
-    if (!Number.isFinite(transitionMs) || transitionMs < 1_000) return
+    if (!Number.isFinite(transitionMs) || transitionMs < 1_000) {
+      if (!manual) return
+      transitionMs = 0
+    }
 
     const prepared = reservation.prepared
     let operation: CrossfadeOperation
@@ -698,6 +811,7 @@ export const usePlayerStore = defineStore('player', () => {
       instance.discardPreparedTrack?.(prepared)
       reservation.prepared = undefined
       reservation.failed = true
+      failManualReservation(reservation)
       return
     }
     reservation.starting = false
@@ -706,10 +820,11 @@ export const usePlayerStore = defineStore('player', () => {
     void operation.started.then(() => {
       if (crossfadeReservation !== reservation || reservation.operation !== operation) return
       commitCrossfadeHandoff(reservation, instance)
-    }).catch(() => {
+    }, () => {
       if (crossfadeReservation !== reservation || reservation.operation !== operation) return
       reservation.operation = undefined
       reservation.failed = true
+      failManualReservation(reservation)
     })
     void operation.completed.then(() => {
       if (crossfadeReservation === reservation && reservation.operation === operation) crossfadeReservation = null
@@ -719,6 +834,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function maybeReserveCrossfade(time: number, total: number): void {
+    if (crossfadeReservation?.origin === 'manual' || abLoop.value?.enabled || sleepWaiting.value) return
     const instance = engine.value
     const outgoing = currentTrack.value
     const configuredMs = crossfadeDurationMs.value
@@ -750,7 +866,7 @@ export const usePlayerStore = defineStore('player', () => {
         track: selected,
         outgoing: captureOutgoingSnapshot(outgoing, currentIndex.value),
         resolving: false,
-        failed: false,
+        failed: failedManualGeneration === playGeneration && failedManualTargets.has(playlistEntryKey(selected)),
         handedOff: false,
         disabled: false,
         starting: false
@@ -765,6 +881,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function handlePlaybackError(err: Error): void {
+    if (sleepWaiting.value) { stop(); error.value = err.message; return }
     if(err instanceof MediaPlaybackError&&err.failure.code==='cancelled')return
     if (failureGeneration === playGeneration) return
     failureGeneration = playGeneration
@@ -850,6 +967,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (index < 0 || index >= queue.value.length) return
     if (localRelinkBusy) return
     const selectedKey = playlistEntryKey(queue.value[index])
+    clearLoop()
     cancelCrossfadeReservation(crossfadeReservation?.selectedKey !== selectedKey)
     const manualRetry=options.retryUrl!==false&&!!error.value
     const generation = ++playGeneration
@@ -1032,7 +1150,7 @@ export const usePlayerStore = defineStore('player', () => {
       // Hold the track now playing out of a fresh pass so two passes cannot meet
       // at the same song — the one repeat a shuffled walk should never show.
       const current = currentTrack.value ? playlistEntryKey(currentTrack.value) : undefined
-      randomPool = shuffled(tracks.map(playlistEntryKey).filter((id) => id !== current))
+      randomPool = shuffled(tracks.map(playlistEntryKey).filter((id) => id !== current && !manualDraws.includes(id)))
     }
     const positions = new Map(tracks.map((track, index) => [playlistEntryKey(track), index]))
     while (randomPool.length > 0) {
@@ -1056,6 +1174,50 @@ export const usePlayerStore = defineStore('player', () => {
     return -1
   }
 
+  async function playUserQueue(
+    tracks: PlayableTrack[], startIndex = 0, label = '',
+    options: { playMode?: PlayMode; singleTrackAudition?: boolean } = {}
+  ): Promise<void> {
+    if (localRelinkBusy || !Number.isInteger(startIndex) || !tracks[startIndex]) return
+    if (sleepWaiting.value) cancelSleepTimer()
+    const list = toIpcPayload(tracks)
+    cancelCrossfadeReservation()
+    const outgoing = currentTrack.value
+    if (!canPrepareManual() || !outgoing || playlistEntryKey(list[startIndex]) === playlistEntryKey(outgoing)) {
+      await playQueue(list, startIndex, label, options)
+      return
+    }
+    const track = list[startIndex]
+    const change: QueueChange = {
+      tracks: list, label, mode: options.playMode ?? playMode.value,
+      audition: options.singleTrackAudition === true,
+      outgoing: {
+        queue: [...queue.value], history: toIpcPayload(queueHistory.value), label: queueLabel.value,
+        mode: playMode.value, audition: singleTrackAudition.value,
+        randomPool: [...randomPool], randomHistory: [...randomHistory]
+      }
+    }
+    const reservation: CrossfadeReservation = {
+      origin: 'manual', queueChange: change, durationMs: manualCrossfadeDurationMs.value,
+      generation: playGeneration, queueRevision,
+      outgoingKey: playlistEntryKey(outgoing), selectedKey: playlistEntryKey(track), index: startIndex,
+      track, outgoing: captureOutgoingSnapshot(outgoing, currentIndex.value),
+      resolving: false, failed: false, handedOff: false, disabled: false, starting: false
+    }
+    crossfadeReservation = reservation
+    manualSwitchTarget.value = track
+    manualSwitchQueueLabel.value = label
+    manualSwitchFailure.value = null
+    beginReservationPreparation(reservation)
+  }
+
+  async function playStagedQueueLegacy(reservation: CrossfadeReservation): Promise<void> {
+    const change = reservation.queueChange!
+    const index = change.tracks.findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
+    cancelCrossfadeReservation(false)
+    await playQueue(change.tracks, index, change.label, { playMode: change.mode, singleTrackAudition: change.audition })
+  }
+
   async function playQueue(
     tracks: PlayableTrack[],
     startIndex = 0,
@@ -1063,6 +1225,7 @@ export const usePlayerStore = defineStore('player', () => {
     options: { playMode?: PlayMode; singleTrackAudition?: boolean } = {}
   ): Promise<void> {
     if (localRelinkBusy) return
+    if (tracks[startIndex] && sleepWaiting.value) cancelSleepTimer()
     cancelCrossfadeReservation()
     queueRevision += 1
     rememberQueue(tracks)
@@ -1120,6 +1283,10 @@ export const usePlayerStore = defineStore('player', () => {
     // "play this whole list", so there is no repeated megabyte-scale write to
     // throttle away. The queue is copied through JSON because a Vue proxy
     // cannot cross IPC - the same reason `writeSession` does it.
+    persistQueueHistory()
+  }
+
+  function persistQueueHistory(): void {
     const storedHistory = queueHistory.value.map(entry => ({
       ...entry,
       queue: stripScriptCoverDataFromTracks(entry.queue)
@@ -1166,6 +1333,7 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
     if (playing.value && !pausePending) {
+      if (crossfadeReservation?.origin === 'manual' && !crossfadeReservation.handedOff) cancelCrossfadeReservation()
       playbackAutoplay = false
       pausePending = true
       try { await instance.pause(transitionsEnabled.value ? PAUSE_FADE_MS : 0) }
@@ -1177,10 +1345,85 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  function canPrepareManual(): boolean {
+    return manualCrossfadeDurationMs.value >= 1000 && !!engine.value?.capabilities.crossfade &&
+      playing.value && !loading.value && !waiting.value && isLoadedCurrentTrack()
+  }
+
+  async function playQueueEntry(index: number): Promise<void> {
+    if (Number.isInteger(index) && index >= 0 && index < queue.value.length && sleepWaiting.value) cancelSleepTimer()
+    await requestQueueEntry(index, false)
+  }
+
+  async function requestQueueEntry(index: number, navigating: boolean): Promise<void> {
+    if (localRelinkBusy || !Number.isInteger(index) || index < 0 || index >= queue.value.length) return
+    const track = queue.value[index]
+    const outgoing = currentTrack.value
+    if (!canPrepareManual() || !outgoing || playlistEntryKey(track) === playlistEntryKey(outgoing)) {
+      await playTrackAt(index)
+      return
+    }
+    if (crossfadeReservation?.queueChange && !crossfadeReservation.handedOff) cancelCrossfadeReservation()
+    const existing = crossfadeReservation
+    // Release the previous request before seeding the new navigation chain:
+    // cancellation also returns draws and clears its old cursor.
+    if (existing?.handedOff || (!navigating && existing?.selectedKey !== playlistEntryKey(track))) cancelCrossfadeReservation()
+    if (!navigating) {
+      returnManualDraws(playlistEntryKey(outgoing))
+      manualNavigation = [playlistEntryKey(track)]
+    }
+    if (crossfadeReservation?.selectedKey === playlistEntryKey(track)) {
+      const reservation = crossfadeReservation
+      if (playMode.value === 'random' && !manualDraws.includes(reservation.selectedKey)) manualDraws.push(reservation.selectedKey)
+      reservation.origin = 'manual'
+      reservation.durationMs = manualCrossfadeDurationMs.value
+      reservation.outgoing = captureOutgoingSnapshot(outgoing, currentIndex.value)
+      reservation.disabled = false
+      reservation.failed = false
+      manualSwitchTarget.value = track
+      beginReservationPreparation(reservation)
+      maybeStartReservedCrossfade(reservation)
+      return
+    }
+    cancelCrossfadeReservation(!navigating, navigating)
+    const reservation: CrossfadeReservation = {
+      origin: 'manual', durationMs: manualCrossfadeDurationMs.value,
+      generation: playGeneration, queueRevision,
+      outgoingKey: playlistEntryKey(outgoing), selectedKey: playlistEntryKey(track),
+      index, track, outgoing: captureOutgoingSnapshot(outgoing, currentIndex.value),
+      resolving: false, failed: false, handedOff: false, disabled: false, starting: false
+    }
+    crossfadeReservation = reservation
+    manualSwitchFailure.value = null
+    manualSwitchTarget.value = track
+    beginReservationPreparation(reservation)
+  }
+
   async function next(): Promise<void> {
     if (localRelinkBusy) return
     if (queue.value.length === 0) return
+    if (crossfadeReservation?.queueChange && !crossfadeReservation.handedOff) cancelCrossfadeReservation()
+    if (sleepWaiting.value) cancelSleepTimer()
+    if (crossfadeReservation?.handedOff && canPrepareManual()) cancelCrossfadeReservation()
     const reservation = crossfadeReservation
+    if (canPrepareManual()) {
+      const pendingIndex = reservation?.origin === 'manual' && !reservation.handedOff ? reservation.index : currentIndex.value
+      const index = reservation && reservation.origin !== 'manual' && !reservation.handedOff
+        ? reservation.index
+        : playMode.value === 'random' ? randomNextIndex() : (pendingIndex + 1) % queue.value.length
+      if (index < 0) return
+      if (playMode.value === 'random' && index === currentIndex.value && reservation?.origin === 'manual') return
+      const key = playlistEntryKey(queue.value[index])
+      manualNavigation.push(key)
+      if (playMode.value === 'random' && !manualDraws.includes(key)) manualDraws.push(key)
+      if (index === currentIndex.value) {
+        if (reservation) cancelCrossfadeReservation()
+        else { returnManualDraws(key); await playTrackAt(index) }
+        return
+      }
+      await requestQueueEntry(index, true)
+      return
+    }
     if (reservation && !reservation.handedOff && reservationFitsCurrentQueue(reservation)) {
       const reservedIndex = queue.value.findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
       if (reservedIndex >= 0) {
@@ -1196,12 +1439,32 @@ export const usePlayerStore = defineStore('player', () => {
   async function previous(): Promise<void> {
     if (localRelinkBusy) return
     if (queue.value.length === 0) return
+    if (crossfadeReservation?.queueChange && !crossfadeReservation.handedOff) cancelCrossfadeReservation()
+    if (sleepWaiting.value) cancelSleepTimer()
+    const reservation = crossfadeReservation
+    if (reservation?.origin === 'manual' && !reservation.handedOff) {
+      manualNavigation.pop()
+      const key = manualNavigation[manualNavigation.length - 1] ?? reservation.outgoingKey
+      if (key === reservation.outgoingKey) { cancelCrossfadeReservation(); return }
+      const index = queue.value.findIndex(track => playlistEntryKey(track) === key)
+      if (index >= 0) await requestQueueEntry(index, true)
+      return
+    }
     // Restart the current track first, matching every mainstream player.
     if (currentTime.value > 3) {
       seek(0)
       return
     }
-    await playTrackAt(pickNextIndex(-1))
+    if (canPrepareManual() && playMode.value === 'random') {
+      const previousKey = randomHistory.length > 1 ? randomHistory[randomHistory.length - 2] : undefined
+      const index = previousKey ? queue.value.findIndex(track => playlistEntryKey(track) === previousKey) : -1
+      if (index >= 0) {
+        await playQueueEntry(index)
+        if (crossfadeReservation?.origin === 'manual') crossfadeReservation.historyBack = true
+        return
+      }
+    }
+    await playQueueEntry(pickNextIndex(-1))
   }
 
   /** Resolve the next index honouring the play mode and shuffle order. */
@@ -1218,6 +1481,20 @@ export const usePlayerStore = defineStore('player', () => {
 
   async function handleEnded(): Promise<void> {
     if (localRelinkBusy) return
+    if (checkSleepDeadline()) return
+    if (sleepWaiting.value) { stop(); return }
+    if (handleLoopBoundary(duration.value, true)) return
+    const manual = crossfadeReservation
+    if (manual?.queueChange && !manual.handedOff && reservationFitsCurrentQueue(manual)) {
+      await playStagedQueueLegacy(manual)
+      return
+    }
+    if (manual?.origin === 'manual' && !manual.handedOff && reservationFitsCurrentQueue(manual)) {
+      const index = queue.value.findIndex(track => playlistEntryKey(track) === manual.selectedKey)
+      cancelCrossfadeReservation(false)
+      if (index >= 0) await playTrackAt(index, { transition: false })
+      return
+    }
     if (singleTrackAudition.value && queue.value.length === 1) {
       playing.value = false
       return
@@ -1250,10 +1527,67 @@ export const usePlayerStore = defineStore('player', () => {
     await playTrackAt(pickNextIndex(1), { transition: false })
   }
 
+  function clearLoop(): void {
+    abLoop.value = null
+    // A user can clear the outgoing loop while the next track is preparing.
+    // Keep that choice in its rollback snapshot without cancelling the song.
+    // Handoff marks handedOff first, so its internal reset preserves the backup.
+    if (crossfadeReservation && !crossfadeReservation.handedOff) crossfadeReservation.outgoing.abLoop = null
+  }
+
+  function loopEndpointReady(): boolean {
+    if (sleepWaiting.value) { useToastStore().info('请先取消睡眠等待'); return false }
+    if (!currentTrack.value || !isLoadedCurrentTrack() || !Number.isFinite(duration.value) || duration.value <= 0) {
+      useToastStore().info('当前歌曲无法设置片段循环')
+      return false
+    }
+    if (crossfadeReservation?.handedOff) cancelCrossfadeReservation()
+    return true
+  }
+
+  function setLoopA(): void {
+    if (!loopEndpointReady()) return
+    cancelCrossfadeReservation()
+    abLoop.value = { key: playlistEntryKey(currentTrack.value!), a: currentTime.value, b: null, enabled: false }
+  }
+
+  function setLoopB(): void {
+    if (!loopEndpointReady()) return
+    const loop = abLoop.value
+    if (!loop || loop.key !== playlistEntryKey(currentTrack.value!) || currentTime.value - loop.a < 1 || currentTime.value > duration.value) {
+      useToastStore().info('A、B 之间至少需要 1 秒')
+      return
+    }
+    cancelCrossfadeReservation()
+    abLoop.value = { ...loop, b: currentTime.value, enabled: true }
+  }
+
+  function setLoopEnabled(enabled: boolean): void {
+    const loop = abLoop.value
+    if (!loop || loop.b === null || !loopEndpointReady() || loop.key !== playlistEntryKey(currentTrack.value!)) return
+    cancelCrossfadeReservation()
+    abLoop.value = { ...loop, enabled }
+    if (enabled && (currentTime.value < loop.a || currentTime.value >= loop.b)) seek(loop.a)
+  }
+
+  function handleLoopBoundary(time: number, ended = false): boolean {
+    const loop = abLoop.value
+    if (!loop?.enabled || loop.b === null || !currentTrack.value || loop.key !== playlistEntryKey(currentTrack.value) ||
+      crossfadeReservation?.origin === 'manual' || (!ended && (!playing.value || time < loop.b))) return false
+    suppressSeekProgressReservation = true
+    engine.value?.seek(loop.a)
+    suppressSeekProgressReservation = false
+    currentTime.value = loop.a
+    if (ended) void engine.value?.play().catch(() => undefined)
+    return true
+  }
+
   function seek(time: number): void {
     if (localRelinkBusy) return
     if (!Number.isFinite(time)) return
     const clamped = Math.max(0, Math.min(time, duration.value || 0))
+    const loop = abLoop.value
+    if (loop?.enabled && loop.b !== null && (clamped < loop.a || clamped >= loop.b)) abLoop.value = { ...loop, enabled: false }
     invalidateReservationForSeek()
     suppressSeekProgressReservation = true
     engine.value?.seek(clamped)
@@ -1282,11 +1616,22 @@ export const usePlayerStore = defineStore('player', () => {
     engine.value?.setTransitionsEnabled?.(enabled)
   }
 
+  function setManualCrossfadeDuration(value: number): void {
+    manualCrossfadeDurationMs.value = normalizeCrossfadeDurationMs(value)
+    const reservation = crossfadeReservation
+    if (manualCrossfadeDurationMs.value !== 0 || reservation?.origin !== 'manual') return
+    if (reservation.queueChange && !reservation.handedOff) { void playStagedQueueLegacy(reservation); return }
+    const index = queue.value.findIndex(track => playlistEntryKey(track) === reservation.selectedKey)
+    const handedOff = reservation.handedOff
+    cancelCrossfadeReservation(false)
+    if (!handedOff && index >= 0) void playTrackAt(index)
+  }
+
   function setCrossfadeDuration(value: number): void {
     const normalized = normalizeCrossfadeDurationMs(value)
     crossfadeDurationMs.value = normalized
     const reservation = crossfadeReservation
-    if (!reservation) return
+    if (!reservation || reservation.origin === 'manual') return
     if (normalized === 0) {
       if (reservation.handedOff) {
         reservation.operation?.finish()
@@ -1443,21 +1788,46 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   const sleepAt = ref<number | null>(null)
+  const sleepMode = ref<'immediate' | 'track-end'>('immediate')
+  const sleepWaiting = ref(false)
   let sleepTimer: ReturnType<typeof setTimeout> | undefined
   function setSleepMinutes(minutes: number): void {
     cancelSleepTimer()
     sleepAt.value = minutes > 0 ? Date.now() + minutes * 60_000 : null
-    if (minutes > 0) sleepTimer = setTimeout(() => { sleepTimer = undefined; stop(); sleepAt.value = null }, minutes * 60_000)
+    if (minutes > 0) sleepTimer = setTimeout(() => { sleepTimer = undefined; checkSleepDeadline() }, minutes * 60_000)
   }
 
   /**
    * Abandon a pending sleep timer. Without this a timer armed for a session the
    * user has already torn down goes off against whatever they start next.
    */
+  function setSleepMode(mode: 'immediate' | 'track-end'): void {
+    if (mode !== 'immediate' && mode !== 'track-end') return
+    sleepMode.value = mode
+    if (sleepWaiting.value && mode === 'immediate') stop()
+  }
+
+  /** Returns true only when expiry stopped playback, never for a waiting track. */
+  function checkSleepDeadline(): boolean {
+    if (sleepAt.value === null || sleepWaiting.value || Date.now() < sleepAt.value) return false
+    if (sleepTimer !== undefined) clearTimeout(sleepTimer)
+    sleepTimer = undefined
+    if (sleepMode.value === 'immediate' || !isLoadedCurrentTrack() || !Number.isFinite(duration.value) || duration.value <= 0) {
+      if (sleepMode.value === 'track-end' && isLoadedCurrentTrack()) useToastStore().info('无法等待当前媒体自然结束，已停止')
+      stop()
+      return true
+    }
+    cancelCrossfadeReservation()
+    if (abLoop.value) abLoop.value = { ...abLoop.value, enabled: false }
+    sleepWaiting.value = true
+    return false
+  }
+
   function cancelSleepTimer(): void {
     if (sleepTimer !== undefined) clearTimeout(sleepTimer)
     sleepTimer = undefined
     sleepAt.value = null
+    sleepWaiting.value = false
   }
 
   /* ------------------------------------------------------------ *
@@ -1652,6 +2022,8 @@ export const usePlayerStore = defineStore('player', () => {
     stopPlayback()
   }
   function stopPlayback(): void {
+    cancelSleepTimer()
+    clearLoop()
     cancelCrossfadeReservation()
     localRelinkResume = null
     playbackAutoplay = false
@@ -1905,6 +2277,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   return {
     // state
+    abLoop, setLoopA, setLoopB, setLoopEnabled, clearLoop,
     queue,
     queueHistory,
     queueLabel,
@@ -1943,7 +2316,11 @@ export const usePlayerStore = defineStore('player', () => {
     // actions
     playTrack,
     playTrackAt,
+    playQueueEntry,
+    manualSwitchTarget, manualSwitchQueueLabel,
+    manualSwitchFailure,
     playQueue,
+    playUserQueue,
     playQueueSnapshot,
     toggle,
     next,
@@ -1954,6 +2331,8 @@ export const usePlayerStore = defineStore('player', () => {
     setTransitionsEnabled,
     crossfadeDurationMs,
     setCrossfadeDuration,
+    manualCrossfadeDurationMs,
+    setManualCrossfadeDuration,
     toggleMute,
     setPlayMode,
     setRate,
@@ -1974,7 +2353,7 @@ export const usePlayerStore = defineStore('player', () => {
     insertNext,
     moveInQueue,
     restoreQueueHistory,
-    sleepAt,
+    sleepAt, sleepMode, sleepWaiting, setSleepMode,
     setSleepMinutes,
     stop,
     loadLyrics,

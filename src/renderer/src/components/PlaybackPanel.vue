@@ -77,7 +77,7 @@ function searchEscape():void{if(query.value)query.value='';else ui.playbackPanel
 function playFiltered(track:PlayableTrack):void{
  const index=playlistTrackIndex(shown.value.tracks,track)
  if(index<0)return
- if(onLivePage.value)void player.playTrackAt(index);else playFromHistory(index)
+ if(onLivePage.value)void player.playQueueEntry(index);else playFromHistory(index)
 }
 function removeTrack(track:PlayableTrack):void{
  if(onLivePage.value)player.removeFromQueue(playlistEntryKey(track),true)

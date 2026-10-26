@@ -99,7 +99,7 @@ async function open(board: RoutedBoard): Promise<void> {
 /** Play the loaded board as a queue, from the row that was clicked. */
 async function play(_track: PlayableTrack, index: number): Promise<void> {
   if (!tracks.value.length) return
-  await player.playQueue(tracks.value, index)
+  await player.playUserQueue(tracks.value, index)
 }
 
 function back(): void {

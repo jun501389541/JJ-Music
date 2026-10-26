@@ -1041,6 +1041,8 @@ export interface AppSettings extends UiPreferences {
   shortAudioTransitions: boolean
   /** Automatic overlap between eligible consecutive tracks; 0 disables it. */
   crossfadeDurationMs: number
+  /** Current-queue manual overlap; independent of automatic crossfade, 0 disables it. */
+  manualCrossfadeDurationMs: number
   /** Prefer local files over online sources when both match. */
   preferLocal: boolean
   /**

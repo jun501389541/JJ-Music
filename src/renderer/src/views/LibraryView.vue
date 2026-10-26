@@ -125,12 +125,12 @@ async function addFolder(): Promise<void> {
 }
 
 async function playAt(index: number): Promise<void> {
-  await player.playQueue(filtered.value, index)
+  await player.playUserQueue(filtered.value, index)
 }
 
 async function playAll(): Promise<void> {
   if (filtered.value.length === 0) return
-  await player.playQueue(filtered.value, 0)
+  await player.playUserQueue(filtered.value, 0)
 }
 </script>
 

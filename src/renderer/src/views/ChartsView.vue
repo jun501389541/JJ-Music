@@ -30,7 +30,7 @@ watch(() => [charts.source, charts.current.selected?.id, charts.current.selected
 async function play(_track?: PlayableTrack, index = 0): Promise<void> {
   if (!charts.tracks.length) return
   if (!library.playableSources.length) { toast.info('榜单可正常浏览；播放请先在设置中启用音源'); return }
-  await player.playQueue(charts.tracks, index, `${platformName.value} · ${charts.current.selected?.name ?? '排行榜'}`)
+  await player.playUserQueue(charts.tracks, index, `${platformName.value} · ${charts.current.selected?.name ?? '排行榜'}`)
 }
 onMounted(() => { void charts.open(charts.source) })
 onUnmounted(() => { charts.cancel(); artEpoch++; if (artId) window.jj.music.cancel(artId) })

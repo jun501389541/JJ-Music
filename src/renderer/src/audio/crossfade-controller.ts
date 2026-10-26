@@ -1,7 +1,6 @@
 import { crossfadeGains } from '@shared/crossfade'
 
-type GainParameter = Pick<AudioParam, 'cancelScheduledValues' | 'setValueAtTime' | 'setValueCurveAtTime'> &
-  Partial<Pick<AudioParam, 'cancelAndHoldAtTime'>>
+type GainParameter = Pick<AudioParam, 'cancelScheduledValues' | 'setValueAtTime' | 'setValueCurveAtTime'>
 type CancelTimer = () => void
 type Schedule = (callback: () => void, milliseconds: number) => CancelTimer
 
@@ -169,8 +168,10 @@ export class CrossfadeController {
       incomingValues[index] = gains.incoming
     }
 
-    this.options.outgoing.cancelScheduledValues(startTime)
-    this.options.incoming.cancelScheduledValues(startTime)
+    // These per-deck parameters are exclusively owned here. Remove the whole
+    // old curve, including its already-started event, before replacing it.
+    this.options.outgoing.cancelScheduledValues(0)
+    this.options.incoming.cancelScheduledValues(0)
     this.options.outgoing.setValueCurveAtTime(outgoingValues, startTime, durationMs / 1_000)
     this.options.incoming.setValueCurveAtTime(incomingValues, startTime, durationMs / 1_000)
   }
@@ -181,12 +182,9 @@ export class CrossfadeController {
   }
 
   private writeGain(parameter: GainParameter, value: number, time: number): void {
-    if (parameter.cancelAndHoldAtTime) {
-      parameter.cancelAndHoldAtTime(time)
-      parameter.setValueAtTime(value, time)
-      return
-    }
-    parameter.cancelScheduledValues(time)
+    // We already computed the held gain. Native cancelAndHoldAtTime can reject
+    // overlapping curves during rapid deck reuse and interrupt stop/release.
+    parameter.cancelScheduledValues(0)
     parameter.setValueAtTime(value, time)
   }
 

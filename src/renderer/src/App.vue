@@ -37,6 +37,9 @@ const player = usePlayerStore()
 const route = useRoute()
 const router = useRouter()
 const toast = useToastStore()
+watch(() => player.manualSwitchFailure, failure => {
+  if (failure) toast.error(failure.message)
+})
 
 const ui = useUiStore()
 let offUpdateChanged: (() => void) | undefined
@@ -152,6 +155,7 @@ watch(() => library.settings.playMode, value => player.setPlayMode(value))
 watch(() => library.settings.playQuality, value => player.setQuality(value))
 watch(() => library.settings.shortAudioTransitions, value => player.setTransitionsEnabled(value !== false))
 watch(() => library.settings.crossfadeDurationMs, value => player.setCrossfadeDuration(value))
+watch(() => library.settings.manualCrossfadeDurationMs, value => player.setManualCrossfadeDuration(value))
 watch(() => [library.settings.equalizerGains, library.settings.equalizerName] as const,
   ([gains, name]) => player.setEqualizer(gains, name), { deep: true })
 watch(() => [player.rate, player.playMode, player.quality, player.equalizer, player.equalizerPreset] as const, () => {
@@ -460,6 +464,7 @@ onMounted(async () => {
   player.setQuality(library.settings.playQuality)
   player.setTransitionsEnabled(library.settings.shortAudioTransitions !== false)
   player.setCrossfadeDuration(library.settings.crossfadeDurationMs)
+  player.setManualCrossfadeDuration(library.settings.manualCrossfadeDurationMs)
 
   /*
    * The saved output device has to be re-applied here: the setting used to be

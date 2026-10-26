@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   playMode: 'list',
   shortAudioTransitions: true,
   crossfadeDurationMs: 0,
+  manualCrossfadeDurationMs: 0,
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,

@@ -201,7 +201,7 @@ function key(event: KeyboardEvent): void {
 }
 </script>
 <template><div class="tracklist" @keydown="key">
-  <div v-if="chosen.length" class="selection-toolbar"><span>已选择 {{ chosen.length }} 个项目</span><button @click="player.playQueue(chosen)"><AppIcon name="play" :size="15"/>播放</button><button @click="player.insertNext(chosen)">插播</button><button @click="ui.openMenu($event, menuItems(chosen[0], chosen))">更多</button><button @click="selected = new Set()"><AppIcon name="close" :size="15"/></button></div>
+  <div v-if="chosen.length" class="selection-toolbar"><span>已选择 {{ chosen.length }} 个项目</span><button @click="player.playUserQueue(chosen)"><AppIcon name="play" :size="15"/>播放</button><button @click="player.insertNext(chosen)">插播</button><button @click="ui.openMenu($event, menuItems(chosen[0], chosen))">更多</button><button @click="selected = new Set()"><AppIcon name="close" :size="15"/></button></div>
   <div v-else class="track-head"><span>#</span><span>标题 / 艺术家</span><span>{{ showSpec ? '音频格式' : '专辑' }}</span><span>时长</span><span/></div>
   <div ref="viewport" class="track-viewport" role="grid" aria-label="歌曲列表" :aria-rowcount="tracks.length" @scroll="scrollTop = ($event.target as HTMLElement).scrollTop">
     <div v-if="!tracks.length" class="empty"><AppIcon name="music" :size="38"/><p>{{ emptyText }}</p></div>

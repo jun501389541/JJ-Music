@@ -34,7 +34,7 @@ const evaluate = async expression => {
 async function launch() {
   const port = await new Promise(yes => { const server = createServer(); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => yes(port)) }) })
   const log = openSync(join(output, `${runId}-main.log`), 'a')
-  try { child = spawn(join(root, 'node_modules/electron/dist/electron.exe'), [guard, `--user-data-dir=${profile}`, '--disable-background-networking'], { cwd: root, windowsHide: true, stdio: ['ignore', log, log], env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, NODE_OPTIONS: undefined, JJ_ALLOW_DEBUG_PORT: '1', JJ_DEBUG_PORT: String(port) } }) }
+  try { child = spawn(join(process.env.JJ_CROSSFADE_ELECTRON_DIST ?? join(root, 'node_modules/electron/dist'), 'electron.exe'), [guard, `--user-data-dir=${profile}`, '--disable-background-networking'], { cwd: root, windowsHide: true, stdio: ['ignore', log, log], env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, NODE_OPTIONS: undefined, JJ_ALLOW_DEBUG_PORT: '1', JJ_DEBUG_PORT: String(port) } }) }
   finally { closeSync(log) }
   let target
   await wait(async () => { try { target = (await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json()).find(t => t.type === 'page'); return !!target } catch { return false } }, 'renderer')
@@ -57,6 +57,8 @@ const navigate=async path=>{await evaluate(`location.hash=${JSON.stringify('#'+p
 const query=async value=>{await evaluate(`const e=document.querySelector('[aria-label=在播放列表内搜索]');e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}))`);await sleep(100)}
 const panelRows=()=>evaluate('return document.querySelectorAll(".np-panel .track-row").length')
 const labelClick=label=>evaluate(`const e=document.querySelector('[aria-label="'+${JSON.stringify(label)}+'"]');if(!e||e.disabled)throw Error('unavailable '+${JSON.stringify(label)});e.click()`)
+const menuClick=text=>evaluate(`const e=[...document.querySelectorAll('[role=menuitem]')].find(e=>e.textContent.trim()===${JSON.stringify(text)});if(!e||e.disabled)throw Error('menu unavailable '+${JSON.stringify(text)});e.click()` )
+const playbackSubmenu=async text=>{await labelClick('播放更多选项');await sleep(70);await menuClick(text);await sleep(70)}
 const panelClick=text=>evaluate(`const e=[...document.querySelectorAll('.np-panel button')].find(e=>e.textContent.trim()===${JSON.stringify(text)});if(!e||e.disabled)throw Error('panel button unavailable '+${JSON.stringify(text)});e.click()`)
 const open=async()=>{await labelClick('播放队列');await wait(()=>evaluate('return !!document.querySelector(".np-panel")'),'queue panel')}
 try{
@@ -66,19 +68,40 @@ try{
  await writeFile(join(profile,'library/index.json'),JSON.stringify({version:5,folders:[],tracks:[...rows,second[1]]}))
  const lists=[{id:'default',name:'默认列表',source:'local',position:0},{id:'favorites',name:'我喜欢的',source:'local',position:1},{id:'a',name:'Queue A',source:'local',position:2},{id:'b',name:'Queue B',source:'local',position:3}]
  await writeFile(join(profile,'playlists.json'),JSON.stringify({version:1,playlists:lists,items:{default:[],favorites:[],a:rows,b:second}}))
- await writeFile(join(profile,'settings.json'),JSON.stringify({libraryFolders:[],onlineLyricSource:'off',onlineLyricFallback:false,showSearchHotWords:false,minimizeToTray:false}))
+ await writeFile(join(profile,'settings.json'),JSON.stringify({libraryFolders:[],onlineLyricSource:'off',onlineLyricFallback:false,showSearchHotWords:false,minimizeToTray:false,manualCrossfadeDurationMs:3000}))
  await writeFile(guard,`const {app,BrowserWindow,session}=require('electron');BrowserWindow.prototype.show=function(){};app.on('browser-window-created',(_,w)=>w.webContents.setBackgroundThrottling(false));globalThis.fetch=async()=>{throw Error('External HTTP blocked')};app.whenReady().then(()=>session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(_,cb)=>cb({cancel:true})));import(${JSON.stringify(pathToFileURL(join(appDir,'main/index.js')).href)}).catch(e=>{console.error(e);app.exit(1)});`)
  await launch();await send('Runtime.enable');await navigate('/playlist/a');await wait(()=>evaluate('return document.querySelectorAll(".playlist-view .track-row").length===3'),'playlist A')
+ await evaluate('window.__manualDecks=[];const OriginalAudio=window.Audio;window.Audio=new Proxy(OriginalAudio,{construct(t,args){const a=new t(...args);window.__manualDecks.push(a);return a}})')
  await evaluate('document.querySelectorAll(".playlist-view .track-row")[0].dispatchEvent(new MouseEvent("dblclick",{bubbles:true}))')
- await wait(()=>evaluate('return navigator.mediaSession.playbackState==="playing"'),'generated playing');await open()
+ await wait(()=>evaluate('return navigator.mediaSession.playbackState==="playing"'),'generated playing')
+ await labelClick('播放更多选项');await sleep(100)
+ check('AB loop controls exist in production playback menu',await evaluate('return [...document.querySelectorAll("[role=menuitem]")].some(e=>e.textContent.trim()==="A–B 片段循环")'))
+ await evaluate('document.querySelector(".menu-layer").dispatchEvent(new PointerEvent("pointerdown",{bubbles:true}))')
+ await evaluate('window.__manualDecks.find(a=>!a.paused).currentTime=10');await sleep(350)
+ await playbackSubmenu('A–B 片段循环');await menuClick('设置 A 点（当前进度）')
+ await evaluate('window.__manualDecks.find(a=>!a.paused).currentTime=12');await sleep(350)
+ await playbackSubmenu('A–B 片段循环');await menuClick('设置 B 点（当前进度）');await sleep(350)
+ check('AB menu sets endpoints and production media loops back',await evaluate('return document.querySelector(".mini-lyric").textContent.includes("A–B")&&window.__manualDecks.find(a=>!a.paused).currentTime<12'))
+ await playbackSubmenu('A–B 片段循环');await menuClick('清除 A–B');await sleep(100)
+ check('AB menu clear removes loop status',await evaluate('return !document.querySelector(".mini-lyric").textContent.includes("A–B")'))
+ await playbackSubmenu('睡眠定时');await menuClick('到点播完当前曲再停止')
+ await playbackSubmenu('睡眠定时');await menuClick('15 分钟后停止');await sleep(100)
+ report.sleepCountdown=await evaluate('return document.querySelector(".mini-lyric").textContent');
+ check('sleep menu starts a visible countdown',await evaluate('return document.querySelector(".mini-lyric").textContent.includes("睡眠定时 15 分钟")'))
+ await playbackSubmenu('睡眠定时');await menuClick('关闭定时');await sleep(100)
+ check('sleep cancellation removes countdown',await evaluate('return !document.querySelector(".mini-lyric").textContent.includes("睡眠定时")'))
+ await open()
  check('search input exists in production panel',await evaluate('return !!document.querySelector("[aria-label=在播放列表内搜索]")'))
  check('unfiltered full queue visible',(await panelRows())===3)
+ await evaluate('window.__manualHints=[];new MutationObserver(()=>{window.__manualHints.push(document.querySelector(".mini-lyric")?.textContent||"")}).observe(document.body,{subtree:true,childList:true,characterData:true})')
  await query('focus artist night');check('normalized metadata multi-term filter',(await panelRows())===1)
  check('match count retains complete total',await evaluate('return document.querySelector(".queue-search").textContent.includes("1 / 3")'))
  check('filtered drag disabled',await evaluate('return [...document.querySelectorAll(".np-panel .track-row")].every(e=>!e.draggable)'))
  await evaluate('document.querySelector(".np-panel .track-row").dispatchEvent(new MouseEvent("dblclick",{bubbles:true}))')
  await wait(()=>evaluate('return document.querySelector(".np-panel__count b").textContent==="2"'),'original full-list index')
  check('filtered click uses original index',true)
+ check('manual current-queue click overlaps two production media decks',await evaluate('return window.__manualDecks.filter(a=>!a.paused&&a.currentSrc).length===2'))
+ check('pending target feedback uses existing player status',await evaluate('return window.__manualHints.some(t=>t.includes("正在准备切换至"))'))
  await panelClick('清空搜索');await wait(async()=> (await panelRows())===3,'clear filter full queue')
  check('clear restores complete queue and dragging',await evaluate('return [...document.querySelectorAll(".np-panel .track-row")].every(e=>e.draggable)'))
  await query('missing');check('empty filter is explicit',await evaluate('return document.querySelector(".np-panel").textContent.includes("没有匹配的歌曲")'))
@@ -93,7 +116,7 @@ try{
  check('filtered remove keeps hidden order',await evaluate('return [...document.querySelectorAll(".np-panel .track-row")].map(e=>e.textContent).join("|").includes("Alpha")&&!document.querySelector(".np-panel").textContent.includes("Gamma")'))
  check('queue removal leaves saved playlist intact',(await evaluate('return await window.jj.playlists.items("a")')).length===3)
  await labelClick('关闭播放面板');await navigate('/playlist/b');await wait(()=>evaluate('return document.querySelectorAll(".playlist-view .track-row").length===2'),'playlist B')
- await evaluate('document.querySelector(".playlist-view .track-row").dispatchEvent(new MouseEvent("dblclick",{bubbles:true}))');await open()
+ await evaluate('document.querySelectorAll(".playlist-view .track-row")[1].dispatchEvent(new MouseEvent("dblclick",{bubbles:true}))');await wait(()=>evaluate('return document.querySelector(".mini-meta strong").textContent==="Beta"'),'new queue commit');check('playlist new queue uses protected overlap',await evaluate('return window.__manualDecks.filter(a=>!a.paused&&a.currentSrc).length===2'));await open()
  await query('Beta');await labelClick('更早的列表');await wait(()=>evaluate('return document.querySelector("[aria-label=在播放列表内搜索]").value===""'),'history query reset')
  check('history page shows saved full range',(await panelRows())===2)
  check('history drag and row remove disabled',await evaluate('return !document.querySelector(".np-panel .row-remove")&&[...document.querySelectorAll(".np-panel .track-row")].every(e=>!e.draggable)'))
@@ -107,6 +130,7 @@ try{
  const shot=await send('Page.captureScreenshot',{format:'png'});report.screenshot=join(output,runId+'-history.png');await writeFile(report.screenshot,Buffer.from(shot.data,'base64'))
  await evaluate('document.querySelector(".np-panel .track-row").dispatchEvent(new MouseEvent("dblclick",{bubbles:true}))')
  await wait(()=>evaluate('return document.querySelector(".np-panel__count b").textContent==="2"&&document.querySelector("[aria-label=在播放列表内搜索]").value===""'),'filtered history playback')
+ check('history restore uses legacy single-deck playback',await evaluate('return window.__manualDecks.filter(a=>!a.paused&&a.currentSrc).length===1'))
  check('history filtered play restores complete snapshot',await evaluate('return document.querySelectorAll(".np-panel .track-row").length===2&&document.querySelector(".np-panel").textContent.includes("Alpha")&&!document.querySelector(".np-panel").textContent.includes("Beta")'))
  await evaluate('document.querySelector("[aria-label=在播放列表内搜索]").dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');await wait(()=>evaluate('return !document.querySelector(".np-panel")'),'empty search Escape closes')
  check('empty-query Escape closes panel',true)

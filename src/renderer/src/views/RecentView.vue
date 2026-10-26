@@ -26,7 +26,7 @@ const recent = computed(() => library.recentPlayed
       </div>
     </header>
     <p v-if="!recent.length" class="view__subtitle">还没有播放记录，播放一首喜欢的音乐后会显示在这里。</p>
-    <TrackList v-else :tracks="recent" :show-album="false" :show-spec="true" @play="(_track, index) => player.playQueue(recent, index)" />
+    <TrackList v-else :tracks="recent" :show-album="false" :show-spec="true" @play="(_track, index) => player.playUserQueue(recent, index)" />
   </div>
 </template>
 <style scoped>

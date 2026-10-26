@@ -51,7 +51,7 @@ function wavTone(frequency, seconds = 12) {
 }
 
 const media = new Map([
-  ['a', wavTone(440)], ['b', wavTone(880)],
+  ['a', wavTone(440)], ['b', wavTone(880)], ['short', wavTone(660, 0.5)],
   ['rate-a', wavTone(440)], ['rate-b', wavTone(880)],
   ['off-a', wavTone(330)], ['off-b', wavTone(660)],
   ['fail-a', wavTone(392)], ['fail-b', wavTone(784)],
@@ -159,9 +159,15 @@ function setupProbe() {
       currentIndex: state.player?.currentIndex ?? -1,
       currentId: state.player?.currentTrack?.id ?? null,
       playing: state.player?.playing ?? false,
+      waiting: state.player?.waiting ?? false,
       currentTime: state.player?.currentTime ?? 0,
       duration: state.player?.duration ?? 0,
       error: state.player?.error ?? null,
+      queueIds: state.player?.queue.map(track => track.id) ?? [],
+      historyIds: state.player?.queueHistory.map(entry => entry.queue.map(track => track.id)) ?? [],
+      sleepWaiting: state.player?.sleepWaiting ?? false,
+      loop: state.player?.abLoop ?? null,
+      pendingId: state.player?.manualSwitchTarget?.id ?? null,
       curveSchedules: state.curves.slice(state.curveOffset),
       audio: state.audio.slice(state.audioOffset).map(element => ({
         src: element.getAttribute('src') ?? '',
@@ -190,14 +196,30 @@ function setupProbe() {
       await state.player.playQueue(ids.map(makeTrack), 0, 'Synthetic crossfade probe')
       return snapshot()
     },
+    async stageQueue(ids, durationMs = 2000) {
+      state.player.setManualCrossfadeDuration(durationMs)
+      await state.player.playUserQueue(ids.map(makeTrack), 0, 'New synthetic queue')
+      return snapshot()
+    },
+    holdResolution(id) {
+      const original = window.jj.music.url
+      window.jj.music.url = (...args) => args[1].id === id ? new Promise(resolve => {
+        window.__releaseResolution = () => { window.jj.music.url = original; original(...args).then(resolve) }
+      }) : original(...args)
+    },
     player: () => state.player,
     snapshot,
     injectDecodeError(id) {
       const element = state.audio.slice(state.audioOffset).find(item => item.currentSrc.includes(`/media/${id}.wav`))
       if (!element) throw new Error(`No active element for ${id}`)
+      state.injectedErrorElement = element
       Object.defineProperty(element, 'error', { configurable: true, get: () => ({ code: 3, message: 'synthetic decoder failure' }) })
       element.dispatchEvent(new Event('error'))
       return element.currentTime
+    },
+    clearDecodeError() {
+      if (state.injectedErrorElement) delete state.injectedErrorElement.error
+      state.injectedErrorElement = null
     },
     stop() {
       state.player?.stop()
@@ -310,7 +332,11 @@ app.whenReady().then(async () => {
   })
   browserWindow.webContents.setAudioMuted(true)
   await browserWindow.loadURL(`http://127.0.0.1:${serverPort}/`)
-  const js = source => browserWindow.webContents.executeJavaScript(source)
+  browserWindow.webContents.on('console-message', details => { if (details.level === 'error') console.error('renderer:', details.message) })
+  const js = async source => {
+    try { return await browserWindow.webContents.executeJavaScript(source) }
+    catch (error) { throw new Error(`Renderer script ${source.slice(0, 180)}: ${error?.message ?? JSON.stringify(error)}`) }
+  }
   await js(`(${setupProbe.toString()})()`)
 
   async function begin(ids, durationMs) {
@@ -470,7 +496,110 @@ app.whenReady().then(async () => {
   })
   await reset()
 
-  // 8. Stop must cancel a deliberately slow local media request and clear both element sources.
+  // Manual requests start immediately rather than waiting for the track tail.
+  await begin(['a', 'b', 'skip-c'], 0)
+  await js('window.__crossfadeProbe.player().setManualCrossfadeDuration(2000);window.__crossfadeProbe.player().next()')
+  await waitForIndex(1, 'manual immediate overlap')
+  const manualBefore = await snapshot()
+  await sleep(250)
+  const manualAfter = await snapshot()
+  assert.ok(manualAfter.audio.every(item => !item.paused))
+  assert.ok(manualAfter.audio.every((item, index) => item.currentTime > manualBefore.audio[index].currentTime))
+  await js('window.__crossfadeProbe.player().playQueueEntry(2)')
+  await waitForIndex(2, 'latest manual selection during overlap')
+  assert.ok(!(await snapshot()).audio.some(item => item.src.includes('/media/a.wav')))
+  await wait(async () => !(await snapshot()).audio.some(item => item.src.includes('/media/b.wav')), 'manual exact outgoing release')
+  await finishCase('manual-overlap-and-latest-intent', { bothClocksAdvanced: true, originalReleased: true, outgoingReleased: true })
+  await reset()
+
+  await begin(['fail-a', 'fail-b'], 0)
+  await js('window.__crossfadeProbe.player().setManualCrossfadeDuration(3000);window.__crossfadeProbe.player().next()')
+  await waitForIndex(1, 'manual rollback handoff')
+  await sleep(200)
+  const manualOutgoingTime = await js('window.__crossfadeProbe.injectDecodeError("fail-b")')
+  const manualRollback = await waitForIndex(0, 'manual decode rollback')
+  assert.equal(manualRollback.error, null)
+  assert.ok(manualRollback.playing)
+  await finishCase('manual-failure-rollback', { outgoingContinues: true, playerError: null, incomingTimeAtFailure: manualOutgoingTime })
+  await reset()
+
+  await begin(['a', 'short'], 0)
+  await js('window.__crossfadeProbe.player().setManualCrossfadeDuration(3000);window.__crossfadeProbe.player().next()')
+  const immediate = await waitForIndex(1, 'manual protected short handoff')
+  assert.equal(immediate.currentId, 'short')
+  assert.ok(!immediate.audio.some(item => item.src.includes('/media/a.wav')))
+  await finishCase('manual-short-prepared-handoff', { currentId: immediate.currentId, outgoingReleased: true })
+  await reset()
+
+  // A-B uses actual media seeks. Record sampled deviation without claiming sample accuracy.
+  await begin(['a', 'b'], 0)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.seek(1);p.setLoopA();p.seek(3);p.setLoopB()})()')
+  const loopFirst = await wait(async () => { const s=await snapshot();return s.currentTime >= 1 && s.currentTime < 1.7 ? s : null }, 'first A-B wrap')
+  await sleep(1700)
+  const loopSecond = await wait(async () => { const s=await snapshot();return s.currentTime >= 1 && s.currentTime < 1.7 ? s : null }, 'second A-B wrap')
+  assert.equal(loopSecond.currentId, 'a')
+  assert.equal(loopSecond.queueIds.length, 2)
+  await finishCase('AB-native-two-wraps', { firstSampleDeviationSeconds: loopFirst.audio.find(a=>!a.paused).currentTime-1, secondSampleDeviationSeconds: loopSecond.audio.find(a=>!a.paused).currentTime-1, nextTrackNotStarted: true })
+  await reset()
+
+  await begin(['a', 'b'], 0)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.seek(9);p.setLoopA();p.seek(10.5);p.setLoopB();p.setSleepMode("track-end");p.setSleepMinutes(0.0001)})()')
+  const waiting = await wait(async () => { const s=await snapshot();return s.sleepWaiting ? s : null }, 'sleep waits for whole current track')
+  assert.equal(waiting.loop.enabled, false)
+  await js('window.__crossfadeProbe.player().seek(11.5)')
+  const sleepStop = await wait(async () => { const s=await snapshot();return !s.playing && s.audio.every(a=>!a.src) ? s : null }, 'sleep ends whole track without next')
+  assert.equal(sleepStop.currentId, 'a')
+  await finishCase('sleep-exits-AB-and-stops-at-natural-end', { loopExited: true, nextNotStarted: true, allDecksReleased: true })
+  await reset()
+
+  await begin(['a', 'b'], 0)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.seek(1);p.setLoopA();p.seek(3);p.setLoopB()})()')
+  await wait(async () => {
+    const state = await snapshot()
+    return state.playing && !state.waiting && state.currentTime >= 1 && state.currentTime < 1.7
+  }, 'outgoing loop seek settled before protected queue request')
+  await js('window.__crossfadeProbe.holdResolution("skip-c");window.__crossfadeProbe.stageQueue(["skip-c"])')
+  const preparingBefore = await snapshot()
+  await sleep(200)
+  const preparingAfter = await snapshot()
+  assert.equal(preparingAfter.currentId, 'a')
+  assert.deepEqual(preparingAfter.queueIds, ['a', 'b'])
+  assert.equal(preparingAfter.historyIds.length, 0)
+  assert.ok(preparingAfter.currentTime > preparingBefore.currentTime)
+  assert.equal(preparingAfter.loop.enabled, true)
+  await js('window.__crossfadeProbe.player().clearLoop()')
+  const clearedWhilePreparing = await snapshot()
+  assert.equal(clearedWhilePreparing.loop, null)
+  assert.equal(clearedWhilePreparing.pendingId, 'skip-c')
+  await js('window.__releaseResolution()')
+  await wait(async () => (await snapshot()).currentId === 'skip-c', 'cross queue native handoff')
+  const crossCommitted = await snapshot()
+  assert.deepEqual(crossCommitted.queueIds, ['skip-c'])
+  assert.deepEqual(crossCommitted.historyIds[0], ['a', 'b'])
+  assert.equal(crossCommitted.audio.filter(a=>!a.paused&&a.src).length, 2)
+  await js('window.__crossfadeProbe.injectDecodeError("skip-c")')
+  const queueRollback = await wait(async () => { const s=await snapshot();return s.currentId==='a'?s:null }, 'cross queue rollback')
+  assert.deepEqual(queueRollback.queueIds, ['a', 'b'])
+  assert.equal(queueRollback.historyIds.length, 0)
+  assert.ok(queueRollback.playing)
+  assert.equal(queueRollback.loop, null, 'rollback must not restore an explicitly cleared loop')
+  await finishCase('cross-queue-native-prepare-commit-rollback', { outgoingClockContinued: true, stagedHistoryUntouched: true, dualDeckHandoff: true, queueAndHistoryRestored: true, explicitlyClearedLoopStayedCleared: true })
+  await reset()
+
+  // The restored outgoing track must again own the shuffle history cursor.
+  await begin(['a', 'b', 'skip-c'], 0)
+  await js('window.__crossfadeProbe.player().setPlayMode("random");window.__crossfadeProbe.player().setManualCrossfadeDuration(3000);window.__crossfadeProbe.player().playQueueEntry(2)')
+  await waitForIndex(2, 'random manual handoff')
+  await js('window.__crossfadeProbe.injectDecodeError("skip-c")')
+  await waitForIndex(0, 'random rollback restores outgoing')
+  await js('window.__crossfadeProbe.clearDecodeError();window.__crossfadeProbe.player().previous()')
+  const previousChoice = await snapshot()
+  assert.ok(previousChoice.pendingId === 'skip-c' || previousChoice.currentId === 'skip-c', 'previous must retain the audible failed target instead of restarting the restored track')
+  await waitForIndex(2, 'random previous plays the expected history entry')
+  await finishCase('random-rollback-history-cursor', { outgoingRestored: true, audibleFailedTargetRetained: true, previousPlayedExpectedTrack: true })
+  await reset()
+
+  // Stop must cancel a deliberately slow local media request and clear both element sources.
   await begin(['stream', 'unused'], 0)
   const liveRequestCount = activeMedia.size
   assert.ok(liveRequestCount > 0, 'the slow synthetic media request must still be active before stop')

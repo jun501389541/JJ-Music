@@ -89,7 +89,7 @@ watch([listId, () => library.playlists], load, { immediate: true })
 async function playAt(index: number): Promise<void> {
   // The label is what the panel's history page will be called after this one
   // stops being current — 「歌单 · 忆」 beats "the list that starts with 勇气".
-  await player.playQueue(tracks.value, index, playlist.value ? `歌单 · ${playlist.value.name}` : '')
+  await player.playUserQueue(tracks.value, index, playlist.value ? `歌单 · ${playlist.value.name}` : '')
 }
 
 /**

@@ -71,7 +71,7 @@ function countIn(folder: string): number {
       <TrackList
         v-if="openedTracks.length"
         :tracks="openedTracks"
-        @play="(_, index) => player.playQueue(openedTracks, index)"
+        @play="(_, index) => player.playUserQueue(openedTracks, index)"
         empty-text="这个文件夹里没有曲目"
       />
       <p v-else class="description">这个文件夹里还没有扫描到曲目。</p>

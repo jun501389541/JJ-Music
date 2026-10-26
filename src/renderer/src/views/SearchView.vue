@@ -294,13 +294,13 @@ async function playAt(index: number): Promise<void> {
   const track = results.value[index]
   if (!track) return
   if (!isLocalTrack(track) && !hasSources.value) { toast.error('在线播放需要可用音源，可在音源管理中导入'); return }
-  await player.playQueue([track], 0, searchLabel('单曲'), { singleTrackAudition: true })
+  await player.playUserQueue([track], 0, searchLabel('单曲'), { singleTrackAudition: true })
 }
 
 /** 「播放全部」只使用当前页已加载的结果，不暗中追加未加载的分页。 */
 async function playAll(): Promise<void> {
   if (results.value.length === 0) return
-  await player.playQueue(results.value, 0, searchLabel('搜索'))
+  await player.playUserQueue(results.value, 0, searchLabel('搜索'))
 }
 async function refreshPlatforms(): Promise<void> {
   const request = ++platformGeneration

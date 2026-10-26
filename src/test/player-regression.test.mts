@@ -101,6 +101,700 @@ function setup() {
   return store
 }
 
+async function startManualQueue(startIndex = 0) {
+  const player = setup()
+  player.setManualCrossfadeDuration(3000)
+  await player.playQueue([local('manual-a'), local('manual-b'), local('manual-c')], startIndex)
+  const [outgoing, incoming] = FakeAudio.instances
+  outgoing.signalReady()
+  outgoing.currentTime = 20
+  pulseAudioProgress()
+  await flush()
+  return { player, outgoing, incoming }
+}
+
+function setLoopAt(player, outgoing, a, b) {
+  outgoing.currentTime = a; pulseAudioProgress(); player.setLoopA()
+  outgoing.currentTime = b; pulseAudioProgress(); player.setLoopB()
+}
+
+test('AB loop progress returns to A without changing queue identity', async () => {
+  const { player, outgoing } = await startManualQueue()
+  setLoopAt(player, outgoing, 10, 20)
+  assert.equal(player.abLoop.enabled, true)
+  outgoing.currentTime = 20.1; pulseAudioProgress()
+  assert.equal(outgoing.currentTime, 10)
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.currentIndex, 0)
+})
+
+test('AB loop rejects subsecond and unknown-duration endpoints without replacing valid points', async () => {
+  const { player, outgoing } = await startManualQueue()
+  outgoing.currentTime = 10; pulseAudioProgress(); player.setLoopA()
+  outgoing.currentTime = 10.5; pulseAudioProgress(); player.setLoopB()
+  assert.equal(player.abLoop.b, null)
+  outgoing.duration = Infinity; pulseAudioProgress(); player.setLoopA()
+  assert.equal(player.abLoop.a, 10)
+  assert.equal(player.abLoop.enabled, false)
+})
+
+test('AB loop at exact media tail handles ended without next-track advancement', async () => {
+  const { player, outgoing } = await startManualQueue()
+  setLoopAt(player, outgoing, 175, 180)
+  outgoing.finish(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(outgoing.currentTime, 175)
+  assert.equal(player.playing, true)
+})
+
+test('AB loop outside manual seek pauses looping while inside seek preserves it', async () => {
+  const { player, outgoing } = await startManualQueue()
+  setLoopAt(player, outgoing, 10, 20)
+  player.seek(15)
+  assert.equal(player.abLoop.enabled, true)
+  player.seek(31)
+  assert.equal(player.abLoop.enabled, false)
+  assert.equal(player.abLoop.a, 10)
+  player.setLoopEnabled(true)
+  assert.equal(outgoing.currentTime, 10)
+})
+
+test('AB loop pause retains points and stop clears them', async () => {
+  const { player, outgoing } = await startManualQueue()
+  player.setTransitionsEnabled(false)
+  setLoopAt(player, outgoing, 10, 20)
+  await player.toggle()
+  assert.equal(player.abLoop.enabled, true)
+  player.stop()
+  assert.equal(player.abLoop, null)
+})
+
+test('AB loop suspended during manual preparation resumes after failure', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  setLoopAt(player, outgoing, 10, 20)
+  await player.next(); await flush()
+  outgoing.currentTime = 21; pulseAudioProgress()
+  assert.equal(outgoing.currentTime, 21)
+  incoming.fail(3); await flush(); await flush()
+  pulseAudioProgress()
+  assert.equal(outgoing.currentTime, 10)
+})
+
+test('AB loop clears on handoff and restores after incoming failure', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  setLoopAt(player, outgoing, 10, 20)
+  await player.next(); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.abLoop, null)
+  incoming.fail(3); await flush(); await flush()
+  assert.equal(player.abLoop.a, 10)
+  assert.equal(player.abLoop.enabled, true)
+})
+
+for (const newQueue of [false, true]) {
+  test(`AB clear during ${newQueue ? 'cross queue' : 'manual'} preparation survives later handoff rollback`, async () => {
+    const { player, outgoing, incoming } = await startManualQueue()
+    setLoopAt(player, outgoing, 10, 20)
+    if (newQueue) await player.playUserQueue([local('new')])
+    else await player.next()
+    await flush()
+    const target = player.manualSwitchTarget.id
+    player.clearLoop()
+    assert.equal(player.abLoop, null)
+    assert.equal(player.manualSwitchTarget.id, target, 'clearing loop does not swallow the chosen song')
+    incoming.signalReady(); await flush(); await flush()
+    assert.equal(player.currentTrack.id, target)
+    incoming.fail(3); await flush(); await flush()
+    assert.equal(player.currentTrack.id, 'manual-a')
+    assert.equal(player.abLoop, null, 'rollback must respect a loop the user explicitly cleared')
+  })
+}
+
+for (const action of ['pause', 'seek']) {
+  test(`cross queue ${action} cancels preparation and ignores late readiness`, async () => {
+    const { player, outgoing, incoming } = await startManualQueue()
+    player.setTransitionsEnabled(false)
+    await player.playUserQueue([local('new')]); await flush()
+    if (action === 'pause') await player.toggle()
+    else player.seek(31)
+    incoming.signalReady(); await flush(); await flush()
+    assert.equal(player.currentTrack.id, 'manual-a')
+    assert.equal(player.queue.length, 3)
+    assert.equal(player.queueHistory.length, 0)
+    assert.equal(player.manualSwitchTarget, null)
+    assert.equal(outgoing.paused, action === 'pause')
+    if (action === 'seek') assert.equal(outgoing.currentTime, 31)
+  })
+}
+
+test('cross queue rollback preserves sleep policy changed during preparation', async () => {
+  const { player, incoming } = await startManualQueue()
+  player.setSleepMinutes(15)
+  const deadline = player.sleepAt
+  await player.playUserQueue([local('new')]); await flush()
+  player.setSleepMode('track-end')
+  incoming.signalReady(); await flush(); await flush()
+  incoming.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.sleepMode, 'track-end')
+  assert.equal(player.sleepAt, deadline)
+})
+
+test('random rollback after previous retains the actual outgoing history position', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  player.setPlayMode('random')
+  await player.playQueueEntry(2); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  player.seek(1)
+  await player.previous(); await flush()
+  outgoing.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  outgoing.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget?.id, 'manual-a')
+})
+
+test('random rollback after selected track keeps the audible failed target in previous history', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  outgoing.currentTime = 1; pulseAudioProgress()
+  player.setPlayMode('random')
+  await player.playQueueEntry(2); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  incoming.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget?.id, 'manual-c')
+})
+
+test('random rollback of a new queue does not duplicate restored current history entry', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  player.setPlayMode('random')
+  await player.playQueueEntry(2); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  player.seek(1)
+  await player.playUserQueue([local('new')]); await flush()
+  outgoing.signalReady(); await flush(); await flush()
+  outgoing.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+  assert.equal(player.playMode, 'random')
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget?.id, 'manual-a')
+})
+
+async function expireSleep(player, action = () => pulseAudioProgress()) {
+  const now = Date.now
+  try { Date.now = () => player.sleepAt + 1; await action(); await flush() }
+  finally { Date.now = now }
+}
+
+test('sleep finish deadline exits AB and stops at whole-track end even in single mode', async () => {
+  const { player, outgoing } = await startManualQueue()
+  setLoopAt(player, outgoing, 10, 20)
+  player.setPlayMode('single')
+  player.setSleepMode('track-end'); player.setSleepMinutes(15)
+  await expireSleep(player)
+  assert.equal(player.sleepWaiting, true)
+  assert.equal(player.abLoop.enabled, false)
+  assert.equal(player.playing, true)
+  outgoing.finish(); await flush(); await flush()
+  assert.equal(player.playing, false)
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.sleepWaiting, false)
+})
+
+test('sleep finish deadline cancels pending manual readiness', async () => {
+  const { player, incoming } = await startManualQueue()
+  player.setSleepMode('track-end'); player.setSleepMinutes(15)
+  await player.next(); await flush()
+  await expireSleep(player)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.sleepWaiting, true)
+})
+
+test('sleep finish unknown duration stops immediately and clears timer', async () => {
+  const { player, outgoing } = await startManualQueue()
+  player.setSleepMode('track-end'); player.setSleepMinutes(15)
+  outgoing.duration = Infinity
+  await expireSleep(player)
+  assert.equal(player.playing, false)
+  assert.equal(player.sleepAt, null)
+})
+
+test('sleep finish paused current track waits and explicit selection cancels wait', async () => {
+  const { player, outgoing } = await startManualQueue()
+  player.setTransitionsEnabled(false)
+  player.setSleepMode('track-end'); player.setSleepMinutes(15)
+  await player.toggle()
+  await expireSleep(player)
+  assert.equal(player.sleepWaiting, true)
+  await player.toggle()
+  assert.equal(outgoing.paused, false)
+  await player.playQueueEntry(2); await flush()
+  assert.equal(player.sleepWaiting, false)
+  assert.equal(player.sleepAt, null)
+})
+
+test('sleep finish nonexpired deadline survives queue change and mode selection', async () => {
+  const { player } = await startManualQueue()
+  player.setSleepMinutes(15)
+  const deadline = player.sleepAt
+  player.setSleepMode('track-end')
+  await player.playQueue([local('new')])
+  assert.equal(player.sleepAt, deadline)
+  player.stop()
+  assert.equal(player.sleepAt, null)
+})
+
+test('cross queue preparation preserves live queue until first incoming playing', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  const original = player.queue.map(t => t.id)
+  await player.playUserQueue([local('new-a'), local('new-b')], 1, 'New list', { playMode: 'random' })
+  await flush()
+  assert.deepEqual(player.queue.map(t => t.id), original)
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.queueHistory.length, 0)
+  assert.equal(outgoing.paused, false)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'new-b')
+  assert.equal(player.queueLabel, 'New list')
+  assert.equal(player.playMode, 'random')
+  assert.deepEqual(player.queue.map(t => t.id), ['new-a', 'new-b'])
+  assert.deepEqual(player.queueHistory[0].queue.map(t => t.id), original)
+})
+
+test('cross queue preparation failure retains loop and nonexpired sleep deadline', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  setLoopAt(player, outgoing, 10, 20)
+  player.setSleepMinutes(15)
+  const deadline = player.sleepAt
+  await player.playUserQueue([local('new')]); await flush()
+  incoming.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.abLoop.enabled, true)
+  assert.equal(player.sleepAt, deadline)
+  assert.equal(player.queueHistory.length, 0)
+})
+
+test('cross queue incoming failure rolls back queue history mode and live outgoing clock', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  player.setPlayMode('repeat')
+  setLoopAt(player, outgoing, 10, 20)
+  await player.playUserQueue([local('new')], 0, 'New', { playMode: 'single', singleTrackAudition: true }); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  outgoing.currentTime = 24
+  incoming.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.currentTime, 24)
+  assert.equal(player.playMode, 'repeat')
+  assert.equal(player.singleTrackAudition, false)
+  assert.equal(player.queueHistory.length, 0)
+  assert.equal(player.abLoop.enabled, true)
+})
+
+test('cross queue next cancels uncommitted queue before navigating old queue', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.playUserQueue([local('new')]); await flush()
+  await player.next(); await flush()
+  assert.equal(player.manualSwitchTarget.id, 'manual-b')
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.equal(player.queue.length, 3)
+})
+
+test('cross queue old ended advances staged queue once instead of old next', async () => {
+  const { player, outgoing } = await startManualQueue()
+  await player.playUserQueue([local('new')], 0, 'New'); await flush()
+  outgoing.finish(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'new')
+  assert.equal(player.queue.length, 1)
+  assert.equal(player.queueHistory.length, 1)
+})
+
+test('cross queue disabling manual duration continues the same queue intent', async () => {
+  const { player } = await startManualQueue()
+  await player.playUserQueue([local('new')], 0, 'New'); await flush()
+  player.setManualCrossfadeDuration(0); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'new')
+  assert.equal(player.queueLabel, 'New')
+})
+
+test('cross queue latest replacement wins and edit cancels stale queue transaction', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.playUserQueue([local('first')]); await flush()
+  await player.playUserQueue([local('latest')]); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'latest')
+  await player.playUserQueue([local('stale')]); await flush()
+  player.insertNext([local('edited')])
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.currentTrack.id, 'latest')
+})
+
+test('cross queue rollback persistence wins over delayed commit without reverting unrelated settings', async () => {
+  const { player, incoming } = await startManualQueue()
+  const library = useLibraryStore(), held = deferred(), writes = []
+  let persisted = { ...library.settings, playbackRate: 1.25 }
+  window.jj.settings = { update: async patch => {
+    writes.push(structuredClone(patch))
+    if (writes.length === 1) await held.promise
+    persisted = { ...persisted, ...patch }; return persisted
+  } }
+  await player.playUserQueue([local('new')]); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  incoming.fail(3); await flush(); await flush()
+  held.resolve(); await flush(); await flush()
+  player.flushSession(); await flush(); await flush()
+  assert.equal(persisted.lastSession.track.id, 'manual-a')
+  assert.deepEqual(persisted.queueHistory, [])
+  assert.equal(persisted.playbackRate, 1.25)
+})
+
+test('sleep finish racing synchronous incoming playing commits one identity and releases outgoing', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  player.setSleepMode('track-end'); player.setSleepMinutes(15)
+  await player.playUserQueue([local('new')]); await flush()
+  await expireSleep(player, () => incoming.signalReady())
+  assert.equal(player.currentTrack.id, 'new')
+  assert.deepEqual(player.queue.map(t => t.id), ['new'])
+  assert.equal(player.sleepWaiting, true)
+  assert.equal(outgoing.paused, true)
+  assert.equal(incoming.paused, false)
+  incoming.finish(); await flush(); await flush()
+  assert.equal(player.playing, false)
+})
+
+test('cross queue same-target current-queue click replaces whole intent', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.playUserQueue([local('manual-b'), local('new-only')], 0, 'New list'); await flush()
+  await player.playQueueEntry(1); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.deepEqual(player.queue.map(t => t.id), ['manual-a', 'manual-b', 'manual-c'])
+  assert.equal(player.queueHistory.length, 0)
+})
+
+test('manual crossfade next preserves outgoing until prepared playback starts', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  await player.next()
+  await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(outgoing.paused, false)
+  assert.equal(outgoing.currentTime, 20)
+  assert.equal(player.manualSwitchTarget.id, 'manual-b')
+  incoming.signalReady()
+  await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.equal(player.manualSwitchTarget, null)
+})
+
+test('manual crossfade row selection can prepare a nonadjacent entry', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.playQueueEntry(2)
+  await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  incoming.signalReady()
+  await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+})
+
+test('manual crossfade preparation failure keeps outgoing without a player error', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  await player.next()
+  await flush()
+  incoming.fail(3)
+  await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(outgoing.paused, false)
+  assert.equal(player.error, null)
+  assert.equal(player.manualSwitchTarget, null)
+  assert.ok(player.manualSwitchFailure.message)
+})
+
+test('manual crossfade short incoming uses prepared immediate handoff', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.next()
+  await flush()
+  incoming.duration = 0.5
+  incoming.signalReady()
+  await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.equal(player.playing, true)
+})
+
+test('manual crossfade actual previous prepares while outgoing continues', async () => {
+  const { player, outgoing, incoming } = await startManualQueue(2)
+  outgoing.currentTime = 1
+  pulseAudioProgress()
+  await player.previous()
+  await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+  incoming.signalReady()
+  await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+})
+
+test('manual crossfade pending previous undoes navigation without restarting outgoing', async () => {
+  const { player, outgoing } = await startManualQueue()
+  await player.next(); await flush()
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(outgoing.currentTime, 20)
+})
+
+test('manual crossfade pause cancels a pending selection', async () => {
+  const { player, incoming } = await startManualQueue()
+  player.setTransitionsEnabled(false)
+  await player.next(); await flush()
+  await player.toggle()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.playing, false)
+})
+
+test('manual crossfade next-next selects latest target and previous retreats one request', async () => {
+  const { player, outgoing } = await startManualQueue()
+  await player.next(); await flush()
+  await player.next(); await flush()
+  assert.equal(player.manualSwitchTarget.id, 'manual-c')
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget.id, 'manual-b')
+  assert.equal(outgoing.currentTime, 20)
+})
+
+test('manual crossfade random draws hold replaced targets out and return unused draws once', async () => {
+  const { player, incoming } = await startManualQueue()
+  player.setPlayMode('random')
+  await player.next(); await flush()
+  const first = player.manualSwitchTarget.id
+  await player.next(); await flush()
+  const second = player.manualSwitchTarget.id
+  assert.notEqual(first, second)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, second)
+  await player.next(); await flush()
+  assert.equal(player.manualSwitchTarget.id, first)
+})
+
+test('manual crossfade seek cancels pending and late readiness cannot switch', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  player.seek(31)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(outgoing.currentTime, 31)
+})
+
+test('manual crossfade incoming failure rolls back live outgoing state', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  outgoing.currentTime = 33
+  incoming.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.currentTime, 33)
+  assert.equal(player.error, null)
+  assert.ok(player.manualSwitchFailure)
+})
+
+test('manual crossfade random pending chain cannot redraw a held target when exhausted', async () => {
+  const { player } = await startManualQueue()
+  player.setPlayMode('random')
+  await player.next(); await flush()
+  const first = player.manualSwitchTarget.id
+  await player.next(); await flush()
+  const second = player.manualSwitchTarget.id
+  await player.next(); await flush()
+  assert.equal(player.manualSwitchTarget.id, second)
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget.id, first)
+})
+
+test('manual crossfade same pending target reuses preparation without restarting', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.playQueueEntry(2); await flush()
+  const loads = incoming.loadCalls
+  await player.playQueueEntry(2); await flush()
+  assert.equal(incoming.loadCalls, loads)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+})
+
+test('manual crossfade automatic setting does not cancel manual preparation', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  player.setCrossfadeDuration(0)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+})
+
+test('manual crossfade disabling while preparing executes the selected legacy target', async () => {
+  const { player } = await startManualQueue()
+  await player.playQueueEntry(2); await flush()
+  player.setManualCrossfadeDuration(0)
+  await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+  assert.equal(player.manualSwitchTarget, null)
+})
+
+test('manual crossfade new intent during overlap finishes to committed incoming', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  await player.playQueueEntry(2); await flush()
+  assert.equal(outgoing.paused, true)
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.equal(player.manualSwitchTarget.id, 'manual-c')
+  outgoing.fail(3); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.equal(incoming.paused, false)
+})
+
+test('manual crossfade adopts automatic prepared target without a second media load', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([local('auto-a'), local('auto-b')])
+  player.setManualCrossfadeDuration(3000)
+  incoming.signalReady(); await flush(); await flush()
+  const loads = incoming.loadCalls
+  outgoing.currentTime = 165
+  pulseAudioProgress()
+  await player.next(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'auto-b')
+  assert.equal(incoming.loadCalls, loads)
+})
+
+test('manual crossfade failed row does not hijack subsequent natural next', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  player.setCrossfadeDuration(3000)
+  await player.playQueueEntry(2); await flush()
+  incoming.fail(3); await flush(); await flush()
+  outgoing.currentTime = 179
+  pulseAudioProgress(); await flush()
+  assert.equal(player.manualSwitchTarget, null)
+  outgoing.finish(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+})
+
+test('manual crossfade pending target wins over single-repeat when outgoing ends', async () => {
+  const { player, outgoing } = await startManualQueue()
+  player.setPlayMode('single')
+  await player.playQueueEntry(2); await flush()
+  outgoing.finish(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+  assert.equal(player.manualSwitchTarget, null)
+})
+
+test('manual crossfade unknown duration keeps protected prepared handoff', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  incoming.duration = Infinity
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+  assert.equal(player.playing, true)
+})
+
+test('manual crossfade stop and new queue invalidate pending readiness', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  player.stop()
+  incoming.signalReady(); await flush()
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.playing, false)
+  await player.playQueue([local('replacement')])
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'replacement')
+})
+
+test('manual crossfade only suppresses prefetch of the failed identity', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  await player.playQueueEntry(2); await flush()
+  incoming.fail(3); await flush(); await flush()
+  player.setCrossfadeDuration(3000)
+  outgoing.currentTime = 179
+  pulseAudioProgress(); await flush(); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+})
+
+test('manual crossfade replacing a request keeps row selection as navigation undo cursor', async () => {
+  const player = setup()
+  player.setManualCrossfadeDuration(3000)
+  await player.playQueue(['a', 'b', 'c', 'd'].map(local))
+  const outgoing = FakeAudio.instances[0]
+  outgoing.signalReady(); outgoing.currentTime = 20; pulseAudioProgress()
+  await player.next(); await flush()
+  await player.playQueueEntry(2); await flush()
+  await player.next(); await flush()
+  await player.previous(); await flush()
+  assert.equal(player.manualSwitchTarget?.id, 'c')
+  assert.equal(outgoing.currentTime, 20)
+})
+
+test('manual crossfade enabled single-entry next retains legacy restart', async () => {
+  const player = setup()
+  player.setManualCrossfadeDuration(3000)
+  await player.playQueue([local('only')])
+  const outgoing = FakeAudio.instances[0]
+  outgoing.signalReady(); outgoing.currentTime = 20; pulseAudioProgress()
+  await player.next(); await flush(); await flush()
+  assert.equal(player.currentTime, 0)
+  assert.equal(player.currentTrack.id, 'only')
+})
+
+test('manual crossfade waits for valid incoming playing before changing identity', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  const held = deferred()
+  incoming.play = () => { incoming.paused = false; return held.promise }
+  await player.next(); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.manualSwitchTarget.id, 'manual-b')
+  assert.equal(outgoing.paused, false)
+  incoming.dispatchEvent(new Event('playing'))
+  held.resolve(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-b')
+})
+
+test('manual crossfade rejected play before first playing clears pending and reports once', async () => {
+  const { player, outgoing, incoming } = await startManualQueue()
+  incoming.play = () => Promise.reject(new DOMException('unsupported synthetic media', 'NotSupportedError'))
+  await player.next(); await flush()
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(outgoing.paused, false)
+  assert.equal(player.manualSwitchTarget, null)
+  assert.ok(player.manualSwitchFailure)
+  const sequence = player.manualSwitchFailure.sequence
+  incoming.fail(3); await flush()
+  assert.equal(player.manualSwitchFailure.sequence, sequence)
+})
+
+test('manual crossfade source change cancels late ready target', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.next(); await flush()
+  sourceChangeHandlers.forEach(handler => handler())
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.currentTrack.id, 'manual-a')
+})
+
+test('manual crossfade target removal cancels pending while reordering keeps full identity', async () => {
+  const { player, incoming } = await startManualQueue()
+  await player.playQueueEntry(2); await flush()
+  player.moveInQueue(2, 1)
+  incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-c')
+  await player.playQueueEntry(2); await flush()
+  player.removeFromQueue('manual-b')
+  assert.equal(player.manualSwitchTarget, null)
+  assert.equal(player.currentTrack.id, 'manual-c')
+})
+
 async function startNearTrackEnd(tracks, { startIndex = 0, playMode = 'list', singleTrackAudition = false, crossfadeDurationMs = 5_000 } = {}) {
   const player = setup()
   player.setCrossfadeDuration(crossfadeDurationMs)

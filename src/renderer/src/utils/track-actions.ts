@@ -16,7 +16,7 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
   const locals = selection.filter((t): t is LocalMusicInfo => isLocalTrack(t))
   const downloadQualities=LX_QUALITIES.filter(q => online.length && online.every(t => library.sources.some(s=>s.id===t.source && s.actions.includes('musicUrl') && s.qualitys.includes(q))))
   return [
-    { label: selection.length > 1 ? `播放 ${selection.length} 首歌曲` : '播放', icon: 'play', action: () => player.playQueue(selection) },
+    { label: selection.length > 1 ? `播放 ${selection.length} 首歌曲` : '播放', icon: 'play', action: () => player.playUserQueue(selection) },
     { label: '插播', icon: 'list', children: [
       { label: '当前播放后', action: () => player.insertNext(selection) },
       { label: '队列末尾', action: () => player.addToQueue(selection) }
@@ -129,7 +129,17 @@ export function playbackActions(): MenuItem[] {
   return [
     { label: '播放模式', icon: 'list', children: (['list', 'repeat', 'single', 'random'] as const).map((mode, index) => ({ label: ['顺序播放', '列表循环', '单曲循环', '随机播放'][index], checked: player.playMode === mode, action: () => player.setPlayMode(mode) })) },
     { label: '播放速度', icon: 'audio', children: [0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => ({ label: `${rate} ×`, checked: player.rate === rate, action: () => player.setRate(rate) })) },
-    { label: '睡眠定时', icon: 'clock', children: [0, 15, 30, 45, 60, 90].map(minutes => ({ label: minutes ? `${minutes} 分钟后停止` : '关闭定时', checked: !minutes && !player.sleepAt, action: () => player.setSleepMinutes(minutes) })) },
+    { label: 'A–B 片段循环', icon: 'audio', children: [
+      { label: '设置 A 点（当前进度）', disabled: !player.currentTrack || player.sleepWaiting || !Number.isFinite(player.duration) || player.duration <= 0, action: () => player.setLoopA() },
+      { label: '设置 B 点（当前进度）', disabled: !player.abLoop || player.sleepWaiting || player.currentTime - player.abLoop.a < 1, action: () => player.setLoopB() },
+      { label: player.abLoop?.enabled ? '暂停片段循环' : '启用片段循环', checked: player.abLoop?.enabled === true, disabled: player.abLoop?.b == null || player.sleepWaiting, action: () => player.setLoopEnabled(!player.abLoop?.enabled) },
+      { label: '清除 A–B', disabled: !player.abLoop, action: () => player.clearLoop() }
+    ] },
+    { label: '睡眠定时', icon: 'clock', children: [
+      { label: '到点立即停止', checked: player.sleepMode === 'immediate', action: () => player.setSleepMode('immediate') },
+      { label: '到点播完当前曲再停止', checked: player.sleepMode === 'track-end', action: () => player.setSleepMode('track-end') },
+      ...[0, 15, 30, 45, 60, 90].map(minutes => ({ label: minutes ? `${minutes} 分钟后停止` : '关闭定时', checked: !minutes && !player.sleepAt && !player.sleepWaiting, action: () => player.setSleepMinutes(minutes) }))
+    ] },
     /*
      * The overlay's own right-click menu carries these too, but only while it is
      * unlocked — a locked strip ignores the mouse, so without a copy in the app

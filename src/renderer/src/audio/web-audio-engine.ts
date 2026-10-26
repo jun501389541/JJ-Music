@@ -523,11 +523,18 @@ export class WebAudioEngine implements AudioEngine {
     state.incoming.element.preload = 'auto'
     state.outgoing.element.preload = 'none'
     this.suppressEnded = false
-    state.controller.start(state.durationMs, () => this.finishCrossfade(state))
+    // A zero-duration envelope completes synchronously. Let consumers commit
+    // the audible handoff before its completion can clear their reservation.
+    let announcingStart = true
+    state.controller.start(state.durationMs, () => {
+      if (announcingStart) state.finishOnStart = true
+      else this.finishCrossfade(state)
+    })
     this.emit('ready', this.getDuration())
     this.emit('playing')
     this.startProgressLoop()
     state.resolveStarted()
+    announcingStart = false
     if (state.finishOnStart) this.finishCrossfade(state)
   }
 

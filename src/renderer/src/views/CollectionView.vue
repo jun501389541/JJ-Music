@@ -38,9 +38,9 @@ function revealPlaying(): void {
 </script>
 <template>
   <div class="view collection-view">
-    <header class="view__header"><div><h1 class="view__title">流派</h1><p class="view__subtitle">{{ selected || `${groups.length} 个流派` }}</p></div><div v-if="selected" class="header-actions"><button class="btn btn--primary" type="button" :disabled="tracks.length === 0" @click="player.playQueue(tracks, 0)">播放全部</button><button class="btn" type="button" @click="open('')">返回全部</button></div></header>
+    <header class="view__header"><div><h1 class="view__title">流派</h1><p class="view__subtitle">{{ selected || `${groups.length} 个流派` }}</p></div><div v-if="selected" class="header-actions"><button class="btn btn--primary" type="button" :disabled="tracks.length === 0" @click="player.playUserQueue(tracks, 0)">播放全部</button><button class="btn" type="button" @click="open('')">返回全部</button></div></header>
     <div v-if="!selected" class="collection-grid"><button v-for="group in groups" :key="group.key" class="collection-card" @click="open(group.key)"><span><AppIcon name="genre" :size="32" /></span><strong>{{ group.name }}</strong><small>{{ group.count }} 首歌曲</small></button></div>
-    <TrackList v-if="selected" ref="trackList" :tracks="tracks" @play="(_, index) => player.playQueue(tracks, index)" />
+    <TrackList v-if="selected" ref="trackList" :tracks="tracks" @play="(_, index) => player.playUserQueue(tracks, index)" />
     <div v-if="!groups.length && !selected" class="empty"><span class="empty__title">还没有音乐</span><button class="btn" @click="router.push('/music-library')">添加音乐文件夹</button></div>
     <LocatePlaying v-if="playingIndex >= 0" @locate="revealPlaying" />
   </div>

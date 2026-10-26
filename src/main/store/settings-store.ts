@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   playMode: 'list',
   shortAudioTransitions: true,
   crossfadeDurationMs: 0,
+  manualCrossfadeDurationMs: 0,
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
@@ -82,7 +83,8 @@ export class SettingsStore {
       this.settings = {
         ...DEFAULT_SETTINGS,
         ...current,
-        crossfadeDurationMs: sanitizeCrossfadeDuration(current.crossfadeDurationMs)
+        crossfadeDurationMs: sanitizeCrossfadeDuration(current.crossfadeDurationMs),
+        manualCrossfadeDurationMs: sanitizeCrossfadeDuration(current.manualCrossfadeDurationMs)
       }
     }
     return this.settings
@@ -99,6 +101,9 @@ export class SettingsStore {
     delete current.onlineCatalogConsentPrompted
     if ('crossfadeDurationMs' in current) {
       current.crossfadeDurationMs = sanitizeCrossfadeDuration(current.crossfadeDurationMs)
+    }
+    if ('manualCrossfadeDurationMs' in current) {
+      current.manualCrossfadeDurationMs = sanitizeCrossfadeDuration(current.manualCrossfadeDurationMs)
     }
     this.settings = { ...this.settings, ...current }
     await this.persist()

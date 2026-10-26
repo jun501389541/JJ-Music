@@ -12,9 +12,9 @@ test('double-clicking either search result starts only the selected track', () =
   const playAt = source.match(/async function playAt\(index: number\): Promise<void> \{([\s\S]*?)\n\}/)?.[1]
 
   assert.ok(playAt, 'SearchView must keep a single playAt entrypoint for local and online results')
-  assert.match(playAt, /player\.playQueue\(\[track\],\s*0,/)
+  assert.match(playAt, /player\.playUserQueue\(\[track\],\s*0,/)
   assert.match(playAt, /singleTrackAudition:\s*true/)
-  assert.doesNotMatch(playAt, /playQueue\(\s*results\.value/)
+  assert.doesNotMatch(playAt, /playUserQueue\(\s*results\.value/)
   assert.doesNotMatch(playAt, /playOnlineFromDefaultList/)
 })
 
@@ -22,7 +22,7 @@ test('play all names and plays the currently loaded search results', () => {
   const playAll = source.match(/async function playAll\(\): Promise<void> \{([\s\S]*?)\n\}/)?.[1]
 
   assert.ok(playAll, 'SearchView must expose a playAll action')
-  assert.match(playAll, /player\.playQueue\(results\.value,\s*0,/)
+  assert.match(playAll, /player\.playUserQueue\(results\.value,\s*0,/)
   assert.match(source, /播放全部（已加载\s*\{\{\s*results\.length\s*\}\}\s*首）/)
 })
 

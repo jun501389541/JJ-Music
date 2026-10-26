@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { isLocalTrack } from '@shared/types'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -32,6 +32,20 @@ function openMore(event: MouseEvent): void {
 }
 const cover = computed(() => trackCoverUrl(player.currentTrack) ?? null)
 const lyric = computed(() => player.lyrics?.lines[player.activeLyricIndex]?.text)
+const statusNow = ref(Date.now())
+watch(() => player.sleepAt, () => { statusNow.value = Date.now() })
+let statusTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => { statusTimer = setInterval(() => { statusNow.value = Date.now() }, 1000) })
+onUnmounted(() => { if (statusTimer !== undefined) clearInterval(statusTimer) })
+const playbackStatus = computed(() => {
+  const parts: string[] = []
+  if (player.sleepWaiting) parts.push('播完当前曲后停止')
+  else if (player.sleepAt) parts.push(`睡眠定时 ${Math.max(0, Math.ceil((player.sleepAt - statusNow.value) / 60000))} 分钟`)
+  if (player.manualSwitchTarget) parts.push(`正在准备切换至 ${player.manualSwitchTarget.name}${player.manualSwitchQueueLabel ? ` · ${player.manualSwitchQueueLabel}` : ''}`)
+  if (player.abLoop) parts.push(`A–B ${formatTime(player.abLoop.a)}–${player.abLoop.b === null ? '待设 B' : formatTime(player.abLoop.b)} ${player.abLoop.enabled && !player.manualSwitchTarget ? '循环' : '暂停'}`)
+  return parts.length ? parts.join(' · ') : player.error || lyric.value || ''
+})
+
 const spec = computed(() => { const t = player.currentTrack; return t && isLocalTrack(t) && t.sampleRate ? `${t.sampleRate / 1000} kHz` : t && !isLocalTrack(t) ? (player.resolvedResource?.actual.source ?? t.source).toUpperCase() : '—' })
 
 /**
@@ -125,7 +139,7 @@ const timeLabel = computed(() => {
       -->
       <span class="mini-meta"><strong>{{ player.currentTrack ? (player.currentTrack.name || '未知曲目') : '未载入歌曲' }}</strong><small><slot name="meta">{{ player.currentTrack ? (player.currentTrack.singer || '未知艺术家') : '选择一首歌曲，开始聆听' }}</slot><template v-if="player.resolvedSourceName"> · {{ player.resolvedSourceName }}</template></small></span>
     </component>
-    <component :is="bare ? 'div' : 'button'" class="mini-lyric" @click="openPlayingView">{{ player.error || lyric || '' }}</component>
+    <component :is="bare ? 'div' : 'button'" class="mini-lyric" @click="openPlayingView">{{ playbackStatus }}</component>
   </div>
   <div class="mini-center">
     <!--

@@ -34,7 +34,7 @@ function coverUrl(track: PlayableTrack): string | null {
 }
 
 async function playRecent(index: number): Promise<void> {
-  await player.playQueue(recent.value, index)
+  await player.playUserQueue(recent.value, index)
 }
 
 async function shuffleAll(): Promise<void> {
@@ -44,8 +44,7 @@ async function shuffleAll(): Promise<void> {
     const j = Math.floor(Math.random() * (i + 1))
     ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
   }
-  player.setPlayMode('random')
-  await player.playQueue(shuffled, 0)
+  await player.playUserQueue(shuffled, 0, '', { playMode: 'random' })
 }
 </script>
 

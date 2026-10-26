@@ -30,7 +30,7 @@ function cancel():void{request?.abort();request=null;lease.start();busy.value=fa
 async function play(_track?:PlayableTrack,index=0):Promise<void>{
  const data=preview.value;if(!data?.tracks.length)return
  if(!library.playableSources.length){toast.info('歌单可正常浏览；播放请先在设置中启用音源');return}
- await player.playQueue(data.tracks,index,data.name)
+ await player.playUserQueue(data.tracks,index,data.name)
 }
 async function save():Promise<void>{
  const data=preview.value;if(!data?.tracks.length||saving.value||busy.value)return

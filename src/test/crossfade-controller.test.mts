@@ -25,11 +25,11 @@ class FakeGainParameter {
   }
 }
 
-function fixture(startSeconds = 0) {
+function fixture(startSeconds = 0, Parameter = FakeGainParameter) {
   const clock = { milliseconds: startSeconds * 1_000 }
   const timers = []
-  const outgoing = new FakeGainParameter()
-  const incoming = new FakeGainParameter()
+  const outgoing = new Parameter()
+  const incoming = new Parameter()
   const schedule = (callback, delayMs) => {
     const timer = {
       callback,
@@ -183,4 +183,67 @@ test('cancelled callbacks cannot finish a newer transition', () => {
   assert.equal(completions, 0)
   advance(1)
   assert.equal(completions, 1)
+})
+
+// Exercise the overlapping-curve rejection seen in native Electron. Keep
+// already-started automation until the controller explicitly removes it.
+class OverlappingCurveParameter extends FakeGainParameter {
+  scheduled = []
+  cancelScheduledValues(time) {
+    super.cancelScheduledValues(time)
+    this.scheduled = this.scheduled.filter(curve => curve.startTime < time)
+  }
+  cancelAndHoldAtTime(time) {
+    if (this.scheduled.some(curve => curve.startTime < time && time < curve.startTime + curve.duration)) {
+      throw new DOMException('cancelAndHoldAtTime overlaps setValueCurveAtTime', 'NotSupportedError')
+    }
+  }
+  setValueAtTime(value, time) {
+    if (this.scheduled.some(curve => curve.startTime < time && time < curve.startTime + curve.duration)) {
+      throw new DOMException('setValueAtTime overlaps an active curve', 'NotSupportedError')
+    }
+    super.setValueAtTime(value, time)
+  }
+  setValueCurveAtTime(values, startTime, duration) {
+    if (this.scheduled.some(curve => startTime < curve.startTime + curve.duration && startTime + duration > curve.startTime)) {
+      throw new DOMException('setValueCurveAtTime overlaps an active curve', 'NotSupportedError')
+    }
+    this.scheduled.push({ startTime, duration })
+    super.setValueCurveAtTime(values, startTime, duration)
+  }
+}
+
+for (const action of ['pause', 'finish', 'cancel']) {
+  test(`active curve ${action} remains safe when native cancelAndHoldAtTime rejects overlapping automation`, () => {
+    const { controller, outgoing, incoming, advance } = fixture(5, OverlappingCurveParameter)
+    let completions = 0
+    controller.start(4000, () => { completions += 1 })
+    advance(1000)
+    assert.doesNotThrow(() => controller[action]())
+    assert.equal(outgoing.scheduled.length, 0)
+    assert.equal(incoming.scheduled.length, 0)
+    if (action === 'pause') {
+      closeTo(outgoing.lastSetValue, Math.cos(Math.PI / 8))
+      closeTo(incoming.lastSetValue, Math.sin(Math.PI / 8))
+    } else {
+      assert.equal(outgoing.lastSetValue, action === 'finish' ? 0 : 1)
+      assert.equal(incoming.lastSetValue, action === 'finish' ? 1 : 0)
+      assert.equal(completions, action === 'finish' ? 1 : 0)
+    }
+  })
+}
+
+test('retiming replaces an already-started curve rather than overlapping it', () => {
+  const { controller, outgoing, incoming, advance } = fixture(5, OverlappingCurveParameter)
+  controller.start(4000)
+  advance(1000)
+  assert.doesNotThrow(() => controller.retimeRemaining(1000))
+  assert.equal(outgoing.scheduled.length, 1)
+  assert.equal(incoming.scheduled.length, 1)
+  assert.equal(outgoing.scheduled[0].startTime, 6)
+  assert.equal(outgoing.scheduled[0].duration, 1)
+  closeTo(outgoing.curves.at(-1).values[0], Math.cos(Math.PI / 8))
+  advance(1000)
+  assert.equal(outgoing.lastSetValue, 0)
+  assert.equal(incoming.lastSetValue, 1)
 })

@@ -21,9 +21,9 @@ assert.equal(owner.root, root)
 const profile = resolve(process.env.APPDATA, 'jj-music')
 assert.equal(owner.profile.toLowerCase(), profile.toLowerCase())
 const exe = join(root, 'Installed', 'JJ Music', 'JJ Music.exe')
-const targetHash = '4310c9bb2d69a889749085c7cfe93413509717e1f8da0bce20ef9f01565a08ed'
+const targetHash = 'f770dab8f921b2746b2c96feab929538faf202d18d23d811f61ccf1abf2d0fc5'
 const report = { kind: 'official-packaged-updater', status: 'running', started: new Date().toISOString(), root,
-  oldVersion: '0.4.2', targetVersion: '0.5.0', stages: [], checks: [] }
+  oldVersion: '0.4.2', targetVersion: '0.6.0', stages: [], checks: [] }
 const sleep = ms => new Promise(done => setTimeout(done, ms))
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 let ws, child, stage = 'launch', evaluate
@@ -162,15 +162,15 @@ try {
   stage = 'check'
   const available = await evaluate('window.jj.updates.check()', 180_000)
   await record('check', available)
-  check('actual official check offers exactly 0.5.0', available.phase === 'available' && available.version === '0.5.0')
+  check('actual official check offers exactly 0.6.0', available.phase === 'available' && available.version === '0.6.0')
   stage = 'download'
   const ready = await evaluate('window.jj.updates.download()', 300_000)
   await record('download', ready)
-  check('actual production downloader reaches ready', ready.phase === 'ready' && ready.version === '0.5.0')
+  check('actual production downloader reaches ready', ready.phase === 'ready' && ready.version === '0.6.0')
   const files = await cacheInventory()
   await record('download-cache', files)
   const installers = files.filter(item => item.sha256 === targetHash && item.path.endsWith('.exe'))
-  check('exact official 0.5.0 Setup SHA256 downloaded', installers.length === 1)
+  check('exact official 0.6.0 Setup SHA256 downloaded', installers.length === 1)
   await screenshot(command, 'ready-to-install')
   // The supervisor will touch UI only for this exact verified file and its pinned hash.
   await writeFile(join(root, 'installer-request.json'), JSON.stringify({ path: installers[0].path, sha256: targetHash }))
@@ -187,7 +187,7 @@ try {
   command = await connect(240_000, restartPort)
   const after = await evaluate('window.jj.updates.status()')
   await record('restarted-status', after)
-  check('installer restarted actual version 0.5.0', after.currentVersion === '0.5.0')
+  check('installer restarted actual version 0.6.0', after.currentVersion === '0.6.0')
   check('restart retains synthetic profile location', resolve((await evaluate('window.jj.data.location()')).dir).toLowerCase() === profile.toLowerCase())
   const settings = await evaluate('window.jj.settings.get()')
   check('restart preserves theme and volume', settings.theme === 'light' && settings.volume === 0.37)

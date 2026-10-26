@@ -70,3 +70,13 @@ Chromium webRequest 对取消连接会报告准确请求编号。新增 `source-
 - 本轮仅扩展探针与验收记录，没有修改生产代码；沿用此前完整 verify 的历史记录，不将它报告为本轮重跑结果。
 
 最新运行的本地产物仍位于 .cache/online-reliability-streams/native-acceptance.json。真实音源全曲解码、听感、日常 UI、真实更新回退、安装升级验收继续保留其原有状态。
+
+## 2026-10-26：原生探针资料目录清理
+
+检查发现 `source-media-lifecycle.mjs` 每次启动都会在 `.cache/online-reliability-streams` 创建唯一 `native-profile-*` 目录，但进程结束后没有清理，成功和失败运行都会累积测试资料。新增 `withDisposableProfile`，无论 Electron 探针成功还是抛错都删除本次创建的目录；启动超时现在先终止并等待子进程关闭，再进入清理，避免与仍运行的 Chromium 争用资料文件。
+
+`source-media-probe-profile.test.mts` 用真实临时目录覆盖成功和失败两条退出路径，2/2 通过。完整 `npm run verify` 退出码 0：119/119 离线套件、5/5 内置 gate 通过；构建输出有一条 `search.ts` 同时被动态和静态导入的 Vite 分块提示，不影响构建结果。
+
+修复后原生 Electron 复验 runId `1792945756078-56412`：Electron 42.11.8，9/9 媒体生命周期用例通过，`blockedExternalRequests=0`。该成功运行未新增残留目录。沙箱默认启动时的独立尝试曾以 `0x80000003` 失败并留下一个由本轮探针创建的目录；确认路径位于本项目固定 `.cache` 探针目录后已清理。此前 10 月 16 日和 20 日的历史 profile 均保留。
+
+以上只验证探针资源清理和合成流协议生命周期，不代表真实音源、完整曲目解码、听感、日常 UI 或安装升级验收通过；不涉及生产播放代码、提交或发布。

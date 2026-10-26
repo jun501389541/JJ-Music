@@ -23,6 +23,8 @@ export interface AudioEngineCapabilities {
   timeStretch: boolean
   /** Supports bit-perfect / exclusive output. */
   exclusive: boolean
+  /** Can prepare and crossfade two tracks in the same audio graph. */
+  crossfade?: boolean
 }
 
 export interface AudioEngineEvents {
@@ -60,6 +62,27 @@ export interface LoadOptions {
   startAt?: number
 }
 
+/** Engine-owned handle for one prepared, inactive track deck. */
+export interface PreparedAudioTrack {
+  readonly token: number
+  /** Media duration reported by the prepared deck, in seconds; 0 means unknown. */
+  readonly durationSeconds: number
+}
+
+/** Lifecycle of a two-deck transition after the incoming track is prepared. */
+export interface CrossfadeOperation {
+  /** Resolves once the incoming deck is audible and its fade has begun. */
+  readonly started: Promise<void>
+  /** Resolves when the outgoing deck is released; rejects if the fade fails. */
+  readonly completed: Promise<void>
+  pause(): void
+  resume(): void
+  /** Keep the incoming deck and release the outgoing deck immediately. */
+  finish(): void
+  /** Restore the outgoing deck and release the incoming deck. */
+  cancel(): void
+}
+
 /**
  * Contract every audio engine must satisfy.
  *
@@ -74,6 +97,12 @@ export interface AudioEngine {
 
   /** Load a track, replacing whatever was loaded. Resolves when ready. */
   load(options: LoadOptions): Promise<void>
+  /** Prepare an inactive deck without changing the currently audible track. */
+  prepareTrack?(options: LoadOptions, signal?: AbortSignal): Promise<PreparedAudioTrack>
+  /** Start a crossfade from the active track to a prepared deck. */
+  crossfadeTo?(track: PreparedAudioTrack, durationMs: number): CrossfadeOperation
+  /** Cancel and release a prepared deck that has not entered a crossfade. */
+  discardPreparedTrack?(track: PreparedAudioTrack): void
   play(fadeInMs?: number): Promise<void>
   pause(fadeOutMs?: number): void | Promise<void>
   fadeOut?(durationMs: number): Promise<boolean>
@@ -125,6 +154,14 @@ export interface AudioEngine {
   setOutputDevice(deviceId: string): Promise<boolean>
   /** The device currently in use, or `''` for the system default. */
   getOutputDevice(): string
+}
+
+/** Guard engines that can honor the complete two-deck lifecycle contract. */
+export function supportsCrossfade(engine: AudioEngine): boolean {
+  return engine.capabilities.crossfade === true &&
+    typeof engine.prepareTrack === 'function' &&
+    typeof engine.crossfadeTo === 'function' &&
+    typeof engine.discardPreparedTrack === 'function'
 }
 
 /** One selectable audio output. */

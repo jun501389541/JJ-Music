@@ -17,10 +17,9 @@ test('empty differs from malformed; page 10 caps at 200 and invalid args never f
  assert.equal(calls,1);await assert.rejects(new PlaylistSearchAdapter(async()=>json({code:200,result:{}})).search('wy','x',1),e=>e.failure?.code==='schemaChanged')
 })
 
-test('unsupported QQ search never reaches HTTP and unsafe artwork never reaches renderer',async()=>{
+test('unsafe artwork never reaches renderer',async()=>{
  let calls=0
  const adapter=new PlaylistSearchAdapter(async()=>{calls++;return json({code:200,result:{playlistCount:1,playlists:[{id:1,name:'Safe',coverImgUrl:'https://127.0.0.1/a',creator:{nickname:'Author'}}]}})})
- await assert.rejects(adapter.search('tx','test'),e=>e.failure?.code==='unsupported');assert.equal(calls,0)
  const result=await adapter.search('wy','test');assert.equal(result.items[0].coverUrl,undefined)
 })
 

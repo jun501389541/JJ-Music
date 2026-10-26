@@ -105,6 +105,8 @@ await build({
     join(repoRoot, 'src', 'main', 'library', 'batch-file-relink.ts'),
     join(repoRoot, 'src', 'main', 'library', 'playlist-backup.ts'),
     join(repoRoot, 'src', 'main', 'library', 'playlist-restore.ts'),
+    join(repoRoot, 'src', 'main', 'library', 'playlist-derive.ts'),
+    join(repoRoot, 'src', 'main', 'library', 'playlist-bulk-rename.ts'),
     join(repoRoot, 'src', 'main', 'library', 'missing-files.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search.ts'),
     join(repoRoot, 'src', 'main', 'online', 'search-router.ts'),
@@ -139,7 +141,10 @@ await build({
 await build({
   ...shared,
   entryPoints: [
+        join(repoRoot, 'src', 'shared', 'audio-engine.ts'),
+        join(repoRoot, 'src', 'shared', 'crossfade.ts'),
         join(repoRoot, 'src', 'shared', 'types.ts'),
+        join(repoRoot, 'src', 'shared', 'playlist-bulk-rename.ts'),
         join(repoRoot, 'src', 'shared', 'playback-reliability.ts'),
         join(repoRoot, 'src', 'shared', 'persisted-track.ts'),
         join(repoRoot, 'src', 'shared', 'media-url.ts'),
@@ -159,6 +164,7 @@ await build({
   external: [...shared.external, 'vue', 'pinia'],
   splitting: true,
   entryPoints: [
+    join(repoRoot, 'src', 'renderer', 'src', 'audio', 'crossfade-controller.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'lyrics.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'web-audio-engine.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'gain-transition.ts'),
@@ -192,6 +198,25 @@ await build({
   format: 'cjs',
   entryPoints: [join(repoRoot, 'src', 'main', 'sources', 'source-host.ts')],
   outfile: join(outDir, 'source-host.cjs')
+})
+
+// This native Electron lifecycle probe uses the production player store and
+// Web Audio engine with synthetic loopback media. Bundle Vue and Pinia here so
+// Chromium can execute the same renderer code without a dev server or network.
+await build({
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  globalName: 'JJCrossfadeLifecycleBundle',
+  target: 'chrome132',
+  sourcemap: false,
+  logLevel: 'info',
+  alias: {
+    '@shared': join(repoRoot, 'src', 'shared'),
+    '@main': join(repoRoot, 'src', 'main')
+  },
+  entryPoints: [join(repoRoot, 'tools', 'probe', 'crossfade-lifecycle-bundle.ts')],
+  outfile: join(outDir, 'crossfade-lifecycle.js')
 })
 
 console.log(`\nengine bundle ready in ${outDir}`)

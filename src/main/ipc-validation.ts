@@ -1,3 +1,5 @@
+import {assertDeriveArgs} from '@shared/playlist-derive'
+import {assertPlaylistBulkRenameSelection,parsePlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
 import { assertPlaylistSearch } from '@shared/playlist-search'
 import { IPC } from '@shared/ipc'
 import { assertChartArgs } from '@shared/chart-types'
@@ -88,6 +90,23 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
     case IPC.sourcesUpdateApply:
       if(args.length>3||!str(args[0],256)||!str(args[1],4*1024*1024)||
         (args[2]!==undefined&&(typeof args[2]!=='string'||!/^[a-f0-9]{64}$/i.test(args[2]))))bad()
+      break
+    case IPC.playlistDerivePreview:
+      if(args.length<3||args.length>4||!request(args[3]))bad()
+      assertDeriveArgs(args[0],args[1],args[2])
+      break
+    case IPC.playlistDeriveApply:
+    case IPC.playlistDeriveDiscard:
+      if(args.length!==1||!uuid(args[0]))bad()
+      break
+    case IPC.playlistBulkRenamePreview:
+      if(args.length<2||args.length>3||!request(args[2]))bad()
+      assertPlaylistBulkRenameSelection(args[0])
+      parsePlaylistBulkRenameTransform(args[1])
+      break
+    case IPC.playlistBulkRenameApply:
+    case IPC.playlistBulkRenameDiscard:
+      if(args.length!==1||!uuid(args[0]))bad()
       break
     case IPC.playlistRefreshPreview:
       if(args.length>2||!str(args[0],256)||!request(args[1]))bad()

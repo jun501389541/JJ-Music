@@ -13,6 +13,8 @@ function deferred() {
   return { promise, resolve, reject }
 }
 const flush = () => new Promise(resolve => setImmediate(resolve))
+let progressCallbacks = []
+function pulseAudioProgress() { for (const callback of progressCallbacks) callback?.() }
 const emptyLyric = { lyric: '', source: 'none', synchronized: false }
 const lyric = text => ({ lyric: `[00:01.00]${text}`, source: 'sidecar', synchronized: true })
 const local = id => ({ id, name: id, singer: 'Artist', path: `D:/test/${id}.flac` })
@@ -30,9 +32,13 @@ class FakeAudio extends EventTarget {
   error = null
   playCalls = 0
   playResult = null
+  loadCalls = 0
+  playbackRate = 1
+  preservesPitch = true
   getAttribute(name) { return name === 'src' ? this.src || null : null }
   removeAttribute(name) { if (name === 'src') this.src = '' }
-  load() { this.ended = false; this.error = null }
+  load() { this.loadCalls++; this.ended = false; this.error = null }
+  signalReady() { this.readyState = 4; this.dispatchEvent(new Event('loadedmetadata')); this.dispatchEvent(new Event('canplay')) }
   play() {
     this.playCalls++
     this.paused = false
@@ -44,15 +50,18 @@ class FakeAudio extends EventTarget {
   finish() { this.ended = true; this.paused = true; this.dispatchEvent(new Event('ended')) }
   fail(code = 2) { this.error = { code }; this.dispatchEvent(new Event('error')) }
 }
-const param = () => ({ value: 0, setTargetAtTime() {} })
+const param = () => ({ value: 0, curves: [], cancelScheduledValues() {}, setValueAtTime(value) { this.value = value }, setValueCurveAtTime(values, startTime, duration) { this.curves.push({ startTime, duration, values: [...values] }); this.value = values.at(-1) }, setTargetAtTime(value) { this.value = value } })
 const node = () => ({ connect() {}, disconnect() {}, frequency: param(), Q: param(), gain: param() })
 class FakeAudioContext {
+  static instances = []
+  constructor() { FakeAudioContext.instances.push(this) }
   state = 'running'
   currentTime = 0
   destination = {}
+  gains = []
   createMediaElementSource() { return node() }
   createBiquadFilter() { return node() }
-  createGain() { return node() }
+  createGain() { const value = node(); this.gains.push(value); return value }
   createAnalyser() { return { ...node(), frequencyBinCount: 1024 } }
   async resume() {}
   async close() {}
@@ -66,13 +75,15 @@ function setup() {
   setActivePinia(createPinia())
   FakeAudio.instances = []
   sourceChangeHandlers = []
+  progressCallbacks = []
+  FakeAudioContext.instances = []
   globalThis.window = {
     AudioContext: FakeAudioContext,
     // The engine samples playback position on a timer. Kept inert: no test
     // asserts on the progress loop, and letting it tick for real would emit
     // 'progress' after the test body has finished.
-    setInterval: () => 1,
-    clearInterval: () => {},
+    setInterval: callback => { progressCallbacks.push(callback); return progressCallbacks.length - 1 },
+    clearInterval: id => { progressCallbacks[id] = undefined },
     jj: {
       music: { cancel: () => {}, url: async () => ({ url: 'https://test/audio', quality: '320k' }), enrich: async track => track },
       lyric: { resolve: async () => emptyLyric, searchOnline: async () => emptyLyric, importFile: async () => null },
@@ -88,6 +99,32 @@ function setup() {
   store = usePlayerStore()
   store.setQuality('320k')
   return store
+}
+
+async function startNearTrackEnd(tracks, { startIndex = 0, playMode = 'list', singleTrackAudition = false, crossfadeDurationMs = 5_000 } = {}) {
+  const player = setup()
+  player.setCrossfadeDuration(crossfadeDurationMs)
+  await player.playQueue(tracks, startIndex, 'crossfade test', { playMode, singleTrackAudition })
+  const outgoing = FakeAudio.instances[0]
+  const incoming = FakeAudio.instances[1]
+  outgoing.signalReady()
+  await flush()
+  outgoing.currentTime = Math.max(0, outgoing.duration - 20)
+  pulseAudioProgress()
+  await flush()
+  await flush()
+  return { player, outgoing, incoming }
+}
+async function startCrossfadeNow(tracks, options) {
+  const state = await startNearTrackEnd(tracks, options)
+  state.incoming.signalReady()
+  await flush()
+  await flush()
+  state.outgoing.currentTime = state.outgoing.duration - 4
+  pulseAudioProgress()
+  await flush()
+  await flush()
+  return state
 }
 function setupPlaylistStorage({ fail = false } = {}) {
   const lists = { default: [], favorites: [] }
@@ -123,8 +160,8 @@ test('local relink preserves current resume position through finish and close wi
   assert.equal(player.playing, false)
   assert.equal(player.currentIndex, 0)
   await player.toggle()
-  FakeAudio.instances.at(-1).dispatchEvent(new Event('loadedmetadata'))
-  assert.equal(FakeAudio.instances.at(-1).currentTime, 73, 'explicit resume seeks to the preserved position')
+  FakeAudio.instances[0].dispatchEvent(new Event('loadedmetadata'))
+  assert.equal(FakeAudio.instances[0].currentTime, 73, 'explicit resume seeks to the preserved position')
 })
 
 test('local relink retains saved resume position when the missing media reports zero progress', async () => {
@@ -645,7 +682,318 @@ test('natural queue advance adds no manual-switch fade to the next song', async 
   await flush()
   assert.equal(player.currentTrack.id, 'natural-b')
   assert.match(FakeAudio.instances[0].src, /natural-b/)
-  assert.equal(advanceAudio(0).gains[1].gain.value, 1)
+  assert.equal(advanceAudio(0).gains[3].gain.value, 1)
+})
+
+test('ineligible modes and disabled duration keep the existing ended path', async () => {
+  const disabled = await startNearTrackEnd([local('xfade-off-a'), local('xfade-off-b')], { crossfadeDurationMs: 0 })
+  assert.equal(disabled.incoming.src, '')
+  disabled.outgoing.finish()
+  await flush()
+  assert.equal(disabled.player.currentTrack.id, 'xfade-off-b')
+
+  const single = await startNearTrackEnd([local('xfade-single-a'), local('xfade-single-b')], { playMode: 'single' })
+  assert.equal(single.incoming.src, '')
+  single.outgoing.finish()
+  await flush()
+  assert.equal(single.player.currentTrack.id, 'xfade-single-a')
+
+  const audition = await startNearTrackEnd([local('xfade-audition-a')], { singleTrackAudition: true })
+  assert.equal(audition.incoming.src, '')
+})
+
+test('crossfade duration is measured in wall-clock seconds at 0.5x', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd(
+    [local('xfade-half-a'), local('xfade-half-b')], { crossfadeDurationMs: 4_000 }
+  )
+  player.setRate(0.5)
+  incoming.signalReady()
+  await flush()
+  outgoing.currentTime = outgoing.duration - 2
+  pulseAudioProgress()
+  await flush()
+  await flush()
+
+  const scheduled = FakeAudioContext.instances[0].gains[0].gain.curves.at(-1)
+  assert.equal(player.currentTrack.id, 'xfade-half-b')
+  assert.equal(scheduled.duration, 4)
+})
+
+test('crossfade starts and uses the configured wall-clock duration at 2x', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd(
+    [local('xfade-double-a'), local('xfade-double-b')], { crossfadeDurationMs: 4_000 }
+  )
+  player.setRate(2)
+  incoming.signalReady()
+  await flush()
+  outgoing.currentTime = outgoing.duration - 8
+  pulseAudioProgress()
+  await flush()
+  await flush()
+
+  const scheduled = FakeAudioContext.instances[0].gains[0].gain.curves.at(-1)
+  assert.equal(player.currentTrack.id, 'xfade-double-b')
+  assert.equal(scheduled.duration, 4)
+})
+
+test('list tail stops without reserving while repeat wraps to its reserved first row', async () => {
+  const listTail = await startNearTrackEnd([local('xfade-tail-a'), local('xfade-tail-b')], { startIndex: 1 })
+  assert.equal(listTail.incoming.src, '')
+  listTail.outgoing.finish()
+  await flush()
+  assert.equal(listTail.player.currentTrack.id, 'xfade-tail-b')
+  assert.equal(listTail.player.playing, false)
+
+  const repeat = await startNearTrackEnd([local('xfade-repeat-a'), local('xfade-repeat-b')], { startIndex: 1, playMode: 'repeat' })
+  assert.match(repeat.incoming.src, /xfade-repeat-a/)
+  repeat.outgoing.finish()
+  await flush()
+  assert.equal(repeat.player.currentTrack.id, 'xfade-repeat-a')
+})
+
+test('duplicate queue identities and too-short prepared media retain normal playback', async () => {
+  const duplicate = local('xfade-duplicate')
+  const repeated = await startNearTrackEnd([duplicate, { ...duplicate }])
+  assert.equal(repeated.incoming.src, '', 'an identical queue identity is not crossfaded into itself')
+  repeated.outgoing.finish()
+  await flush()
+  assert.equal(repeated.player.currentIndex, 1)
+
+  const short = await startNearTrackEnd([local('xfade-short-a'), local('xfade-short-b')])
+  short.incoming.duration = 0.5
+  short.incoming.signalReady()
+  await flush()
+  short.outgoing.currentTime = short.outgoing.duration - 4
+  pulseAudioProgress()
+  await flush()
+  assert.equal(short.player.currentTrack.id, 'xfade-short-a')
+  assert.equal(short.incoming.paused, true)
+  short.outgoing.finish()
+  await flush()
+  assert.equal(short.player.currentTrack.id, 'xfade-short-b')
+})
+
+test('automatic next-track reservation prepares at most one inactive deck', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([local('xfade-reserve-a'), local('xfade-reserve-b')])
+  assert.notEqual(incoming.src, '', 'the next track is resolved and prepared before the outgoing track ends')
+  const preparedLoadCalls = incoming.loadCalls
+
+  outgoing.currentTime = outgoing.duration - 19
+  pulseAudioProgress()
+  outgoing.currentTime = outgoing.duration - 18
+  pulseAudioProgress()
+  await flush()
+  assert.equal(incoming.loadCalls, preparedLoadCalls, 'later progress events reuse the one reservation')
+  assert.equal(player.currentIndex, 0)
+  assert.equal(outgoing.paused, false, 'preparation does not disturb the audible track')
+})
+
+test('expired next-track URLs never enter the standby deck', async () => {
+  const player = setup()
+  player.setQuality('320k')
+  player.setCrossfadeDuration(5_000)
+  let resolutions = 0
+  window.jj.sources.available = async () => [{ id: 'wy', actions: ['musicUrl'] }]
+  window.jj.music.url = async () => {
+    resolutions += 1
+    const now = Date.now()
+    return { url: 'https://test/expired-crossfade', quality: '320k', resolvedAt: now, expiresAt: now + 10_000 }
+  }
+  await player.playQueue([local('xfade-expired-a'), online('xfade-expired-b')])
+  const outgoing = FakeAudio.instances[0]
+  const incoming = FakeAudio.instances[1]
+  outgoing.signalReady()
+  await flush()
+  outgoing.currentTime = outgoing.duration - 20
+  pulseAudioProgress()
+  await flush()
+  await flush()
+
+  assert.ok(resolutions > 0, 'the reservation attempts URL resolution within its lead window')
+  assert.equal(incoming.src, '', 'an URL inside the safety expiry window is not sent to media preparation')
+  assert.equal(player.currentTrack.id, 'xfade-expired-a')
+  assert.equal(outgoing.paused, false)
+})
+
+test('queue edits invalidate stale prepared reservations before natural advance', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([
+    local('xfade-edit-a'), local('xfade-edit-b'), local('xfade-edit-c')
+  ])
+  assert.notEqual(incoming.src, '', 'the old next row was reserved')
+  player.insertNext([local('xfade-edit-now')])
+  await flush()
+  assert.equal(incoming.src, '', 'the stale standby source is released')
+
+  outgoing.finish()
+  await flush()
+  assert.equal(player.currentTrack.id, 'xfade-edit-now')
+})
+
+test('natural end reuses the reserved random successor instead of drawing twice', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([
+    local('xfade-random-a'), local('xfade-random-b'), local('xfade-random-c'), local('xfade-random-d')
+  ], { playMode: 'random' })
+  const reserved = player.queue.find(track => incoming.src.includes(track.id))
+  assert.ok(reserved, 'the inactive deck identifies the one random successor already drawn')
+
+  outgoing.finish()
+  await flush()
+  await flush()
+
+  assert.equal(player.currentTrack.id, reserved.id)
+})
+
+test('manual next consumes the reserved random successor without skipping it', async () => {
+  const { player, incoming } = await startNearTrackEnd([
+    local('xfade-manual-random-a'), local('xfade-manual-random-b'), local('xfade-manual-random-c'), local('xfade-manual-random-d')
+  ], { playMode: 'random' })
+  const reserved = player.queue.find(track => incoming.src.includes(track.id))
+  assert.ok(reserved)
+
+  await player.next()
+  await flush()
+
+  assert.equal(player.currentTrack.id, reserved.id)
+})
+
+test('direct manual selection returns an unplayed random reservation to the current pass', async () => {
+  const { player, incoming } = await startNearTrackEnd([
+    local('xfade-direct-random-a'), local('xfade-direct-random-b'), local('xfade-direct-random-c'), local('xfade-direct-random-d')
+  ], { playMode: 'random' })
+  const reserved = player.queue.find(track => incoming.src.includes(track.id))
+  assert.ok(reserved)
+  const directIndex = player.queue.findIndex((track, index) => index > 0 && track.id !== reserved.id)
+  assert.ok(directIndex >= 0)
+
+  await player.playTrackAt(directIndex)
+  await player.next()
+  await flush()
+
+  assert.equal(player.currentTrack.id, reserved.id)
+})
+
+test('current track hands off only when the prepared incoming deck becomes audible', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([
+    local('xfade-handoff-a'), local('xfade-handoff-b')
+  ])
+  assert.equal(player.currentTrack.id, 'xfade-handoff-a')
+
+  incoming.signalReady()
+  await flush()
+  await flush()
+  assert.equal(player.currentTrack.id, 'xfade-handoff-a', 'media readiness alone does not commit the next track')
+
+  outgoing.currentTime = outgoing.duration - 4
+  pulseAudioProgress()
+  await flush()
+  await flush()
+
+  assert.equal(player.currentTrack.id, 'xfade-handoff-b')
+  assert.equal(player.currentIndex, 1)
+  assert.equal(player.playing, true)
+  assert.deepEqual(useLibraryStore().recentPlayed.map(track => track.id), ['xfade-handoff-b', 'xfade-handoff-a'])
+})
+
+test('incoming failure after audible handoff restores outgoing live state and keeps incoming history', async () => {
+  const { player, outgoing, incoming } = await startCrossfadeNow([
+    local('xfade-rollback-a'), local('xfade-rollback-b')
+  ])
+  assert.equal(player.currentTrack.id, 'xfade-rollback-b')
+
+  outgoing.currentTime = 161
+  incoming.currentTime = 3
+  incoming.fail(3)
+  await flush()
+  await flush()
+
+  assert.equal(player.currentTrack.id, 'xfade-rollback-a')
+  assert.equal(player.currentTime, 161)
+  assert.equal(player.playing, true)
+  assert.deepEqual(useLibraryStore().recentPlayed.map(track => track.id), ['xfade-rollback-b', 'xfade-rollback-a'])
+})
+
+test('seek before audible handoff cancels preparation and keeps the outgoing track', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([
+    local('xfade-seek-before-a'), local('xfade-seek-before-b')
+  ])
+  assert.notEqual(incoming.src, '')
+
+  player.seek(0)
+  await flush()
+
+  assert.equal(incoming.src, '')
+  assert.equal(player.currentTrack.id, 'xfade-seek-before-a')
+  assert.equal(outgoing.paused, false)
+})
+
+test('pausing during preparation does not start the crossfade until playback resumes', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([
+    local('xfade-pause-a'), local('xfade-pause-b')
+  ])
+  await player.toggle()
+  incoming.signalReady()
+  await flush()
+  await flush()
+
+  assert.equal(player.currentTrack.id, 'xfade-pause-a')
+  assert.equal(player.playing, false)
+  assert.equal(incoming.paused, true)
+
+  await player.toggle()
+  outgoing.currentTime = outgoing.duration - 4
+  pulseAudioProgress()
+  await flush()
+  assert.equal(player.currentTrack.id, 'xfade-pause-b')
+})
+
+test('seek after audible handoff finishes the transition and seeks the incoming track', async () => {
+  const { player, outgoing, incoming } = await startCrossfadeNow([
+    local('xfade-seek-after-a'), local('xfade-seek-after-b')
+  ])
+  player.seek(12)
+
+  assert.equal(player.currentTrack.id, 'xfade-seek-after-b')
+  assert.equal(incoming.currentTime, 12)
+  assert.equal(outgoing.src, '')
+})
+
+test('setting crossfade to off releases a pre-handoff deck but preserves natural next-track playback', async () => {
+  const { player, outgoing, incoming } = await startNearTrackEnd([
+    local('xfade-disable-a'), local('xfade-disable-b')
+  ])
+  player.setCrossfadeDuration(0)
+  await flush()
+
+  assert.equal(incoming.src, '')
+  outgoing.finish()
+  await flush()
+  assert.equal(player.currentTrack.id, 'xfade-disable-b')
+})
+
+test('turning crossfade off during an audible overlap finishes on the incoming track', async () => {
+  const { player, outgoing, incoming } = await startCrossfadeNow([
+    local('xfade-disable-active-a'), local('xfade-disable-active-b')
+  ])
+
+  player.setCrossfadeDuration(0)
+
+  assert.equal(player.currentTrack.id, 'xfade-disable-active-b')
+  assert.notEqual(incoming.src, '')
+  assert.equal(outgoing.src, '')
+})
+
+test('a newer manual selection during overlap cannot be overwritten by stale crossfade callbacks', async () => {
+  const { player, incoming } = await startCrossfadeNow([
+    local('xfade-manual-active-a'), local('xfade-manual-active-b'), local('xfade-manual-active-c')
+  ])
+  player.setTransitionsEnabled(false)
+
+  await player.playTrackAt(2)
+  incoming.fail(3)
+  await flush()
+
+  assert.equal(player.currentTrack.id, 'xfade-manual-active-c')
+  assert.equal(player.error, null)
 })
 
 test('outgoing events cannot override a selected song during its fade', async context => {
@@ -779,7 +1127,7 @@ test('URL cache separates providers and the player exposes the script that serve
   await player.playTrackAt(1)
   assert.equal(calls, 2, 'same platform/id/quality from different providers must resolve separately')
   assert.equal(player.resolvedSourceName, '音源 B')
-  assert.match(FakeAudio.instances.at(-1).src, /stable-b/)
+  assert.match(FakeAudio.instances[0].src, /stable-b/)
   for (const handler of sourceChangeHandlers) handler()
   await player.playTrackAt(1)
   assert.equal(calls, 3, 'source lifecycle changes must invalidate URLs resolved by the previous script set')
@@ -845,7 +1193,7 @@ test('online playback never substitutes a matching local file, regardless of the
  library.settings.preferLocal=false
  await player.playTrack(online('online'))
  assert.equal(resolutions,1, 'changing the retired preference does not replace or re-resolve the online resource')
- assert.match(FakeAudio.instances.at(-1).src, /https:\/\/test\/preference/)
+ assert.match(FakeAudio.instances[0].src, /https:\/\/test\/preference/)
 })
 
 test('recent playback records successful starts, deduplicates, and ignores failed or paused loads', async () => {

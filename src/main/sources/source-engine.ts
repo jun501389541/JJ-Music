@@ -265,15 +265,15 @@ export class SourceEngine {
    *
    * Failures are isolated per script and never abort the batch.
    */
-  async startAll(): Promise<void> {
+  async startAll(signal?: AbortSignal): Promise<void> {
     const apis = this.store.list().filter((api) => api.meta.enabled)
 
     let cursor = 0
     const runNext = async (): Promise<void> => {
-      while (cursor < apis.length) {
+      while (cursor < apis.length && !signal?.aborted) {
         const api = apis[cursor++]
         if (!api) return
-        await this.start(api).catch(() => undefined)
+        await this.start(api, undefined, signal).catch(() => undefined)
       }
     }
 
@@ -296,9 +296,13 @@ export class SourceEngine {
     await this.startAll()
   }
 
-  private async start(api: LoadedApi, scriptOverride?: string): Promise<void> {
+  private async start(api: LoadedApi, scriptOverride?: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return
     const apiId = api.meta.id
     const generation = this.nextGeneration(apiId)
+    const cancelGeneration = (): void => {
+      if (signal?.aborted && this.isCurrentGeneration(apiId, generation)) this.nextGeneration(apiId)
+    }
     const transient = scriptOverride !== undefined
     this.trackPendingStart(apiId, generation, true)
     if (transient) this.trackTransientLaunch(apiId, generation, true)
@@ -306,7 +310,8 @@ export class SourceEngine {
       // Do not route this through public stop(): this launch owns the new token,
       // while public stop must invalidate starts already in flight.
       await this.stopRuntime(apiId)
-      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId) || signal?.aborted) {
+        cancelGeneration()
         if (transient) throw new Error('音源候选版本启动已取消')
         return
       }
@@ -401,9 +406,10 @@ export class SourceEngine {
     this.launches.set(api, { generation, transient })
     let state: RuntimeState
     try {
-      state = await host.start(api, api.source)
+      state = await host.start(api, api.source, signal)
     } catch (error) {
-      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId) || signal?.aborted) {
+        cancelGeneration()
         if (transient) throw new Error('音源候选版本启动已取消', { cause: error })
         return
       }
@@ -420,8 +426,9 @@ export class SourceEngine {
 
     // stop() may have run while host.start() waited for the source's init
     // handshake. Dispose the late process before it can enter the provider map.
-    if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+    if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId) || signal?.aborted) {
       await host.teardown(state, new Error('音源已停止'))
+      cancelGeneration()
       if (transient) throw new Error('音源候选版本启动已取消')
       return
     }
@@ -433,13 +440,14 @@ export class SourceEngine {
 
     try {
       await state.ready
-      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId) || signal?.aborted) {
         if (this.runtimes.get(apiId) === runtime) {
           this.runtimes.delete(apiId)
           if (!state.dead) await host.teardown(state, new Error('音源已停止'))
           this.rebuildOwners()
           this.emit('sourcesChanged', apiId)
         }
+        cancelGeneration()
         if (transient) throw new Error('音源候选版本启动已取消')
         return
       }
@@ -454,7 +462,8 @@ export class SourceEngine {
       if (!state.dead) await host.teardown(state, new Error(message))
       if (this.runtimes.get(apiId) === runtime) this.runtimes.delete(apiId)
       this.rebuildOwners()
-      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId)) {
+      if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId) || signal?.aborted) {
+        cancelGeneration()
         this.emit('sourcesChanged', apiId)
         if (transient) throw new Error('音源候选版本启动已取消', { cause: error })
         return

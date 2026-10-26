@@ -179,6 +179,12 @@ export const IPC = {
   // Playlists
   playlistList: 'playlist:list',
   playlistExportJson: 'playlist:export-json',
+  playlistDerivePreview: 'playlist:derive-preview',
+  playlistDeriveApply: 'playlist:derive-apply',
+  playlistDeriveDiscard: 'playlist:derive-discard',
+  playlistBulkRenamePreview: 'playlist:bulk-rename-preview',
+  playlistBulkRenameApply: 'playlist:bulk-rename-apply',
+  playlistBulkRenameDiscard: 'playlist:bulk-rename-discard',
   playlistRestorePreview: 'playlist:restore-preview',
   playlistRestoreApply: 'playlist:restore-apply',
   playlistRestoreDiscard: 'playlist:restore-discard',

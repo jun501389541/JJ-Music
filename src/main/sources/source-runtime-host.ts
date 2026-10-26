@@ -275,6 +275,7 @@ interface HostMessage {
 export class SourceRuntimeHost {
   private readonly hostPath: string
   private readonly callbacks: HostCallbacks
+  private readonly teardownPromises = new WeakMap<RuntimeState, Promise<void>>()
   /**
    * Path to the Node/Electron binary the restricted launcher should run.
    *
@@ -323,7 +324,8 @@ export class SourceRuntimeHost {
    * child is always reaped before rejecting, so a script stuck mid-init cannot
    * hold a process and 512 MB until the app exits.
    */
-  async start(api: LoadedApi, scriptSource: string): Promise<RuntimeState> {
+  async start(api: LoadedApi, scriptSource: string, signal?: AbortSignal): Promise<RuntimeState> {
+    if (signal?.aborted) throw new Error('音源初始化已取消')
     /*
      * Check the host entry point before forking anything.
      *
@@ -410,12 +412,39 @@ export class SourceRuntimeHost {
 
     state.ready = this.createReadyPromise(state)
 
+    let cancelFailure: Error | undefined
+    let cancelTeardown: Promise<void> | undefined
+    let rejectCancellation: ((reason: Error) => void) | undefined
+    const cancellation = signal ? new Promise<never>((_resolve, reject) => { rejectCancellation = reject }) : undefined
+    const cancel = (): void => {
+      if (cancelFailure) return
+      cancelFailure = new Error('音源初始化已取消')
+      cancelTeardown = this.teardown(state, cancelFailure)
+      void cancelTeardown.then(() => rejectCancellation?.(cancelFailure!), () => rejectCancellation?.(cancelFailure!))
+    }
+    if (signal) {
+      if (signal.aborted) cancel()
+      else signal.addEventListener('abort', cancel, { once: true })
+    }
+
     try {
-      await state.ready
+      await (cancellation ? Promise.race([state.ready, cancellation]) : state.ready)
+      if (signal?.aborted) {
+        if (!cancelFailure) cancel()
+        await cancelTeardown
+        throw cancelFailure ?? new Error('音源初始化已取消')
+      }
       return state
     } catch (error) {
+      signal?.removeEventListener('abort', cancel)
+      if (cancelFailure) {
+        await cancelTeardown
+        throw cancelFailure
+      }
       await this.teardown(state, error instanceof Error ? error : new Error(String(error)))
       throw error
+    } finally {
+      signal?.removeEventListener('abort', cancel)
     }
   }
 
@@ -783,7 +812,15 @@ export class SourceRuntimeHost {
    * init is reaped through here too, and the settings page reads that record's
    * logs and crash reason afterwards.
    */
-  async teardown(state: RuntimeState, reason: Error): Promise<void> {
+  teardown(state: RuntimeState, reason: Error): Promise<void> {
+    const existing = this.teardownPromises.get(state)
+    if (existing) return existing
+    const pending = this.performTeardown(state, reason)
+    this.teardownPromises.set(state, pending)
+    return pending
+  }
+
+  private async performTeardown(state: RuntimeState, reason: Error): Promise<void> {
     state.dead = true
     state.stopFileLifecycle?.()
     this.failAllPending(state, reason)

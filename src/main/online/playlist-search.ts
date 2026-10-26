@@ -29,33 +29,46 @@ function picture(source:PlaylistSource,value:unknown):string|undefined{
  if(typeof value!=='string'||value.length>2048)return undefined
  try{const u=new URL(value.replace(/\{size\}/g,'240').replace(/^http:/,'https:'));if(u.protocol!=='https:'||u.username||u.password||u.port&&!['443'].includes(u.port)||!isHostAllowed(u.hostname,COVER_HOSTS[source]??[]))return undefined;return u.href}catch{return undefined}
 }
+/** QQ's legacy search returns numeric HTML entities in titles/creator names. */
+function qqText(value:unknown,max=300):string|undefined{
+ const decoded=typeof value==='string'?value.replace(/&#(?:x([0-9a-f]+)|(\d+));/gi,(_entity,hex,decimal)=>{
+  const code=parseInt(hex??decimal,hex?16:10)
+  return Number.isSafeInteger(code)&&code>=32&&code<=0x10ffff&&!(code>=0xd800&&code<=0xdfff)&&code!==127?String.fromCodePoint(code):'\ufffd'
+ }):value
+ return clean(decoded,max)
+}
 export class PlaylistSearchAdapter {
  constructor(private readonly http:typeof guardedFetch=guardedFetch){}
  async search(source:PlaylistSource,keyword:string,page=1,signal:AbortSignal=AbortSignal.timeout(12000)):Promise<PlaylistSearchPage>{
   assertPlaylistSearch(source,keyword,page);keyword=keyword.trim();signal.throwIfAborted()
-  if(source==='tx')throw new OnlineRequestError({...onlineContext(source,'playlistSearch'),code:'unsupported'})
   let url:string
-  if(source==='wy')url='https://music.163.com/api/search/get/web?'+new URLSearchParams({s:keyword,type:'1000',offset:String((page-1)*20),limit:'20'})
+  if(source==='tx')url='https://c.y.qq.com/soso/fcgi-bin/client_music_search_songlist?'+new URLSearchParams({page_no:String(page-1),num_per_page:'20',format:'json',query:keyword,remoteplace:'txt.yqq.playlist',inCharset:'utf8',outCharset:'utf-8'})
+  else if(source==='wy')url='https://music.163.com/api/search/get/web?'+new URLSearchParams({s:keyword,type:'1000',offset:String((page-1)*20),limit:'20'})
   else if(source==='kg')url='https://msearch.kugou.com/api/v3/search/special?'+new URLSearchParams({keyword,page:String(page),pagesize:'20'})
   else if(source==='kw')url='https://search.kuwo.cn/r.s?'+new URLSearchParams({client:'kt',all:keyword,pn:String(page-1),rn:'20',ft:'playlist',rformat:'json',encoding:'utf8'})
   else url='https://app.u.nf.migu.cn/pc/v1.0/content/search_all.do?'+new URLSearchParams({text:keyword,pageNo:String(page),pageSize:'20',searchSwitch:'{"songlist":1}'})
-  const response=await this.http(url,{signal,allowedHosts:[new URL(url).hostname],headers:{Referer:source==='wy'?'https://music.163.com/':source==='kg'?'https://m.kugou.com/':source==='kw'?'https://www.kuwo.cn/':'https://music.migu.cn/v5/'}})
+  const response=await this.http(url,{signal,allowedHosts:[new URL(url).hostname],headers:{...(source==='tx'?{'User-Agent':'Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; WOW64; Trident/5.0)'}:{}),Referer:source==='tx'?'http://y.qq.com/portal/search.html':source==='wy'?'https://music.163.com/':source==='kg'?'https://m.kugou.com/':source==='kw'?'https://www.kuwo.cn/':'https://music.migu.cn/v5/'}})
   if(!response.ok){await response.body?.cancel();throw onlineHttpFailure(response,onlineContext(source,'playlistSearch'))}
   const text=Buffer.from(await readBounded(response,2097152)).toString('utf8');signal.throwIfAborted()
   let data:Row
   try{data=(source==='kw'?parseSearchLiteral(text):JSON.parse(text)) as Row}catch{return schema(source)}
   if(!data||typeof data!=='object')return schema(source)
-  const rows=source==='wy'?data.result?.playlists:source==='kg'?data.data?.info:source==='kw'?data.abslist:data.songListResultData?.result
-  const total=number(source==='wy'?data.result?.playlistCount:source==='kg'?data.data?.total:source==='kw'?data.TOTAL:data.songListResultData?.totalCount)
+  const rows=source==='tx'?data.data?.list:source==='wy'?data.result?.playlists:source==='kg'?data.data?.info:source==='kw'?data.abslist:data.songListResultData?.result
+  const total=number(source==='tx'?data.data?.sum:source==='wy'?data.result?.playlistCount:source==='kg'?data.data?.total:source==='kw'?data.TOTAL:data.songListResultData?.totalCount)
   if(source==='wy'&&data.code!==200||source==='kg'&&data.status!==1||source==='mg'&&data.code!=='000000'||!Array.isArray(rows)||rows.length>20)return schema(source)
+  if(source==='tx'){
+   const offset=(page-1)*20
+   if(data.code!==0||(data.subcode!==undefined&&data.subcode!==0)||data.data?.page_no!==page-1||data.data?.num_per_page!==20||total===undefined)return schema(source)
+   if((rows.length>0&&total<offset+rows.length)||(!rows.length&&offset<total))return schema(source)
+  }
   const seen=new Set<string>()
   const items=rows.map((row:Row)=>{
    if(!row||typeof row!=='object')return schema(source)
-   const raw=source==='kg'?row.specialid:source==='kw'?row.playlistid:row.id
+   const raw=source==='tx'?row.dissid:source==='kg'?row.specialid:source==='kw'?row.playlistid:row.id
    if(typeof raw==='number'&&!Number.isSafeInteger(raw))return schema(source)
-   const id=String(raw),name=clean(source==='kg'?row.specialname:row.name)
+   const id=String(raw),name=source==='tx'?qqText(row.dissname):clean(source==='kg'?row.specialname:row.name)
    if(!isPlaylistId(id)||!name||seen.has(id))return schema(source);seen.add(id)
-   return {source,id,name,coverUrl:picture(source,source==='wy'?row.coverImgUrl:source==='kg'?row.imgurl:source==='kw'?row.pic:row.musicListPicUrl),creator:clean(source==='wy'?row.creator?.nickname:source==='mg'?row.userName:row.nickname,100),trackCount:number(source==='wy'?row.trackCount:source==='kg'?row.songcount:source==='kw'?row.songnum:row.musicNum)}
+   return {source,id,name,coverUrl:picture(source,source==='tx'?row.imgurl:source==='wy'?row.coverImgUrl:source==='kg'?row.imgurl:source==='kw'?row.pic:row.musicListPicUrl),creator:source==='tx'?qqText(row.creator?.name,100):clean(source==='wy'?row.creator?.nickname:source==='mg'?row.userName:row.nickname,100),trackCount:number(source==='tx'?row.song_count:source==='wy'?row.trackCount:source==='kg'?row.songcount:source==='kw'?row.songnum:row.musicNum)}
   })
   return {source,keyword,page,items,total,hasMore:page<10&&items.length>0&&(total===undefined?items.length===20:page*20<total),truncated:total!==undefined?total>200:page===10&&items.length===20}
  }

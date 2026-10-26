@@ -138,3 +138,5 @@
 `独家音源-v6 (修复).js` 的静态拒绝原因码为 `uninspectable-remote-control`，没有移除规则或修改脚本。gdstudio的文件名注明仅网易；表中QQ失败不据此断言整份源损坏。其他unknown/抓取失败没有足够证据归因为版权、鉴权或服务永久失效；HTTP403只表示本次访问被拒绝。媒体探针初版原始进度日志的泛化network标记已在最终明细统一为fetchFailed，不能作为已证实的网络错误分类。
 
 `preservation.json` 与 `preservation-media.json` 均为 originalCount=21、changed=[]、remainingTemp=[]；原脚本字节全部不变，独立测试目录已回收。正常权限只读CIM检查没有发现本项目out/test/source-host.cjs的残留node/electron进程。沙箱CIM访问曾被系统拒绝，后以获批正常权限完成只读复核，没有终止其他进程。
+
+后续诊断取消保护：源初始化检查现在把取消信号贯通到源引擎与运行宿主，正在握手的进程会立即回收，排队源不再启动，取消不会误停用音源。完整离线验证118/118套件及5/5门禁通过，见[诊断取消记录](OR8-diagnostic-cancellation.md)。

@@ -1,3 +1,5 @@
+import {assertDeriveSelection,DERIVE_MAX_LISTS,DERIVE_MAX_TRACKS,DERIVE_MAX_BYTES,type DerivedPlaylist} from '@shared/playlist-derive'
+import {assertPlaylistBulkRenameName,assertPlaylistBulkRenameSelection,PLAYLIST_BULK_RENAME_MAX_BYTES,PLAYLIST_BULK_RENAME_MAX_LISTS} from '@shared/playlist-bulk-rename'
 import { playlistEntryKey } from '@shared/playlist-refresh'
 import { UI_DEFAULTS } from '@shared/preferences'
 import { PLAYLIST_BACKUP_MAX_LISTS, PLAYLIST_BACKUP_MAX_TRACKS, type PlaylistBackupSnapshot } from '@shared/playlist-backup'
@@ -29,6 +31,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   volume: 0.8,
   playMode: 'list',
   shortAudioTransitions: true,
+  crossfadeDurationMs: 0,
   preferLocal: true,
   onlineLyricSource: 'script',
   onlineLyricFallback: true,
@@ -50,6 +53,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   playlistOrder: []
 }
 
+function sanitizeCrossfadeDuration(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= 0 && value <= 12_000 && value % 1_000 === 0
+    ? value
+    : 0
+}
+
 export class SettingsStore {
   async reload(): Promise<AppSettings> { this.loaded = false; return this.load() }
   private readonly filePath: string
@@ -69,7 +79,11 @@ export class SettingsStore {
       const current = { ...parsed } as Partial<AppSettings> & Record<string, unknown>
       delete current.onlineCatalogConsent
       delete current.onlineCatalogConsentPrompted
-      this.settings = { ...DEFAULT_SETTINGS, ...current }
+      this.settings = {
+        ...DEFAULT_SETTINGS,
+        ...current,
+        crossfadeDurationMs: sanitizeCrossfadeDuration(current.crossfadeDurationMs)
+      }
     }
     return this.settings
   }
@@ -83,6 +97,9 @@ export class SettingsStore {
     const current = { ...patch } as Partial<AppSettings> & Record<string, unknown>
     delete current.onlineCatalogConsent
     delete current.onlineCatalogConsentPrompted
+    if ('crossfadeDurationMs' in current) {
+      current.crossfadeDurationMs = sanitizeCrossfadeDuration(current.crossfadeDurationMs)
+    }
     this.settings = { ...this.settings, ...current }
     await this.persist()
     return this.get()
@@ -198,6 +215,48 @@ export class PlaylistStore {
       return{playlists:copied.length,tracks:copied.reduce((n,s)=>n+s.tracks.length,0),ids}
     })
   }
+  /** Snapshot selected ordinary lists in one queue turn, bounding raw data before cloning. */
+  async deriveSnapshot(ids:readonly string[]):Promise<SavedPlaylistSnapshot[]>{
+    assertDeriveSelection(ids);const copied=ids.slice();await this.load()
+    const operation=this.changes.then(()=>{
+      let count=0,bytes=2
+      for(const id of copied){
+        const playlist=this.playlists.find(p=>p.id===id),tracks=this.items.get(id)??[]
+        if(!playlist)throw Error('歌单已变更，请重新选择')
+        if(typeof playlist.source!=='string'||!playlist.source||typeof playlist.name!=='string'||playlist.name.length>4096||!playlist.name.trim()||!Array.isArray(tracks))throw Error('来源歌单资料无效：'+id)
+        count+=tracks.length;if(count>DERIVE_MAX_TRACKS)throw Error('输入曲目超过50000上限，请分批选择')
+        bytes+=Buffer.byteLength(JSON.stringify(playlist),'utf8')+256 // snapshot envelope and revision overhead, bounded before cloning
+        for(const track of tracks){
+          if(!track||typeof track.id!=='string'||!track.id||track.id.length>256||track.id.includes('\0')||typeof track.name!=='string'||typeof track.singer!=='string'||(isLocalTrack(track)?!track.path||track.path.includes('\0'):typeof track.source!=='string'||!track.source||track.source==='local'))throw Error('来源歌单曲目身份无效：'+playlist.name)
+          bytes+=Buffer.byteLength(JSON.stringify(track),'utf8')+1
+          if(bytes>DERIVE_MAX_BYTES)throw Error('输入资料超过20MiB上限，请分批选择')
+        }
+        if(bytes>DERIVE_MAX_BYTES)throw Error('输入资料超过20MiB上限，请分批选择')
+      }
+      return copied.map(id=>this.state(id))
+    })
+    this.changes=operation.catch(()=>undefined);return operation
+  }
+  /** One durable creation with a CAS on every selected source; no whole-file snapshot replay. */
+  async createDerived(sources:readonly {id:string;revision:string}[],outputs:readonly DerivedPlaylist[],assertReady:()=>void=()=>undefined):Promise<{ids:string[];playlists:number;tracks:number}>{
+    assertDeriveSelection(sources.map(s=>s.id))
+    if(!outputs.length||outputs.length>DERIVE_MAX_LISTS||outputs.reduce((n,s)=>n+s.tracks.length,0)>DERIVE_MAX_TRACKS||Buffer.byteLength(JSON.stringify(outputs),'utf8')>DERIVE_MAX_BYTES)throw Error('候选资料超过上限')
+    const expected=sources.map(s=>({...s})),copied=structuredClone(outputs)
+    return this.mutate(()=>{
+      assertReady()
+      for(const source of expected)if(!this.playlists.some(p=>p.id===source.id)||this.state(source.id).revision!==source.revision)throw Error('来源歌单已变更，请重新预览')
+      let position=this.playlists.reduce((max,p)=>Math.max(max,p.position),-1)+1
+      if(!Number.isSafeInteger(position)||position<0||!Number.isSafeInteger(position+copied.length))throw Error('现有歌单顺序无效')
+      const ids:string[]=[]
+      for(const candidate of copied){
+        let id:string
+        do{id='list_'+randomUUID()}while(this.items.has(id)||this.playlists.some(p=>p.id===id))
+        this.playlists.push({id,name:candidate.name,source:candidate.source,position:position++,...(candidate.sourceListId?{sourceListId:candidate.sourceListId}:{}),...(candidate.coverPath?{coverPath:candidate.coverPath}:{})})
+        this.items.set(id,candidate.tracks);ids.push(id)
+      }
+      return{ids,playlists:copied.length,tracks:copied.reduce((n,s)=>n+s.tracks.length,0)}
+    })
+  }
   async backupSnapshot(id?:string):Promise<PlaylistBackupSnapshot[]>{
     await this.load()
     const operation=this.changes.then(()=>{
@@ -273,6 +332,60 @@ export class PlaylistStore {
       this.playlists=this.playlists.filter(p=>!drop.has(p.id))
       for(const id of copied)this.items.delete(id)
       return copied.length
+    })
+  }
+  /** A consistent, bounded snapshot containing names only; never clones playlist tracks. */
+  async renameSnapshot(ids:readonly string[]):Promise<Array<{id:string;name:string}>>{
+    assertPlaylistBulkRenameSelection(ids);const copied=ids.slice();await this.load()
+    const operation=this.changes.then(()=>{
+      let bytes=2
+      const rows:Array<{id:string;name:string}>=[]
+      for(const id of copied){
+        const playlist=this.playlists.find(item=>item.id===id)
+        if(!playlist)throw Error('歌单已变更，请重新选择')
+        if(id==='default'||id==='favorites')throw Error('内置歌单不能批量改名')
+        assertPlaylistBulkRenameName(playlist.name)
+        const row={id:playlist.id,name:playlist.name}
+        bytes+=Buffer.byteLength(JSON.stringify(row),'utf8')+1
+        if(bytes>PLAYLIST_BULK_RENAME_MAX_BYTES)throw Error('名称资料超过20MiB上限，请分批选择')
+        rows.push(row)
+      }
+      return rows
+    })
+    this.changes=operation.catch(()=>undefined);return operation
+  }
+  /** Compare selected source names and update only names in one atomic mutation. */
+  async renameMany(expected:readonly {id:string;name:string}[],changes:readonly {id:string;name:string}[],assertReady:()=>void=()=>undefined):Promise<number>{
+    if(!Array.isArray(expected)||expected.length<1||expected.length>PLAYLIST_BULK_RENAME_MAX_LISTS)throw Error('改名来源数量无效')
+    assertPlaylistBulkRenameSelection(expected.map(row=>row?.id))
+    const expectedRows=expected.map(row=>{
+      if(!row||typeof row!=='object')throw Error('改名来源资料无效')
+      assertPlaylistBulkRenameName(row.name)
+      return{id:row.id,name:row.name}
+    })
+    if(!Array.isArray(changes)||changes.length<1||changes.length>expectedRows.length)throw Error('没有可变更的歌单名称')
+    const original=new Map(expectedRows.map(row=>[row.id,row.name]))
+    const changedIds:string[]=[]
+    const nextRows=changes.map(row=>{
+      if(!row||typeof row!=='object'||typeof row.id!=='string'||!original.has(row.id))throw Error('改名目标不在预览范围内')
+      assertPlaylistBulkRenameName(row.name)
+      if(original.get(row.id)===row.name)throw Error('改名候选没有变化')
+      changedIds.push(row.id)
+      return{id:row.id,name:row.name}
+    })
+    if(new Set(changedIds).size!==changedIds.length)throw Error('改名目标重复')
+    return this.mutate(()=>{
+      assertReady()
+      for(const source of expectedRows){
+        const current=this.playlists.find(item=>item.id===source.id)
+        if(!current||current.id==='default'||current.id==='favorites'||current.name!==source.name)throw Error('来源歌单已变更，请重新预览')
+      }
+      for(const change of nextRows){
+        const current=this.playlists.find(item=>item.id===change.id)
+        if(!current)throw Error('来源歌单已变更，请重新预览')
+        current.name=change.name
+      }
+      return nextRows.length
     })
   }
   async remove(id: string): Promise<void> {

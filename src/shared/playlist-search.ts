@@ -1,7 +1,7 @@
 export const PLAYLIST_SOURCES = ['wy','tx','kg','kw','mg'] as const
 export type PlaylistSource = typeof PLAYLIST_SOURCES[number]
 export const PLAYLIST_SEARCH_PLATFORMS: ReadonlyArray<{id:PlaylistSource;name:string;unavailable?:string}> = [
- {id:'wy',name:'网易云音乐'},{id:'tx',name:'QQ 音乐',unavailable:'QQ 歌单搜索暂未接通，仍可在“导入歌单”中使用公开链接或 ID'},
+ {id:'wy',name:'网易云音乐'},{id:'tx',name:'QQ 音乐'},
  {id:'kg',name:'酷狗音乐'},{id:'kw',name:'酷我音乐'},{id:'mg',name:'咪咕音乐'}
 ]
 export interface PlaylistSummary {source:PlaylistSource;id:string;name:string;coverUrl?:string;creator?:string;trackCount?:number}

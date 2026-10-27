@@ -118,6 +118,60 @@ function setLoopAt(player, outgoing, a, b) {
   outgoing.currentTime = b; pulseAudioProgress(); player.setLoopB()
 }
 
+test('queue dedup preserves exact current object clock loop sleep and paused state and refreshes session once',async()=>{
+ const player=setup(),first=local('a'),current={...local('a'),name:'current-row'},writes=[]
+ window.jj.settings={update:async patch=>{writes.push(structuredClone(patch));return patch}}
+ await player.playQueue([first,local('b'),current,local('c'),local('b')],2);const audio=FakeAudio.instances[0];audio.signalReady();audio.currentTime=20;pulseAudioProgress();await flush()
+ player.applyLoopRange(player.loopEditContext(),10,30);player.setSleepMinutes(1);player.toggle();const deadline=player.sleepAt,loop=structuredClone(player.abLoop),ref=player.currentTrack,plays=audio.playCalls,loads=audio.loadCalls
+ const context=player.queueDeduplicationContext();assert.ok(Object.isFrozen(context));assert.equal(context.removedCount,2)
+ assert.equal(player.applyQueueDeduplication(context),2);await flush()
+ assert.deepEqual(player.queue.map(v=>v.id),['b','a','c']);assert.equal(player.currentTrack,ref);assert.equal(player.currentTrack.name,'current-row');assert.equal(player.currentIndex,1)
+ assert.equal(audio.currentTime,20);assert.equal(player.playing,false);assert.equal(audio.playCalls,plays);assert.equal(audio.loadCalls,loads);assert.equal(player.sleepAt,deadline);assert.deepEqual(player.abLoop,loop)
+ assert.equal(player.queueDeduplicationContext().revision,context.revision+1);assert.equal(player.queueDeduplicationContext().generation,context.generation);assert.deepEqual(writes.filter(p=>p.lastSession).at(-1).lastSession.queue.map(v=>v.id),['b','a','c'])
+ assert.throws(()=>player.applyQueueDeduplication(context),/变更|失效/);assert.equal(player.queueEditContext(['local:a']).keys.length,1)
+})
+test('queue dedup no-op leaves pending intent unchanged and invalid stale maintenance contexts have no effects',async()=>{
+ const {player,incoming}=await startManualQueue();player.next();await flush();const context=player.queueDeduplicationContext(),target=player.manualSwitchTarget.id
+ assert.equal(player.applyQueueDeduplication(context),0);assert.equal(player.manualSwitchTarget.id,target);assert.equal(player.queueDeduplicationContext().revision,context.revision)
+ for(const invalid of [null,{...context,removedCount:1},{...context,currentIndex:NaN}])assert.throws(()=>player.applyQueueDeduplication(invalid))
+ player.beginLocalRelink({old:local('unrelated'),next:local('relinked')});assert.throws(()=>player.applyQueueDeduplication(context),/维护|定位|失效|变更/);player.finishLocalRelink()
+ await player.addToQueue([local('d')]);assert.throws(()=>player.applyQueueDeduplication(context),/变更|失效/);assert.equal(player.manualSwitchTarget.id,target)
+ incoming.signalReady();await flush();assert.throws(()=>player.applyQueueDeduplication(context),/变更|失效/)
+})
+test('queue dedup cancels pending preparation once and late readiness cannot revive duplicates',async()=>{
+ const player=setup();player.setManualCrossfadeDuration(3000);await player.playQueue([local('a'),local('b'),local('a'),local('c')],2)
+ const [a,b]=FakeAudio.instances;a.signalReady();a.currentTime=20;pulseAudioProgress();await player.next();await flush();assert.equal(player.manualSwitchTarget.id,'c')
+ player.applyQueueDeduplication(player.queueDeduplicationContext());assert.equal(player.manualSwitchTarget,null);b.signalReady();await flush();assert.equal(player.currentTrack.id,'a');assert.deepEqual(player.queue.map(v=>v.id),['b','a','c']);assert.equal(a.currentTime,20)
+})
+test('queue dedup finalizes handed-off queue and late failure cannot restore old duplicate snapshot',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();await player.playUserQueue([local('new-a'),local('b'),local('new-a')]);incoming.signalReady();await flush()
+ assert.equal(player.currentTrack.id,'new-a');player.applyQueueDeduplication(player.queueDeduplicationContext());assert.equal(outgoing.src,'');incoming.fail(3);await flush()
+ assert.deepEqual(player.queue.map(v=>v.id),['new-a','b']);assert.equal(player.currentTrack.id,'new-a')
+})
+test('queue dedup loading current continues one load while no-current cleanup never starts playback',async()=>{
+ const player=setup();await player.playQueue([local('a'),local('b'),local('a')],2);const audio=FakeAudio.instances[0],loads=audio.loadCalls
+ player.applyQueueDeduplication(player.queueDeduplicationContext());assert.equal(audio.loadCalls,loads);audio.signalReady();await flush();assert.equal(player.currentIndex,1);assert.equal(player.playing,true)
+ player.stop();player.currentIndex=-1;player.queue=[local('a'),local('a')];const plays=audio.playCalls
+ player.applyQueueDeduplication(player.queueDeduplicationContext());assert.equal(player.currentIndex,-1);assert.equal(audio.playCalls,plays);assert.equal(player.playing,false)
+})
+test('queue dedup stabilizes duplicate shuffle pool without erasing repeated audible navigation history',async()=>{
+ const player=setup(),orig=Math.random;Math.random=()=>0;player.setPlayMode('random')
+ try{
+  await player.playQueue(['a','b','c','c','d'].map(local),0);FakeAudio.instances[0].signalReady();await player.next();await player.next()
+  const current=player.currentTrack.id;assert.equal(player.applyQueueDeduplication(player.queueDeduplicationContext()),1)
+  const seen=[current];for(let i=0;i<2;i++){await player.next();assert.ok(!seen.includes(player.currentTrack.id));seen.push(player.currentTrack.id)}
+  const later=player.currentTrack.id;await player.previous();const previous=player.currentTrack.id;await player.next();player.queue=[...player.queue,local('a')];player.applyQueueDeduplication(player.queueDeduplicationContext());await player.previous();assert.equal(player.currentTrack.id,previous);assert.notEqual(previous,later)
+ }finally{Math.random=orig}
+})
+test('queue dedup preserves repeated random history visits and rejects same-key reload preview',async()=>{
+ const player=setup();player.setPlayMode('random');await player.playQueue(['a','b','c','a'].map(local),0);FakeAudio.instances[0].signalReady()
+ for(const index of [1,0,2])await player.playTrackAt(index)
+ const context=player.queueDeduplicationContext();await player.playTrackAt(2);assert.throws(()=>player.applyQueueDeduplication(context),/变更|失效/)
+ player.applyQueueDeduplication(player.queueDeduplicationContext())
+ const visits=[];for(let i=0;i<3;i++){await player.previous();visits.push(player.currentTrack.id)}
+ assert.deepEqual(visits,['a','b','a'])
+})
+
 test('queue bulk edits preserve live identity time AB and sleep while moving current with a block',async()=>{
  const {player,outgoing}=await startManualQueue();await player.addToQueue([local('d'),local('e')]);player.applyLoopRange(player.loopEditContext(),5,30);player.setSleepMinutes(1)
  const deadline=player.sleepAt,clock=player.currentTime,plays=outgoing.playCalls

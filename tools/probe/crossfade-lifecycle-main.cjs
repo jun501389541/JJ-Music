@@ -687,6 +687,36 @@ app.whenReady().then(async () => {
   await finishCase('queue-bulk-edit-during-native-handoff',{finalOrder:afterBulk.queueIds,currentPreserved:true,currentIndex:afterBulk.currentIndex,clockContinued:true,sleepPreservedOnMove:true,historyPreserved:true,currentRemovalReleasedBothDecks:true})
   await reset()
 
+  await begin(['a','b','a','skip-c'],0)
+  await js('window.__crossfadeProbe.player().playTrackAt(2)')
+  await wait(async()=>{const s=await snapshot();return s.currentIndex===2&&s.playing&&s.audio.some(a=>!a.paused&&a.currentTime>0.1)?s:null},'later duplicate row actually playing')
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.currentTrack.name="Kept later row";window.__keptDuplicate=p.currentTrack;p.seek(2);p.setLoopA();p.seek(5);p.setLoopB();p.setSleepMinutes(1);p.toggle()})()')
+  const beforeDedup=await snapshot(),dedupClock=beforeDedup.audio.find(a=>a.src).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueDeduplication(p.queueDeduplicationContext())})()')
+  const afterDedup=await snapshot()
+  assert.deepEqual(afterDedup.queueIds,['b','a','skip-c']);assert.equal(afterDedup.currentIndex,1);assert.equal(afterDedup.playing,false)
+  assert.equal(await js('window.__crossfadeProbe.player().currentTrack===window.__keptDuplicate'),true)
+  assert.equal(afterDedup.audio.find(a=>a.src).currentTime,dedupClock);assert.deepEqual(afterDedup.loop,beforeDedup.loop);assert.equal(afterDedup.sleepAt,beforeDedup.sleepAt)
+  await js('window.__crossfadeProbe.player().toggle()');await sleep(150)
+  assert.equal((await snapshot()).playing,true)
+  await finishCase('queue-dedup-later-current-paused-native',{finalOrder:afterDedup.queueIds,exactCurrentRowRetained:true,clockRetained:true,pausedPreserved:true,loopAndSleepPreserved:true,resumed:true})
+  await reset()
+
+  await begin(['a','b'],0)
+  await js('window.__crossfadeProbe.stageQueue(["b","a","b","skip-c"],3000)')
+  await wait(async()=>{const s=await snapshot();return s.currentId==='b'&&s.audio.filter(a=>!a.paused&&a.src).length===2?s:null},'dedup native dual deck handoff')
+  const overlapDedup=await snapshot(),incomingClock=overlapDedup.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueDeduplication(p.queueDeduplicationContext())})()');await sleep(100)
+  const finalizedDedup=await snapshot()
+  assert.deepEqual(finalizedDedup.queueIds,['b','a','skip-c']);assert.equal(finalizedDedup.currentId,'b');assert.equal(finalizedDedup.audio.filter(a=>!a.paused&&a.src).length,1)
+  assert.ok(finalizedDedup.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime>=incomingClock);assert.deepEqual(finalizedDedup.historyIds,overlapDedup.historyIds)
+  await js('window.__crossfadeProbe.holdResolution("skip-c");window.__crossfadeProbe.stageQueue(["skip-c"])')
+  // Make another duplicate queue through the current public data model, keeping the same audible row.
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.queue=[...p.queue,p.queue[1]];p.applyQueueDeduplication(p.queueDeduplicationContext());window.__releaseResolution()})()');await sleep(150)
+  assert.deepEqual((await snapshot()).queueIds,['b','a','skip-c']);assert.equal((await snapshot()).currentId,'b')
+  await finishCase('queue-dedup-native-overlap-and-delayed-resolution',{incomingClockContinued:true,outgoingReleased:true,historyPreserved:true,lateResolutionInert:true})
+  await reset()
+
   // Stop must cancel a deliberately slow local media request and clear both element sources.
   await begin(['stream', 'unused'], 0)
   const liveRequestCount = activeMedia.size

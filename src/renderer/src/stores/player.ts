@@ -7,7 +7,7 @@
 import { playlistEntryKey } from '@shared/playlist-refresh'
 import { normalizeCrossfadeDurationMs } from '@shared/crossfade'
 import type {LoopEditContext} from '@shared/loop-time'
-import {assertQueueEditSelection,planQueueEdit,type QueueEditAction,type QueueEditContext} from '@shared/queue-edit'
+import {assertQueueEditSelection,planQueueEdit,planQueueDeduplication,type QueueEditAction,type QueueEditContext,type QueueDeduplicationContext} from '@shared/queue-edit'
 import { useLibraryStore } from './library'
 import { relinkTrack, type LocalRelinkChange } from '@shared/local-file-relink'
 import { useToastStore } from './toast'
@@ -1788,6 +1788,36 @@ export const usePlayerStore = defineStore('player', () => {
     if (removingCurrent) clearSession()
   }
 
+  function queueDeduplicationContext():QueueDeduplicationContext{
+    if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
+    const plan=planQueueDeduplication(queue.value,currentIndex.value)
+    return Object.freeze({revision:queueRevision,generation:playGeneration,currentKey:currentTrack.value?playlistEntryKey(currentTrack.value):null,currentIndex:currentIndex.value,inputCount:plan.inputCount,retainedCount:plan.retainedCount,removedCount:plan.removedCount})
+  }
+
+  function applyQueueDeduplication(context:QueueDeduplicationContext):number{
+    if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
+    if(!context||context.revision!==queueRevision||context.generation!==playGeneration||context.currentIndex!==currentIndex.value||context.currentKey!==(currentTrack.value?playlistEntryKey(currentTrack.value):null))throw Error('播放列表或当前歌曲已变更，请重新打开整理')
+    const plan=planQueueDeduplication(queue.value,currentIndex.value)
+    if(context.inputCount!==plan.inputCount||context.retainedCount!==plan.retainedCount||context.removedCount!==plan.removedCount)throw Error('队列整理预览已失效，请重新打开整理')
+    if(!plan.removedCount)return 0
+    editingQueue=true
+    try{
+      cancelCrossfadeReservation()
+      queue.value=plan.queue
+      currentIndex.value=plan.currentIndex
+      const valid=new Set(plan.queue.map(playlistEntryKey)),current=context.currentKey,seen=new Set<string>()
+      randomPool=randomPool.filter(key=>{
+        if(!valid.has(key)||key===current||seen.has(key))return false
+        seen.add(key);return true
+      })
+      // This is a navigation log: repeated audible visits are intentional.
+      randomHistory=randomHistory.filter(key=>valid.has(key))
+      noteQueueMutation()
+      flushSession()
+    }finally{editingQueue=false}
+    return plan.removedCount
+  }
+
   function queueEditContext(keys:readonly string[]):QueueEditContext{
     if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
     assertQueueEditSelection(queue.value,keys)
@@ -2457,7 +2487,7 @@ export const usePlayerStore = defineStore('player', () => {
     applyEqualizerPreset,
     addToQueue,
     removeFromQueue,
-    queueEditContext,applyQueueEdit,
+    queueEditContext,applyQueueEdit,queueDeduplicationContext,applyQueueDeduplication,
     clearQueue,
     insertNext,
     moveInQueue,

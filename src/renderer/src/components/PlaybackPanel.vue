@@ -42,6 +42,22 @@ const ui = useUiStore()
 const player = usePlayerStore()
 const library = useLibraryStore(), toast = useToastStore()
 const savingQueue=ref(false)
+const deduplicatingQueue=ref(false)
+const duplicateCount=computed(()=>player.queue.length-new Set(player.queue.map(playlistEntryKey)).size)
+async function deduplicateQueue():Promise<void>{
+ if(!onLivePage.value||deduplicatingQueue.value)return
+ deduplicatingQueue.value=true
+ try{
+  const context=player.queueDeduplicationContext()
+  if(!context.removedCount){toast.info('当前队列没有重复歌曲');return}
+  const confirmed=await ui.confirm('队列去重',`完整当前队列共 ${context.inputCount} 首，保留 ${context.retainedCount} 首，将移除 ${context.removedCount} 个重复条目。保留当前行及播放进度，其余身份保留首次出现的行，剩余条目顺序保留。搜索筛选不缩小范围，来源歌单和音乐文件保留。`)
+  if(!confirmed)return
+  const removed=player.applyQueueDeduplication(context)
+  if(removed)toast.success(`已移除 ${removed} 个重复条目，保留 ${context.retainedCount} 首`)
+  else toast.info('当前队列没有重复歌曲')
+ }catch(error){toast.error(error instanceof Error?error.message:'队列整理失败')}
+ finally{deduplicatingQueue.value=false}
+}
 async function saveQueue():Promise<void>{
  const source=shown.value
  if(savingQueue.value||!source.tracks.length)return
@@ -236,6 +252,7 @@ function playThisList(): void {
           </div>
           <small class="np-panel__page-name">{{ shown.label }}</small>
           <div class="np-panel__actions">
+            <button v-if="onLivePage" class="btn" type="button" :disabled="!duplicateCount || deduplicatingQueue" :title="duplicateCount?'整理完整当前队列，搜索筛选不影响范围':'当前队列没有重复歌曲'" @click="deduplicateQueue">队列去重</button>
             <button class="btn" type="button" :title="onLivePage?'保存打开窗口时的完整当前队列，搜索筛选不影响范围':'保存打开窗口时的完整历史队列，搜索筛选不影响范围'" :disabled="!shown.tracks.length || savingQueue" @click="saveQueue">保存为新歌单</button>
             <button v-if="!onLivePage" class="btn btn--primary" type="button" @click="playThisList">播放这份列表</button>
             <button class="btn" type="button" :disabled="!onLivePage || player.currentIndex < 0" title="定位到正在播放的曲目" @click="locatePlaying">当前播放</button>

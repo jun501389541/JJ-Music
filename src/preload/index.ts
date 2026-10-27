@@ -1,6 +1,12 @@
 import type {PlaylistDeriveMode,PlaylistDerivePreview,PlaylistDeriveResult} from '@shared/playlist-derive'
 import type {PlaylistBulkRenamePreview,PlaylistBulkRenameResult,PlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
 import type {MissingFilesResult} from '@shared/missing-files'
+import type {LyricOffsetMap,LyricOffsetResult} from '@shared/lyric-offset'
+import type {StatisticsTrack,StatisticsReport,StatisticsSnapshot} from '@shared/playback-statistics'
+import type {StatisticsCsvRequest,StatisticsCsvResult} from '@shared/statistics-csv'
+import type {ResumePatch,ResumeSnapshot} from '@shared/track-resume'
+import type {BookmarkMutation,BookmarkSnapshot} from '@shared/track-bookmarks'
+import type {PlaybackDataPreview,PlaybackDataResult} from '@shared/playback-data'
 import type { PlaylistSource, PlaylistSearchPage } from '@shared/playlist-search'
 /**
  * Preload bridge.
@@ -192,6 +198,21 @@ const api = {
   settings: {
     get: () => invoke<AppSettings>(IPC.settingsGet),
     update: (patch: Partial<AppSettings>) => invoke<AppSettings>(IPC.settingsUpdate, patch)
+  },
+
+  lyricOffsets:{
+    get:()=>invoke<LyricOffsetMap>(IPC.lyricOffsetsGet),
+    set:(key:string,offsetMs:number)=>invoke<LyricOffsetResult>(IPC.lyricOffsetsSet,key,offsetMs)
+  },
+  trackResume:{get:()=>invoke<ResumeSnapshot>(IPC.resumeGet),apply:(patches:ResumePatch[])=>invoke<ResumeSnapshot>(IPC.resumeApply,patches)},
+  playbackData:{export:()=>invoke<boolean>(IPC.playbackDataExport),preview:()=>invoke<PlaybackDataPreview|null>(IPC.playbackDataPreview),apply:(token:string)=>invoke<PlaybackDataResult>(IPC.playbackDataApply,token),discard:(token:string)=>invoke<void>(IPC.playbackDataDiscard,token)},
+  trackBookmarks:{get:()=>invoke<BookmarkSnapshot>(IPC.bookmarksGet),mutate:(op:BookmarkMutation)=>invoke<BookmarkSnapshot>(IPC.bookmarksMutate,op)},
+  statistics:{
+    exportCsv:(request:StatisticsCsvRequest)=>invoke<StatisticsCsvResult|null>(IPC.statisticsCsvExport,request),
+    // Playback totals and resume positions are independent.
+    get:()=>invoke<StatisticsSnapshot>(IPC.statisticsGet),
+    begin:(track:StatisticsTrack)=>invoke<string>(IPC.statisticsBegin,track),
+    submit:(reports:StatisticsReport[])=>invoke<StatisticsSnapshot>(IPC.statisticsSubmit,reports)
   },
 
   /**

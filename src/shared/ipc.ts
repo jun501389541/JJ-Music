@@ -5,6 +5,11 @@
  * a channel name is a compile error rather than a silently dead handler.
  */
 export const IPC = {
+  statisticsCsvExport:'statistics:export-csv',
+  playbackDataExport:'playback-data:export',
+  playbackDataPreview:'playback-data:preview',
+  playbackDataApply:'playback-data:apply',
+  playbackDataDiscard:'playback-data:discard',
   playlistSearchProviders: 'playlist-search:providers',
   playlistSearch: 'playlist-search:search',
   playlistImportDiscard: 'playlist:import-discard',
@@ -94,6 +99,15 @@ export const IPC = {
 
   // Settings
   settingsGet: 'settings:get',
+  lyricOffsetsGet: 'lyric-offsets:get',
+  statisticsGet:'statistics:get',
+  resumeGet:'track-resume:get',
+  bookmarksGet:'track-bookmarks:get',
+  bookmarksMutate:'track-bookmarks:mutate',
+  resumeApply:'track-resume:apply',
+  statisticsBegin:'statistics:begin',
+  statisticsSubmit:'statistics:submit',
+  lyricOffsetsSet: 'lyric-offsets:set',
   settingsUpdate: 'settings:update',
   /** Where the app's data lives, and moving it. Never a settings field: see the handler. */
   dataDirGet: 'data-dir:get',

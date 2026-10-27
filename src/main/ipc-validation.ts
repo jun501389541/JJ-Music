@@ -3,6 +3,10 @@ import {assertQueuePlaylistArgs} from './library/queue-playlist'
 import {assertPlaylistBulkRenameSelection,parsePlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
 import { assertPlaylistSearch } from '@shared/playlist-search'
 import { IPC } from '@shared/ipc'
+import {statisticsTrack,assertStatisticsReports} from '@shared/playback-statistics'
+import {validateStatisticsCsvRequest} from '@shared/statistics-csv'
+import {resumeBatch} from '@shared/track-resume'
+import {bookmarkMutation} from '@shared/track-bookmarks'
 import { assertChartArgs } from '@shared/chart-types'
 import {
   LX_QUALITIES,
@@ -199,6 +203,18 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
     case IPC.lyricExportFile:
       if (!str(args[0], 256) || typeof args[1] !== 'string' || args[1].length > 1024 * 1024) bad()
       break
+    case IPC.statisticsGet: if(args.length)bad();break
+    case IPC.statisticsCsvExport: if(args.length!==1)bad();validateStatisticsCsvRequest(args[0]);break
+    case IPC.playbackDataExport:
+    case IPC.playbackDataPreview: if(args.length)bad();break
+    case IPC.playbackDataApply:
+    case IPC.playbackDataDiscard: if(args.length!==1||!str(args[0],64)||!/^[-a-f0-9]{36}$/i.test(args[0] as string))bad();break
+    case IPC.resumeGet: if(args.length)bad();break
+    case IPC.bookmarksGet: if(args.length)bad();break
+    case IPC.bookmarksMutate: if(args.length!==1)bad();bookmarkMutation(args[0] as Parameters<typeof bookmarkMutation>[0]);break
+    case IPC.resumeApply: if(args.length!==1)bad();resumeBatch(args[0]);break
+    case IPC.statisticsBegin: if(args.length!==1)bad();statisticsTrack(args[0] as Parameters<typeof statisticsTrack>[0]);break
+    case IPC.statisticsSubmit: if(args.length!==1)bad();assertStatisticsReports(args[0]);break
     default:
       // Other channels keep their existing handler-level checks. This boundary
       // is extended as each payload contract is moved to a shared schema.

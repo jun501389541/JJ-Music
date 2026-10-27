@@ -8,6 +8,7 @@
  * tests and on machines without an audio device.
  */
 
+import type {PlaybackSample} from './playback-statistics'
 export interface AudioEngineCapabilities {
   /** Engine identifier, e.g. `webaudio` or `wasapi`. */
   id: string
@@ -46,6 +47,7 @@ export interface AudioEngineEvents {
 export type AudioEngineEventName = keyof AudioEngineEvents
 
 export interface LoadOptions {
+  statisticsVisitId?:string
   /**
    * A resolved, directly playable URL. For local files this is a `file://`
    * URL or a custom protocol; for online tracks it is the URL returned by the
@@ -90,6 +92,8 @@ export interface CrossfadeOperation {
  * should be a no-op rather than a throw, because the UI can race the user.
  */
 export interface AudioEngine {
+  observePlayback?(handler:(sample:PlaybackSample)=>void):()=>void
+  samplePlayback?():void
   readonly capabilities: AudioEngineCapabilities
 
   on<K extends AudioEngineEventName>(event: K, handler: AudioEngineEvents[K]): void
@@ -108,7 +112,7 @@ export interface AudioEngine {
   fadeOut?(durationMs: number): Promise<boolean>
   setTransitionsEnabled?(enabled: boolean): void
   /** Stop and release the current track. */
-  stop(): void
+  stop(preserveStatisticsVisitId?:string): void
   /** Seek to an absolute position in seconds. */
   seek(time: number): void
 

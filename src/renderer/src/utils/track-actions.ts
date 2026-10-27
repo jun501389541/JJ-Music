@@ -7,6 +7,7 @@ import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import { router } from '../router'
+import {formatTime} from './format'
 
 export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = [track]): MenuItem[] {
   const ui = useUiStore(), player = usePlayerStore(), library = useLibraryStore(), toast = useToastStore()
@@ -126,7 +127,13 @@ export function trackActions(track: PlayableTrack, selection: PlayableTrack[] = 
 export function playbackActions(): MenuItem[] {
   const player = usePlayerStore(), ui = useUiStore(), library = useLibraryStore()
   const settings = library.settings
+  const resume=player.trackResumeContext()
+  const bookmarks=player.bookmarkContext()
   return [
+    {label:resume?`从上次 ${formatTime(resume.positionMs/1000)} 继续 · ${resume.name} · ${resume.platform}`:player.trackResumeStatus==='error'?'续播记录不可用':player.trackResumeStatus!=='ready'?'续播记录正在读取':'没有可用的上次位置',
+     disabled:!resume,action:()=>{try{player.applyTrackResume(resume)}catch(e){useToastStore().error(e instanceof Error?e.message:'续播失败')}}},
+    ...(player.trackResumeProblem?[{label:player.trackResumeProblem,disabled:true}]:[]),
+    {label:'本曲书签…',disabled:!bookmarks,action:()=>{if(bookmarks)ui.bookmarkManager=bookmarks}},
     { label: '播放模式', icon: 'list', children: (['list', 'repeat', 'single', 'random'] as const).map((mode, index) => ({ label: ['顺序播放', '列表循环', '单曲循环', '随机播放'][index], checked: player.playMode === mode, action: () => player.setPlayMode(mode) })) },
     { label: '播放速度', icon: 'audio', children: [0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => ({ label: `${rate} ×`, checked: player.rate === rate, action: () => player.setRate(rate) })) },
     { label: 'A–B 片段循环', icon: 'audio', children: [

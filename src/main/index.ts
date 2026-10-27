@@ -1,4 +1,14 @@
 import {PlaylistDerive} from './library/playlist-derive'
+import {PlaybackDataTransfer} from './library/playback-data'
+import {StatisticsCsvExporter} from './library/statistics-csv'
+import type {StatisticsCsvRequest} from '@shared/statistics-csv'
+import {LyricOffsetStore} from './store/lyric-offset-store'
+import {PlaybackStatisticsStore} from './store/playback-statistics-store'
+import {TrackResumeStore} from './store/track-resume-store'
+import {TrackBookmarksStore} from './store/track-bookmarks-store'
+import type {BookmarkMutation} from '@shared/track-bookmarks'
+import type {ResumePatch} from '@shared/track-resume'
+import type {StatisticsTrack,StatisticsReport} from '@shared/playback-statistics'
 import type {PlaylistDeriveMode} from '@shared/playlist-derive'
 import {PlaylistBulkRename} from './library/playlist-bulk-rename'
 import type {PlaylistBulkRenameTransform} from '@shared/playlist-bulk-rename'
@@ -370,6 +380,10 @@ const platformProbes = new Map<string, ReturnType<typeof probePlatform>>()
 interface Services {
   dataDir: string
   settings: SettingsStore
+  lyricOffsets: LyricOffsetStore
+  statistics:PlaybackStatisticsStore
+  trackResume:TrackResumeStore
+  trackBookmarks:TrackBookmarksStore
   playlists: PlaylistStore
   library: MusicLibrary
   artistImages: ArtistImageStore
@@ -470,6 +484,10 @@ async function createServices(): Promise<Services> {
   const dataDir = app.getPath('userData')
   await recoverLocalRelink(dataDir)
   const settings = new SettingsStore(dataDir)
+  const lyricOffsets = new LyricOffsetStore(dataDir)
+  const statistics = new PlaybackStatisticsStore(dataDir)
+  const trackResume = new TrackResumeStore(dataDir)
+  const trackBookmarks = new TrackBookmarksStore(dataDir)
   const playlists = new PlaylistStore(dataDir)
   const library = new MusicLibrary(dataDir)
   const pendingAssets = new PendingAssetStore(dataDir)
@@ -687,7 +705,7 @@ async function createServices(): Promise<Services> {
     }
   })
   await downloads.load()
-  const instance: Services = { dataDir, settings, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, charts, playlistSearch, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, playlistDerive, playlistBulkRename, downloads, onlineLyric, lyricDeps }
+  const instance: Services = { dataDir, settings, lyricOffsets, statistics, trackResume, trackBookmarks, playlists, library, artistImages, hotWords, pendingAssets, sourceStore, sourceEngine, onlinePlatforms, searchRouter, catalogReliability, charts, playlistSearch, capabilityHealth, auxiliaryRequests, onlineAssets, platformCover, scriptCover, entityDetails, playbackRouter, libraryRouter, playlistRefresh, playlistDerive, playlistBulkRename, downloads, onlineLyric, lyricDeps }
 
   // Reconcile the library's folder list with the settings file.
   //
@@ -792,6 +810,11 @@ function createWindow(): BrowserWindow {
   })
 
   window.setAlwaysOnTop(requireServices().settings.get().alwaysOnTop)
+  const statisticsOwner=window.webContents.id
+  const releaseStatistics=():void=>{void requireServices().statistics.releaseOwner(statisticsOwner)}
+  window.webContents.on('destroyed',releaseStatistics)
+  window.webContents.on('render-process-gone',releaseStatistics)
+  window.webContents.on('did-start-navigation',(_event,_url,inPlace,mainFrame)=>{if(mainFrame&&!inPlace)releaseStatistics()})
   if (process.platform === 'win32') window.setBackgroundMaterial(requireServices().settings.get().windowMaterial)
   window.webContents.on('did-finish-load', () => window.webContents.setZoomFactor(Math.min(1.25, Math.max(0.85, requireServices().settings.get().displayScale / 100))))
   window.on('ready-to-show', () => window.show())
@@ -1462,6 +1485,8 @@ function fromMainWindow(event: { sender: Electron.WebContents; senderFrame: Elec
 /** Wrap a handler so every rejection becomes a typed `IpcResult`. */
 const relinkGuard = new RelinkCommitGuard()
 let movingData=false
+let playbackDataBusy=false
+let statisticsCsvExporter:StatisticsCsvExporter|undefined
 let relinkCommit: Promise<unknown> | undefined
 const inFlightIpc = new Set<Promise<unknown>>()
 function handle<T>(channel: string, fn: (...args: never[]) => Promise<T> | T): void {
@@ -1754,6 +1779,41 @@ function registerIpc(): void {
 
   /* ---------------- settings ---------------- */
   handle(IPC.settingsGet, () => requireServices().settings.get())
+  handle(IPC.lyricOffsetsGet,()=>requireServices().lyricOffsets.get())
+  statisticsCsvExporter=new StatisticsCsvExporter({
+    dataDir:()=>requireServices().dataDir,snapshot:()=>requireServices().statistics.get(),
+    assertReady:()=>{if(quitting||movingData||relinkGuard.blocked)throw Error('应用正在关闭、迁移或修复，请稍后导出统计')},
+    choose:async defaultPath=>{const r=await dialog.showSaveDialog({title:'导出当前筛选统计 CSV',defaultPath,filters:[{name:'统计 CSV',extensions:['csv']}],properties:['showOverwriteConfirmation']});return r.canceled?null:r.filePath??null}
+  })
+  handle(IPC.statisticsCsvExport,(request:StatisticsCsvRequest)=>statisticsCsvExporter!.export(request))
+  const playbackDataTransfer=new PlaybackDataTransfer({
+    stores:()=>requireServices(),dataDir:()=>requireServices().dataDir,
+    assertReady:()=>{if(quitting||movingData||relinkGuard.blocked)throw Error('应用正在关闭、迁移或修复，请稍后操作播放备份')},
+    chooseOpen:async()=>{const r=await dialog.showOpenDialog({title:'选择播放数据备份',properties:['openFile'],filters:[{name:'播放数据 JSON',extensions:['json']}]});return r.canceled?null:r.filePaths[0]??null},
+    chooseSave:async()=>{const r=await dialog.showSaveDialog({title:'导出播放数据备份',defaultPath:'jj-playback-data.json',filters:[{name:'播放数据 JSON',extensions:['json']}],properties:['showOverwriteConfirmation']});return r.canceled?null:r.filePath??null}
+  })
+  async function playbackDataOperation<T>(work:()=>Promise<T>):Promise<T>{if(playbackDataBusy)throw Error('播放备份操作正在进行');playbackDataBusy=true;try{return await work()}finally{playbackDataBusy=false}}
+  handle(IPC.playbackDataExport,()=>playbackDataOperation(()=>playbackDataTransfer.export()))
+  handle(IPC.playbackDataPreview,()=>playbackDataOperation(()=>playbackDataTransfer.preview()))
+  handle(IPC.playbackDataApply,(token:string)=>playbackDataOperation(()=>playbackDataTransfer.apply(token)))
+  handle(IPC.playbackDataDiscard,(token:string)=>playbackDataTransfer.discard(token))
+  handle(IPC.bookmarksGet,()=>requireServices().trackBookmarks.get())
+  handle(IPC.bookmarksMutate,(op:BookmarkMutation)=>{if(quitting||movingData)throw Error('应用正在关闭或迁移，暂不能保存书签');return requireServices().trackBookmarks.mutate(op)})
+  handle(IPC.resumeGet,()=>requireServices().trackResume.get())
+  handle(IPC.resumeApply,(patches:ResumePatch[])=>{if(quitting||movingData)throw Error('应用正在关闭或迁移，暂不能保存续播位置');return requireServices().trackResume.apply(patches)})
+  handle(IPC.statisticsGet,()=>requireServices().statistics.get())
+  handle(IPC.statisticsBegin,(track:StatisticsTrack)=>{
+    if(quitting||movingData)throw Error('应用正在关闭或迁移，暂不能记录统计')
+    return requireServices().statistics.begin(mainWindow!.webContents.id,track)
+  })
+  handle(IPC.statisticsSubmit,(reports:StatisticsReport[])=>{
+    if(quitting||movingData)throw Error('应用正在关闭或迁移，暂不能记录统计')
+    return requireServices().statistics.submit(mainWindow!.webContents.id,reports)
+  })
+  handle(IPC.lyricOffsetsSet,(key:string,offsetMs:number)=>{
+    if(quitting||movingData)throw Error('应用正在关闭或迁移，暂不能保存歌词校准')
+    return requireServices().lyricOffsets.set(key,offsetMs)
+  })
   handle(IPC.settingsUpdate, async (patch: Partial<AppSettings>) => {
     const { settings } = requireServices()
     /*
@@ -1822,7 +1882,7 @@ function registerIpc(): void {
    * from the renderer.
    */
   handle(IPC.dataDirMove, async () => {
-    if(movingData)throw Error('正在迁移数据目录，请稍后')
+    if(movingData||playbackDataBusy||statisticsCsvExporter?.busy)throw Error('正在迁移、处理播放备份或导出统计，请稍后')
     const current = requireServices().dataDir
     const picked = await dialog.showOpenDialog({
       title: '选择数据目录',
@@ -1855,7 +1915,7 @@ function registerIpc(): void {
     if (response !== 0) return { moved: false, reason: 'cancelled' }
     // Anything still buffered would be missing from the copy, and the next write
     // after this would go to the old directory until the app restarts.
-    if(movingData)throw Error('正在迁移数据目录，请稍后')
+    if(movingData||playbackDataBusy||statisticsCsvExporter?.busy)throw Error('正在迁移、处理播放备份或导出统计，请稍后')
     movingData=true
     const currentServices=requireServices()
     currentServices.playlistDerive.clear();currentServices.playlistBulkRename.clear()
@@ -1865,6 +1925,10 @@ function registerIpc(): void {
     await assetCommits.flush()
     await flushAssetWrites()
     await requireServices().pendingAssets.flush()
+    await requireServices().lyricOffsets.flush()
+    await requireServices().statistics.flush()
+    await requireServices().trackResume.flush()
+    await requireServices().trackBookmarks.flush()
     await flushJsonWrites()
     await copyDataForRelocation(current, target, source => !isSkippedForMigration(current, source))
     writeFileSync(dataPointerFile, JSON.stringify({ dir: target, movedAt: Date.now() }, null, 2))
@@ -2458,6 +2522,7 @@ function registerIpc(): void {
   })
   handle(IPC.libraryRelinkDiscard, (token: string) => {relinkCandidates.discard(token);batchRelinkCandidates.discard(token)})
   handle(IPC.libraryRelinkApply, async (token: string) => {
+    if(statisticsCsvExporter?.busy)throw Error('正在导出统计CSV，请关闭保存对话框或等待导出完成后再修复关联')
     const current = requireServices()
     const candidates = relinkCandidates.has(token) ? relinkCandidates : batchRelinkCandidates
     // RelinkCommitGuard.run sets blocked synchronously before its first await;
@@ -3191,6 +3256,11 @@ if (!app.requestSingleInstanceLock()) {
       current.libraryRouter.flush(),
       current.hotWords.flush(),
       current.playlists.flush(),
+      current.lyricOffsets.flush(),
+      current.statistics.flush(),
+      current.trackResume.flush(),
+      current.trackBookmarks.flush(),
+      statisticsCsvExporter?.flush(),
       current.pendingAssets.flush(),
       assetOperations.flush(),
       assetCommits.flush(),

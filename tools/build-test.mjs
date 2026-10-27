@@ -50,6 +50,8 @@ const shared = {
 await build({
   ...shared,
   entryPoints: [
+    join(repoRoot, 'src', 'main', 'library', 'playback-data.ts'),
+    join(repoRoot, 'src', 'main', 'library', 'statistics-csv.ts'),
     join(repoRoot, 'src', 'main', 'online', 'reliability-policy.ts'),
     join(repoRoot, 'src', 'main', 'online', 'auxiliary-requests.ts'),
     join(repoRoot, 'src', 'main', 'online', 'cache-budget.ts'),
@@ -127,7 +129,11 @@ await build({
     join(repoRoot, 'src', 'main', 'media', 'media-response.ts'),
     join(repoRoot, 'src', 'main', 'media', 'file-release.ts'),
     join(repoRoot, 'src', 'main', 'media', 'flac-repair.ts'),
-    join(repoRoot, 'src', 'main', 'store', 'settings-store.ts')
+    join(repoRoot, 'src', 'main', 'store', 'settings-store.ts'),
+    join(repoRoot, 'src', 'main', 'store', 'lyric-offset-store.ts'),
+    join(repoRoot, 'src', 'main', 'store', 'playback-statistics-store.ts'),
+    join(repoRoot, 'src', 'main', 'store', 'track-resume-store.ts'),
+    join(repoRoot, 'src', 'main', 'store', 'track-bookmarks-store.ts')
   ],
   // `outbase` is the root the output tree mirrors. Setting it to `src/main`
   // and the outdir to `out/test` means `src/main/sources/x.ts` becomes
@@ -143,7 +149,17 @@ await build({
   entryPoints: [
         join(repoRoot, 'src', 'shared', 'audio-engine.ts'),
         join(repoRoot, 'src', 'shared', 'loop-time.ts'),
+        join(repoRoot, 'src', 'shared', 'lyric-offset.ts'),
+        join(repoRoot, 'src', 'shared', 'playback-statistics.ts'),
+        join(repoRoot, 'src', 'shared', 'statistics-daily.ts'),
+        join(repoRoot, 'src', 'shared', 'statistics-period.ts'),
+        join(repoRoot, 'src', 'shared', 'statistics-csv.ts'),
+        join(repoRoot, 'src', 'shared', 'track-resume.ts'),
+        join(repoRoot, 'src', 'shared', 'track-bookmarks.ts'),
+        join(repoRoot, 'src', 'shared', 'bookmark-catalog.ts'),
         join(repoRoot, 'src', 'shared', 'queue-edit.ts'),
+        join(repoRoot, 'src', 'shared', 'queue-sort.ts'),
+        join(repoRoot, 'src', 'shared', 'queue-undo.ts'),
         join(repoRoot, 'src', 'shared', 'crossfade.ts'),
         join(repoRoot, 'src', 'shared', 'types.ts'),
         join(repoRoot, 'src', 'shared', 'playlist-bulk-rename.ts'),
@@ -182,6 +198,10 @@ await build({
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'library.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'toast.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'player.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'stores', 'lyric-offset.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'stores', 'playback-statistics.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'stores', 'track-resume.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'stores', 'track-bookmarks.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'charts.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'stores', 'playlist-search.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'playlist-preview.ts'),

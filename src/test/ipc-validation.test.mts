@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 
 const { assertIpcArgs } = await import('./ipc-validation.js')
 const IPC = {
+  statisticsCsvExport:'statistics:export-csv',
+  playbackDataExport:'playback-data:export',playbackDataPreview:'playback-data:preview',playbackDataApply:'playback-data:apply',playbackDataDiscard:'playback-data:discard',
   musicSearch: 'music:search', musicSearchAll: 'music:search-all',
   onlineArtistPage: 'online:artist-page', onlineAlbumPage: 'online:album-page',
   onlineArtistCandidates: 'online:artist-candidates', onlineAlbumCandidates: 'online:album-candidates',
@@ -122,3 +124,6 @@ accepts('library:missing-files',['search-1790320000000-123'])
 rejects('library:missing-files',['E:/arbitrary'])
 rejects('library:missing-files',['search-1790320000000-123',{}])
 rejects('library:missing-files',[{path:'E:/arbitrary'}])
+for(const channel of [IPC.playbackDataExport,IPC.playbackDataPreview]){accepts(channel,[]);rejects(channel,['C:/injected.json'])}
+for(const channel of [IPC.playbackDataApply,IPC.playbackDataDiscard]){accepts(channel,['12345678-1234-1234-1234-123456789abc']);rejects(channel,['C:/injected.json']);rejects(channel,['12345678-1234-1234-1234-123456789abc',{}])}
+accepts(IPC.statisticsCsvExport,[{scope:'all',query:'',order:'duration'}]);rejects(IPC.statisticsCsvExport,[]);rejects(IPC.statisticsCsvExport,[{scope:'all',query:'',order:'duration',path:'C:/x.csv'}]);rejects(IPC.statisticsCsvExport,[{scope:'range',from:'2026-02-30',to:'2026-03-01',query:'',order:'count'}])

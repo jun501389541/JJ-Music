@@ -8,6 +8,14 @@ import { playlistEntryKey } from '@shared/playlist-refresh'
 import { normalizeCrossfadeDurationMs } from '@shared/crossfade'
 import type {LoopEditContext} from '@shared/loop-time'
 import {assertQueueEditSelection,planQueueEdit,planQueueDeduplication,type QueueEditAction,type QueueEditContext,type QueueDeduplicationContext} from '@shared/queue-edit'
+import {planQueueSort,queueSortValue,type QueueSortField,type QueueSortDirection,type QueueSortContext} from '@shared/queue-sort'
+import {invertQueueOrder,restoreQueueOrder} from '@shared/queue-undo'
+import {assertLyricOffsetMs,lyricTimeMs as calibratedLyricTime,lyricSeekSeconds,lyricOffsetPlatform} from '@shared/lyric-offset'
+import {useLyricOffsetStore} from './lyric-offset'
+import {usePlaybackStatisticsStore} from './playback-statistics'
+import {useTrackResumeStore} from './track-resume'
+import {useTrackBookmarksStore} from './track-bookmarks'
+import {captureBookmarkMs,sameBookmark,type BookmarkContext,type Bookmark} from '@shared/track-bookmarks'
 import { useLibraryStore } from './library'
 import { relinkTrack, type LocalRelinkChange } from '@shared/local-file-relink'
 import { useToastStore } from './toast'
@@ -52,6 +60,7 @@ interface ResolvedSource extends PlaybackUrlTimes {
 interface LoopRange { key: string; a: number; b: number | null; enabled: boolean }
 
 interface OutgoingPlaybackSnapshot {
+  statisticsVisitId?:string
   abLoop: LoopRange | null
   track: PlayableTrack
   key: string
@@ -99,6 +108,7 @@ interface QueueChange {
 }
 
 interface CrossfadeReservation {
+  statisticsVisitId?:string
   queueChange?: QueueChange
   origin?: 'automatic' | 'manual'
   durationMs?: number
@@ -240,9 +250,98 @@ export const usePlayerStore = defineStore('player', () => {
     currentIndex.value >= 0 ? (queue.value[currentIndex.value] ?? null) : null
   )
 
+  const lyricOffsets=useLyricOffsetStore()
+  const playbackStatistics=usePlaybackStatisticsStore()
+  const trackResume=useTrackResumeStore()
+  const trackBookmarks=useTrackBookmarksStore(),bookmarkEpoch=ref(0)
+  let catalogSeekEpoch=0
+  function bookmarkContext():BookmarkContext|undefined{
+    const track=currentTrack.value
+    if(!track||!loadedStatisticsVisitId||loading.value||localRelinkBusy||!isLoadedCurrentTrack())return undefined
+    return Object.freeze({key:playlistEntryKey(track),generation:playGeneration,epoch:bookmarkEpoch.value,visitId:loadedStatisticsVisitId,name:track.name,platform:lyricOffsetPlatform(track)})
+  }
+  function validateBookmarkContext(context:BookmarkContext):void{
+    const live=bookmarkContext()
+    if(!live||!context||live.key!==context.key||live.generation!==context.generation||live.epoch!==context.epoch||live.visitId!==context.visitId)throw Error('歌曲已变化，请重新打开')
+  }
+  function captureBookmarkPosition(context:BookmarkContext):number{
+    validateBookmarkContext(context)
+    return captureBookmarkMs(engine.value!.getCurrentTime(),engine.value!.getDuration())
+  }
+  function validateBookmarkPosition(context:BookmarkContext,positionMs:number):void{
+    validateBookmarkContext(context)
+    const actual=engine.value!.getDuration()
+    if(!Number.isFinite(actual)||actual<=0||!Number.isSafeInteger(positionMs)||positionMs<0||positionMs%100!==0||positionMs>=actual*1000)throw Error('书签位置已超出当前时长或媒体时间不可用')
+  }
+  function jumpBookmark(context:BookmarkContext,row:Bookmark):void{
+    validateBookmarkPosition(context,row.positionMs)
+    if(trackBookmarks.status!=='ready'||!sameBookmark(trackBookmarks.records[context.key]?.find(b=>b.id===row.id),row))throw Error('书签已变化，请重新打开')
+    clearLoop();seek(row.positionMs/1000)
+  }
+  async function playCatalogBookmark(track:PlayableTrack,row:Bookmark):Promise<void>{
+    if(localRelinkBusy)throw Error('正在修复本地文件，请稍后')
+    const key=playlistEntryKey(track)
+    if(trackBookmarks.status!=='ready'||!sameBookmark(trackBookmarks.records[key]?.find(b=>b.id===row.id),row))throw Error('书签已变化，请刷新总览')
+    const current=bookmarkContext()
+    if(current?.key===key){jumpBookmark(current,row);return}
+    // Retry attempts belong to this request, but user seek/toggle must never be adopted by a later attempt.
+    let generation=-1,expectedToggle=-1,userToggle=false
+    const seekEpoch=catalogSeekEpoch
+    const pending=playQueue([track],0,'书签：'+row.name,{singleTrackAudition:true,autoplay:false,onAttempt:(ownGeneration,beforeToggle)=>{
+      if(expectedToggle!==-1&&beforeToggle!==expectedToggle)userToggle=true
+      generation=ownGeneration;expectedToggle=beforeToggle+1
+    }})
+    await pending
+    const stale=()=>generation!==playGeneration||seekEpoch!==catalogSeekEpoch||userToggle||expectedToggle!==toggleGeneration||localRelinkBusy||!currentTrack.value||playlistEntryKey(currentTrack.value)!==key
+    const deadline=performance.now()+20000
+    while(!stale()&&!error.value&&!(engine.value!.getDuration()>0)&&performance.now()<deadline)await new Promise(done=>setTimeout(done,40))
+    if(stale())throw Error('书签播放已被新的进度或播放操作替代')
+    if(error.value)throw Error(error.value)
+    const duration=engine.value!.getDuration()
+    if(!Number.isFinite(duration)||duration<=0||row.positionMs>=duration*1000)throw Error('书签位置超出实际媒体时长或媒体尚不可用')
+    if(!sameBookmark(trackBookmarks.records[key]?.find(b=>b.id===row.id),row))throw Error('书签已变化，请刷新总览')
+    // All ownership and actual-duration checks precede this synchronous seek; no old loadedmetadata callback remains.
+    seek(row.positionMs/1000)
+    playbackAutoplay=true
+    await engine.value!.play(transitionsEnabled.value?SWITCH_FADE_MS:0)
+  }
+  function registerPlaybackVisit(track:PlayableTrack):string{
+    const id=playbackStatistics.register(track)??crypto.randomUUID()
+    trackResume.register(id,playlistEntryKey(track))
+    return id
+  }
+  function trackResumeContext(){
+    const point=trackResume.capture(loadedStatisticsVisitId),track=currentTrack.value
+    const actual=engine.value?.getDuration()??0
+    if(trackResume.status!=='ready'||!track||!point||!loadedStatisticsVisitId||loading.value||localRelinkBusy||!isLoadedCurrentTrack()||!Number.isFinite(actual)||actual<=0)return undefined
+    return Object.freeze({id:loadedStatisticsVisitId,key:point.key,generation:playGeneration,positionMs:point.positionMs,name:track.name,platform:lyricOffsetPlatform(track)})
+  }
+  function applyTrackResume(context:ReturnType<typeof trackResumeContext>):void{
+    const live=trackResumeContext(),actual=engine.value?.getDuration()??0
+    if(!context||!live||context.id!==live.id||context.key!==live.key||context.generation!==live.generation||context.positionMs!==live.positionMs)throw Error('播放已变更，续播入口已失效，请重新打开')
+    if(context.positionMs<5000||context.positionMs>=actual*1000-5000)throw Error('歌曲时长已变化，上次位置不再有效')
+    clearLoop()
+    seek(context.positionMs/1000)
+    trackResume.consume(context.id)
+  }
+  const lyricOffsetReady=computed(()=>lyricOffsets.status==='ready')
+  const lyricOffsetBusy=computed(()=>lyricOffsets.busy)
+  const lyricOffsetMs=computed(()=>lyricOffsetReady.value&&currentTrack.value?lyricOffsets.offsets[playlistEntryKey(currentTrack.value)]??0:0)
+  const lyricTimeMs=computed(()=>calibratedLyricTime(currentTime.value,lyricOffsetMs.value))
   const activeLyricIndex = computed(() =>
-    lyrics.value ? activeLineIndex(lyrics.value.lines, currentTime.value * 1000) : -1
+    lyrics.value ? activeLineIndex(lyrics.value.lines, lyricTimeMs.value) : -1
   )
+  function lyricOffsetContext():Readonly<{key:string;generation:number;offsetMs:number;name:string;platform:string;canAdjust:boolean}>{
+    if(!currentTrack.value||!lyricOffsetReady.value)throw Error('当前歌曲或歌词校准记录尚不可用')
+    return Object.freeze({key:playlistEntryKey(currentTrack.value),generation:playGeneration,offsetMs:lyricOffsetMs.value,name:currentTrack.value.name,platform:lyricOffsetPlatform(currentTrack.value),canAdjust:!!lyrics.value?.lines.length})
+  }
+  function applyLyricOffset(context:ReturnType<typeof lyricOffsetContext>,offsetMs:number):Promise<void>{
+    assertLyricOffsetMs(offsetMs)
+    if(!context||context.generation!==playGeneration||!currentTrack.value||context.key!==playlistEntryKey(currentTrack.value)||context.offsetMs!==lyricOffsetMs.value)throw Error('当前歌曲或偏移已变更，窗口已失效，请重新打开')
+    if(offsetMs!==0&&!lyrics.value?.lines.length)throw Error('当前没有可调整的时间歌词')
+    return lyricOffsets.set(context.key,offsetMs)
+  }
+  function lyricSeekTime(lineTimeMs:number):number{return lyricSeekSeconds(lineTimeMs,lyricOffsetMs.value,duration.value)}
 
   const progress = computed(() =>
     duration.value > 0 ? Math.min(1, currentTime.value / duration.value) : 0
@@ -260,6 +359,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (engine.value) return engine.value
 
     const instance = new WebAudioEngine()
+    instance.observePlayback?.(sample=>{playbackStatistics.sample(sample);trackResume.sample(sample)})
     instance.on('progress', (time, total) => {
       if (!isLoadedCurrentTrack()) return
       currentTime.value = time
@@ -388,6 +488,41 @@ export const usePlayerStore = defineStore('player', () => {
    */
   let playGeneration = 0
   let queueRevision = 0
+  let queueUndoCounter=0
+  type QueueUndoRecord={id:number;label:string;inverse:readonly number[];keys:readonly string[];revision:number;generation:number;currentIndex:number;currentKey:string|null;beforeIndex:number}
+  const queueUndoRecord=shallowRef<QueueUndoRecord|null>(null)
+  function clearQueueUndo():void{queueUndoRecord.value=null}
+  function validQueueUndo(record:QueueUndoRecord):boolean{
+    return record.revision===queueRevision&&record.generation===playGeneration&&record.currentIndex===currentIndex.value&&record.currentKey===(currentTrack.value?playlistEntryKey(currentTrack.value):null)&&record.keys.length===queue.value.length&&queue.value.every((track,index)=>playlistEntryKey(track)===record.keys[index])
+  }
+  const queueUndoAvailable=computed(()=>!!queueUndoRecord.value&&validQueueUndo(queueUndoRecord.value))
+  const queueUndoLabel=computed(()=>queueUndoAvailable.value?queueUndoRecord.value!.label:'')
+  function installQueueUndo(order:readonly number[],beforeIndex:number,label:string):void{
+    queueUndoRecord.value=Object.freeze({id:++queueUndoCounter,label,inverse:Object.freeze(invertQueueOrder(order)),keys:Object.freeze(queue.value.map(playlistEntryKey)),revision:queueRevision,generation:playGeneration,currentIndex:currentIndex.value,currentKey:currentTrack.value?playlistEntryKey(currentTrack.value):null,beforeIndex})
+  }
+  function queueUndoContext():number{
+    const record=queueUndoRecord.value
+    if(!record||!validQueueUndo(record)||localRelinkBusy)throw Error('上次整理已失效，当前无法撤销')
+    return record.id
+  }
+  function undoQueueEdit(id:number):void{
+    const record=queueUndoRecord.value
+    if(!record||record.id!==id)throw Error('上次整理已变更或撤销，请重新操作')
+    if(localRelinkBusy||!validQueueUndo(record)){clearQueueUndo();throw Error('上次整理已失效，当前无法撤销')}
+    let restored:ReturnType<typeof restoreQueueOrder<PlayableTrack>>
+    try{
+      restored=restoreQueueOrder(queue.value,record.inverse,currentIndex.value)
+      if(restored.currentIndex!==record.beforeIndex)throw Error('队列撤销位置无效')
+    }catch(error){clearQueueUndo();throw error}
+    editingQueue=true
+    try{
+      cancelCrossfadeReservation()
+      queue.value=restored.queue
+      currentIndex.value=restored.currentIndex
+      noteQueueMutation()
+      flushSession()
+    }finally{editingQueue=false}
+  }
   let crossfadeReservation: CrossfadeReservation | null = null
   const manualSwitchTarget = shallowRef<PlayableTrack | null>(null)
   const manualSwitchQueueLabel = ref<string | null>(null)
@@ -404,6 +539,7 @@ export const usePlayerStore = defineStore('player', () => {
   let startupDeadline: number | undefined
   let startupMonotonicDeadline: number | undefined
   let loadedTrackId: string | null = null
+  let loadedStatisticsVisitId:string|undefined
   let loadedTrackKey: string | null = null
   let loadedMediaUrl: string | null = null
   let playbackAutoplay = false
@@ -470,6 +606,7 @@ export const usePlayerStore = defineStore('player', () => {
       currentTime: engine.value?.getCurrentTime() ?? currentTime.value,
       duration: engine.value?.getDuration() ?? duration.value,
       loadedTrackId,
+      statisticsVisitId:loadedStatisticsVisitId,
       loadedTrackKey,
       loadedMediaUrl,
       playbackAutoplay,
@@ -513,6 +650,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function noteQueueMutation(): void {
+    clearQueueUndo()
     queueRevision += 1
     const reservation = crossfadeReservation
     if (!reservation) return
@@ -624,6 +762,7 @@ export const usePlayerStore = defineStore('player', () => {
           reservation.generation !== playGeneration || reservation.queueRevision !== queueRevision ||
           !reservationFitsCurrentQueue(reservation)) return
         const prepared = await instance.prepareTrack!({
+          statisticsVisitId:(reservation.statisticsVisitId=registerPlaybackVisit(reservation.track)),
           url: source.url,
           isLocal: isLocalTrack(reservation.track),
           title: reservation.track.name
@@ -669,6 +808,7 @@ export const usePlayerStore = defineStore('player', () => {
       playMode.value = change.mode
       singleTrackAudition.value = change.audition
       resetRandomPass()
+      clearQueueUndo()
       queueRevision += 1
     }
     reservation.handedOff = true
@@ -676,6 +816,7 @@ export const usePlayerStore = defineStore('player', () => {
     manualSwitchTarget.value = null
     manualSwitchQueueLabel.value = null
     if (reservation.origin === 'manual') returnManualDraws(reservation.selectedKey)
+    clearQueueUndo()
     playGeneration += 1
     reservation.generation = playGeneration
     reservation.queueRevision = queueRevision
@@ -687,6 +828,7 @@ export const usePlayerStore = defineStore('player', () => {
       } else rememberRandomDraw(reservation.selectedKey)
     }
     loadedTrackId = reservation.track.id
+    loadedStatisticsVisitId=reservation.statisticsVisitId
     loadedTrackKey = reservation.selectedKey
     loadedMediaUrl = reservation.source?.url ?? null
     playbackAutoplay = true
@@ -728,6 +870,7 @@ export const usePlayerStore = defineStore('player', () => {
       singleTrackAudition.value = savedQueue.audition
       randomPool = [...savedQueue.randomPool]
       randomHistory = [...savedQueue.randomHistory]
+      clearQueueUndo()
       queueRevision += 1
       persistQueueHistory()
     }
@@ -738,6 +881,7 @@ export const usePlayerStore = defineStore('player', () => {
     }
     const saved = reservation.outgoing
     abLoop.value = saved.abLoop ? { ...saved.abLoop, enabled: saved.abLoop.enabled && !sleepWaiting.value } : null
+    clearQueueUndo()
     playGeneration += 1
     lyricGeneration += 1
     lyricAbort?.abort()
@@ -746,6 +890,7 @@ export const usePlayerStore = defineStore('player', () => {
     // the incoming track that really played before the failed transition.
     if (playMode.value === 'random') rememberRandomDraw(saved.key)
     loadedTrackId = saved.loadedTrackId
+    loadedStatisticsVisitId=saved.statisticsVisitId
     loadedTrackKey = saved.key
     loadedMediaUrl = saved.loadedMediaUrl
     playbackAutoplay = saved.playbackAutoplay
@@ -918,7 +1063,7 @@ export const usePlayerStore = defineStore('player', () => {
         if(mayRetryUrl&&canRecoverMedia(failure)){
           const index=queue.value.findIndex(item=>playlistEntryKey(item)===playlistEntryKey(track))
           if(index<0)return
-          await playTrackAt(index,{autoplay:playbackAutoplay,startAt:currentTime.value,retryUrl:false,resolutionDeadline:startupDeadline,resolutionMonotonicDeadline:startupMonotonicDeadline})
+          await playTrackAt(index,{autoplay:playbackAutoplay,startAt:currentTime.value,retryUrl:false,resolutionDeadline:startupDeadline,resolutionMonotonicDeadline:startupMonotonicDeadline,statisticsVisitId:loadedStatisticsVisitId})
         }else finish()
       })()
       return
@@ -962,20 +1107,20 @@ export const usePlayerStore = defineStore('player', () => {
    * Called after the optional bounded fade, before any network work, so the
    * outgoing track cannot play on through the new track's URL resolution.
    */
-  function haltEngine(): void {
+  function haltEngine(statisticsVisitId?:string): void {
     loadedTrackId = null
     loadedTrackKey = null
     const instance = engine.value
     if (!instance) return
     instance.pause()
-    instance.stop()
+    instance.stop(statisticsVisitId)
     playing.value = false
     currentTime.value = 0
   }
 
   async function playTrackAt(
     index: number,
-    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; resolutionMonotonicDeadline?: number; transition?: boolean } = {}
+    options: { autoplay?: boolean; retryUrl?: boolean; startAt?: number; resolutionDeadline?: number; resolutionMonotonicDeadline?: number; transition?: boolean; statisticsVisitId?:string;onAttempt?:(generation:number,beforeToggle:number)=>void } = {}
   ): Promise<void> {
     if (index < 0 || index >= queue.value.length) return
     if (localRelinkBusy) return
@@ -983,8 +1128,10 @@ export const usePlayerStore = defineStore('player', () => {
     clearLoop()
     cancelCrossfadeReservation(crossfadeReservation?.selectedKey !== selectedKey)
     const manualRetry=options.retryUrl!==false&&!!error.value
+    clearQueueUndo()
     const generation = ++playGeneration
     playbackAutoplay = options.autoplay !== false
+    options.onAttempt?.(generation,toggleGeneration)
     toggleGeneration++
     pausePending = false
     loadedTrackId = null
@@ -1033,7 +1180,7 @@ export const usePlayerStore = defineStore('player', () => {
         await previous.fadeOut?.(SWITCH_FADE_MS)
       }
       if (isStale()) return
-      haltEngine()
+      haltEngine(options.statisticsVisitId)
       const source = await resolveWithTimeout(track, quality.value, resolving.signal, deadline, monotonicDeadline, manualRetry)
       // A newer selection superseded this one while we were resolving.
       if (isStale()) return
@@ -1052,7 +1199,10 @@ export const usePlayerStore = defineStore('player', () => {
        * sits at the right spot.
        */
       if (options.startAt && options.startAt > 0) currentTime.value = options.startAt
+      const statisticsVisitId=options.statisticsVisitId??registerPlaybackVisit(track)
+      options={...options,statisticsVisitId};loadedStatisticsVisitId=statisticsVisitId
       await instance.load({
+        statisticsVisitId,
         url: source.url,
         isLocal: isLocalTrack(track),
         title: track.name,
@@ -1235,11 +1385,12 @@ export const usePlayerStore = defineStore('player', () => {
     tracks: PlayableTrack[],
     startIndex = 0,
     label = '',
-    options: { playMode?: PlayMode; singleTrackAudition?: boolean } = {}
+    options: { playMode?: PlayMode; singleTrackAudition?: boolean; autoplay?:boolean;onAttempt?:(generation:number,beforeToggle:number)=>void } = {}
   ): Promise<void> {
     if (localRelinkBusy) return
     if (tracks[startIndex] && sleepWaiting.value) cancelSleepTimer()
     cancelCrossfadeReservation()
+    clearQueueUndo()
     queueRevision += 1
     rememberQueue(tracks)
     // Capture the outgoing session before replacing its rows. playTrackAt owns
@@ -1252,7 +1403,7 @@ export const usePlayerStore = defineStore('player', () => {
     singleTrackAudition.value = options.singleTrackAudition === true
     if (options.playMode) setPlayMode(options.playMode)
     resetRandomPass()
-    await playTrackAt(startIndex)
+    await playTrackAt(startIndex,{autoplay:options.autoplay,onAttempt:options.onAttempt})
   }
 
   /** Restore a saved queue using its stored row and mode, without a playback offset. */
@@ -1319,17 +1470,25 @@ export const usePlayerStore = defineStore('player', () => {
    */
   function moveInQueue(from: number, to: number): void {
     if (localRelinkBusy) return
-    if (from === to || to < 0 || to >= queue.value.length || from < 0 || from >= queue.value.length) return
+    if (!Number.isInteger(from)||!Number.isInteger(to)||from === to || to < 0 || to >= queue.value.length || from < 0 || from >= queue.value.length) return
+    const beforeIndex=currentIndex.value,order=queue.value.map((_,index)=>index)
+    const [old]=order.splice(from,1);order.splice(to,0,old)
     const list = [...queue.value]
     const [item] = list.splice(from, 1)
     if (!item) return
     list.splice(to, 0, item)
     // Replacing the array keeps reactivity predictable.
+    editingQueue=true
+    try{
+    cancelCrossfadeReservation()
     queue.value = list
     if (currentIndex.value === from) currentIndex.value = to
     else if (from < currentIndex.value && to >= currentIndex.value) currentIndex.value -= 1
     else if (from > currentIndex.value && to <= currentIndex.value) currentIndex.value += 1
     noteQueueMutation()
+    flushSession()
+    installQueueUndo(order,beforeIndex,'拖动排序')
+    }finally{editingQueue=false}
   }
 
   async function toggle(): Promise<void> {
@@ -1613,6 +1772,7 @@ export const usePlayerStore = defineStore('player', () => {
   function seek(time: number): void {
     if (localRelinkBusy) return
     if (!Number.isFinite(time)) return
+    catalogSeekEpoch++
     const clamped = Math.max(0, Math.min(time, duration.value || 0))
     const loop = abLoop.value
     if (loop?.enabled && loop.b !== null && (clamped < loop.a || clamped >= loop.b)) abLoop.value = { ...loop, enabled: false }
@@ -1788,6 +1948,32 @@ export const usePlayerStore = defineStore('player', () => {
     if (removingCurrent) clearSession()
   }
 
+  function queueSortContext(field:QueueSortField,direction:QueueSortDirection):QueueSortContext{
+    if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
+    const plan=planQueueSort(queue.value,currentIndex.value,field,direction)
+    return Object.freeze({field,direction,revision:queueRevision,generation:playGeneration,currentKey:currentTrack.value?playlistEntryKey(currentTrack.value):null,currentIndex:currentIndex.value,keys:Object.freeze(queue.value.map(playlistEntryKey)),values:Object.freeze(queue.value.map(track=>queueSortValue(track,field))),changed:plan.changed})
+  }
+
+  function applyQueueSort(context:QueueSortContext):boolean{
+    if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
+    if(!context||context.revision!==queueRevision||context.generation!==playGeneration||context.currentIndex!==currentIndex.value||context.currentKey!==(currentTrack.value?playlistEntryKey(currentTrack.value):null))throw Error('播放列表或当前歌曲已变更，请重新打开排序')
+    const plan=planQueueSort(queue.value,currentIndex.value,context.field,context.direction)
+    if(!Array.isArray(context.keys)||!Array.isArray(context.values)||context.keys.length!==queue.value.length||context.values.length!==queue.value.length||context.changed!==plan.changed||queue.value.some((track,index)=>context.keys[index]!==playlistEntryKey(track)||context.values[index]!==queueSortValue(track,context.field)))throw Error('队列排序资料或预览已变更，请重新打开排序')
+    if(!plan.changed)return false
+    const beforeIndex=currentIndex.value
+    editingQueue=true
+    try{
+      cancelCrossfadeReservation()
+      queue.value=plan.queue
+      currentIndex.value=plan.currentIndex
+      // Positions changed, not membership: keep the current shuffle pass and navigation log.
+      noteQueueMutation()
+      flushSession()
+      installQueueUndo(plan.order,beforeIndex,`${context.field==='name'?'歌名':'歌手'}${context.direction==='asc'?'升序':'降序'}`)
+    }finally{editingQueue=false}
+    return true
+  }
+
   function queueDeduplicationContext():QueueDeduplicationContext{
     if(localRelinkBusy)throw Error('本地文件重新定位维护中，请稍后再试')
     const plan=planQueueDeduplication(queue.value,currentIndex.value)
@@ -1829,6 +2015,8 @@ export const usePlayerStore = defineStore('player', () => {
     if(!context||context.revision!==queueRevision||context.generation!==playGeneration||context.currentIndex!==currentIndex.value||context.currentKey!==(currentTrack.value?playlistEntryKey(currentTrack.value):null))throw Error('播放列表或当前歌曲已变更，请重新选择')
     const plan=planQueueEdit(queue.value,currentIndex.value,context.keys,action)
     if(!plan.changed)return 0
+    const beforeIndex=currentIndex.value,positions=new Map(queue.value.map((track,index)=>[playlistEntryKey(track),index]))
+    const order=plan.queue.map(track=>positions.get(playlistEntryKey(track))!)
     editingQueue=true
     try{
       if(plan.removesCurrent||!plan.queue.length)stopPlayback()
@@ -1841,6 +2029,7 @@ export const usePlayerStore = defineStore('player', () => {
       noteQueueMutation()
       if(plan.removesCurrent||!plan.queue.length)clearSession()
       else flushSession()
+      if(action!=='remove')installQueueUndo(order,beforeIndex,action==='after-current'?'移到当前曲之后':'移到队尾')
     }finally{editingQueue=false}
     return plan.affected
   }
@@ -1849,6 +2038,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (localRelinkBusy) return
     stop()
     queue.value = []
+    clearQueueUndo()
     queueRevision += 1
     currentIndex.value = -1
     resetRandomPass()
@@ -1861,17 +2051,20 @@ export const usePlayerStore = defineStore('player', () => {
   function insertNext(tracks: PlayableTrack[]): void {
     if (localRelinkBusy) return
     if (tracks.length === 0) return
-    // An explicit "play next" outranks an automatic reservation, including
-    // random mode where queue position alone does not define the successor.
-    cancelCrossfadeReservation()
     const ids = new Set(tracks.map(playlistEntryKey))
     const current = currentTrack.value
-    queue.value = queue.value.filter(track => !ids.has(playlistEntryKey(track)) || !!current && playlistEntryKey(track) === playlistEntryKey(current))
-    currentIndex.value = current ? queue.value.findIndex(track => playlistEntryKey(track) === playlistEntryKey(current)) : -1
+    const retained=queue.value.map((track,index)=>({track,index})).filter(({track})=>!ids.has(playlistEntryKey(track))||!!current&&playlistEntryKey(track)===playlistEntryKey(current))
+    const anchor=current?retained.findIndex(row=>row.index===currentIndex.value):-1
     const seen = new Set<string>()
     const unique = tracks.filter(track => { if (current && playlistEntryKey(track) === playlistEntryKey(current) || seen.has(playlistEntryKey(track))) return false; seen.add(playlistEntryKey(track)); return true })
-    queue.value.splice(currentIndex.value + 1, 0, ...unique)
-    if (unique.length || ids.size) noteQueueMutation()
+    const result=retained.map(row=>row.track)
+    result.splice(anchor+1,0,...unique)
+    if(result.length===queue.value.length&&result.every((track,index)=>track===queue.value[index])&&anchor===currentIndex.value)return
+    // Real insertion outranks a prepared successor. No-op must preserve the undo record.
+    cancelCrossfadeReservation()
+    queue.value=result
+    currentIndex.value=anchor
+    noteQueueMutation()
   }
 
   const sleepAt = ref<number | null>(null)
@@ -1990,6 +2183,8 @@ export const usePlayerStore = defineStore('player', () => {
   let localRelinkIdentity: PlayableTrack | null = null
   let localRelinkResume: { id: string; position: number } | null = null
   function beginLocalRelink(change: LocalRelinkChange): void {
+    bookmarkEpoch.value++
+    clearQueueUndo()
     const current = currentTrack.value
     const saved = useLibraryStore().settings.lastSession
     if (current && relinkTrack(current, change) !== current && error.value && currentTime.value === 0 && saved && relinkTrack(saved.track, change) !== saved.track && Number.isFinite(saved.position) && saved.position > 0) currentTime.value = saved.position
@@ -2095,6 +2290,7 @@ export const usePlayerStore = defineStore('player', () => {
     const list = session.queue as PlayableTrack[]
     const index = Math.min(Math.max(0, session.index ?? 0), list.length - 1)
     cancelCrossfadeReservation()
+    clearQueueUndo()
     queueRevision += 1
     queue.value = list
     currentIndex.value = index
@@ -2168,6 +2364,7 @@ export const usePlayerStore = defineStore('player', () => {
     // Capture the position before clearing state, or the resume point would
     // always be at zero.
     flushSession()
+    clearQueueUndo()
     playGeneration += 1
     resolutionAbort?.abort()
     resolutionAbort = null
@@ -2177,6 +2374,7 @@ export const usePlayerStore = defineStore('player', () => {
     loadedTrackId = null
     loadedTrackKey = null
     engine.value?.stop()
+    loadedStatisticsVisitId=undefined
     playing.value = false
     currentTime.value = 0
     duration.value = 0
@@ -2448,6 +2646,10 @@ export const usePlayerStore = defineStore('player', () => {
     // getters
     currentTrack,
     activeLyricIndex,
+    flushPlaybackStatistics:()=>engine.value?.samplePlayback?.(),
+    trackResumeContext,applyTrackResume,trackResumeStatus:computed(()=>trackResume.status),trackResumeProblem:computed(()=>trackResume.problem),
+    bookmarkContext,validateBookmarkContext,captureBookmarkPosition,validateBookmarkPosition,jumpBookmark,playCatalogBookmark,
+    lyricOffsetMs,lyricTimeMs,lyricOffsetReady,lyricOffsetBusy,lyricOffsetContext,applyLyricOffset,lyricSeekTime,
     progress,
     hasNext,
     hasPrevious,
@@ -2487,7 +2689,7 @@ export const usePlayerStore = defineStore('player', () => {
     applyEqualizerPreset,
     addToQueue,
     removeFromQueue,
-    queueEditContext,applyQueueEdit,queueDeduplicationContext,applyQueueDeduplication,
+    queueEditContext,applyQueueEdit,queueDeduplicationContext,applyQueueDeduplication,queueSortContext,applyQueueSort,queueUndoAvailable,queueUndoLabel,queueUndoContext,undoQueueEdit,
     clearQueue,
     insertNext,
     moveInQueue,

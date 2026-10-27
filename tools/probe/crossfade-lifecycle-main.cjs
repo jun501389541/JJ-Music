@@ -51,6 +51,8 @@ function wavTone(frequency, seconds = 12) {
 }
 
 const media = new Map([
+  ['resume-a', wavTone(440,45)], ['resume-b',wavTone(880,45)],
+  ['stats-long', wavTone(440, 45)], ['stats-short', wavTone(660, 2)],
   ['a', wavTone(440)], ['b', wavTone(880)], ['short', wavTone(660, 0.5)],
   ['rate-a', wavTone(440)], ['rate-b', wavTone(880)],
   ['off-a', wavTone(330)], ['off-b', wavTone(660)],
@@ -119,6 +121,21 @@ function setupProbe() {
     }
   })
   window.jj = {
+    trackBookmarks:{get:async()=>({revision:1,records:{'online:wy:resume-a':[{id:'20871fcf-7dbe-4b8f-922c-42592b4012d0',name:'Native point',positionMs:5000,createdAt:1}],'online:wy:b':[{id:'7b04905f-b63d-4ea3-88d5-0abfb87ff788',name:'Fade point',positionMs:4000,createdAt:1}]}})},
+    trackResume:{
+      get:async()=>({revision:window.__resumeRevision??1,records:structuredClone(window.__resumeRecords??={ 'online:wy:resume-a':{key:'online:wy:resume-a',positionMs:20000,durationMs:45000,updatedAt:1}})}),
+      apply:async patches=>{for(const p of patches){if(p.point)window.__resumeRecords[p.key]=p.point;else delete window.__resumeRecords[p.key]}return{revision:window.__resumeRevision=(window.__resumeRevision??1)+1,records:structuredClone(window.__resumeRecords)}}
+    },
+    statistics:{
+      get:async()=>({revision:0,records:{}}),
+      begin:async track=>{const token=crypto.randomUUID();window.__statisticsTokens??={};window.__statisticsTokens[token]={track,totalMs:0,qualified:false};return token},
+      submit:async reports=>{
+        window.__statisticsRows??={};window.__statisticsRevision??=0;window.__statisticsDaily??={}
+        for(const r of reports){const old=window.__statisticsTokens[r.token],key=old.track.key,row=window.__statisticsRows[key]??{...old.track,totalMs:0,playCount:0,lastPlayedAt:0};row.totalMs+=r.totalMs-old.totalMs;row.playCount+=r.qualified&&!old.qualified?1:0;row.lastPlayedAt=Date.now();window.__statisticsRows[key]=row;old.totalMs=r.totalMs;old.qualified||=r.qualified}
+        for(const r of reports){const old=window.__statisticsTokens[r.token],prior=new Map((old.days??[]).map(d=>[d.day,d]));for(const d of r.days){const entries=window.__statisticsDaily[d.day]??={},row=entries[old.track.key]??={totalMs:0,playCount:0,lastPlayedAt:0},previous=prior.get(d.day)??{totalMs:0,playCount:0};row.totalMs+=d.totalMs-previous.totalMs;row.playCount+=d.playCount-previous.playCount;row.lastPlayedAt=Math.max(row.lastPlayedAt,d.lastPlayedAt)}old.days=structuredClone(r.days)}
+        return{revision:++window.__statisticsRevision,records:structuredClone(window.__statisticsRows),daily:structuredClone(window.__statisticsDaily)}
+      }
+    },
     sources: {
       onChanged: () => () => undefined,
       available: async () => [],
@@ -141,7 +158,8 @@ function setupProbe() {
       list: async () => [],
       items: async () => []
     },
-    settings: { update: async () => undefined }
+    settings: { update: async () => undefined },
+    lyricOffsets:{get:async()=>({...window.__lyricOffsetData}),set:async(key,offsetMs)=>{window.__lyricOffsetData={...window.__lyricOffsetData,[key]:offsetMs};return{key,offsetMs}}}
   }
   function makeTrack(id) {
     return { id, name: `Synthetic ${id}`, singer: 'Probe', source: 'wy' }
@@ -168,6 +186,8 @@ function setupProbe() {
       playing: state.player?.playing ?? false,
       waiting: state.player?.waiting ?? false,
       currentTime: state.player?.currentTime ?? 0,
+      lyricOffsetMs:state.player?.lyricOffsetMs??0,
+      lyricTimeMs:state.player?.lyricTimeMs??0,
       duration: state.player?.duration ?? 0,
       error: state.player?.error ?? null,
       queueIds: state.player?.queue.map(track => track.id) ?? [],
@@ -194,9 +214,14 @@ function setupProbe() {
     async begin(ids, durationMs) {
       if (state.player) {
         state.player.stop()
+        await window.JJCrossfadeLifecycle.statistics().shutdown()
         state.player.$dispose()
       }
       state.player = window.JJCrossfadeLifecycle.createPlayer()
+      await window.JJCrossfadeLifecycle.initializeLyricOffsets()
+      await window.JJCrossfadeLifecycle.statistics().initialize()
+      await window.JJCrossfadeLifecycle.resume().initialize()
+      await window.JJCrossfadeLifecycle.bookmarks().initialize()
       state.player.setTransitionsEnabled(false)
       state.player.setCrossfadeDuration(durationMs)
       state.audioOffset = state.audio.length
@@ -234,6 +259,8 @@ function setupProbe() {
       return snapshot()
     },
     dispose() {
+      void window.JJCrossfadeLifecycle.resume().shutdown()
+      void window.JJCrossfadeLifecycle.statistics().shutdown()
       state.player?.$dispose()
       state.player = null
     }
@@ -241,9 +268,9 @@ function setupProbe() {
 }
 
 const watchdog = setTimeout(() => {
-  report('failed', 'Native crossfade watchdog exceeded 75 seconds')
+  report('failed', 'Native crossfade watchdog exceeded 130 seconds')
   app.exit(2)
-}, 75_000)
+}, 130_000)
 report('running')
 
 app.whenReady().then(async () => {
@@ -346,6 +373,7 @@ app.whenReady().then(async () => {
     catch (error) { throw new Error(`Renderer script ${source.slice(0, 180)}: ${error?.message ?? JSON.stringify(error)}`) }
   }
   await js(`(${setupProbe.toString()})()`)
+  await js('window.__statsSamples=[];const observe=window.JJCrossfadeLifecycle.WebAudioEngine.prototype.observePlayback;window.JJCrossfadeLifecycle.WebAudioEngine.prototype.observePlayback=function(handler){return observe.call(this,s=>{window.__statsSamples.push(s);handler(s)})};void 0')
 
   async function begin(ids, durationMs) {
     await js(`window.__crossfadeProbe.begin(${JSON.stringify(ids)},${durationMs})`)
@@ -395,6 +423,14 @@ app.whenReady().then(async () => {
     const released = state.audio[outgoingDeckIndex]
     return released?.paused && !released.src
   }, 'outgoing deck release')
+  await js('window.__crossfadeProbe.player().flushPlaybackStatistics();window.JJCrossfadeLifecycle.statistics().flush()')
+  await wait(async()=>{await js('window.JJCrossfadeLifecycle.statistics().flush()');return await js('window.__statisticsRows?.["online:wy:a"]?.totalMs>0&&window.__statisticsRows?.["online:wy:b"]?.totalMs>0')},'both overlap visits acknowledged').catch(async e=>{console.error(JSON.stringify(await js('({rows:window.__statisticsRows,tokens:window.__statisticsTokens,samples:window.__statsSamples.slice(0,70),status:window.JJCrossfadeLifecycle.statistics().status,problem:window.JJCrossfadeLifecycle.statistics().problem})')));throw e})
+  const overlapStatistics=await js('window.__statisticsRows')
+  assert.ok(overlapStatistics['online:wy:a'].totalMs>0&&overlapStatistics['online:wy:b'].totalMs>0)
+  assert.equal(overlapStatistics['online:wy:a'].playCount,0,'seeked short outgoing must not qualify')
+  await js('window.__crossfadeProbe.player().jumpBookmark(window.__crossfadeProbe.player().bookmarkContext(),window.JJCrossfadeLifecycle.bookmarks().records["online:wy:b"][0])')
+  assert.ok((await snapshot()).audio.some(a=>a.currentSrc.includes('/media/b.wav')&&Math.abs(a.currentTime-4)<.3))
+  assert.equal((await snapshot()).playing,true)
   await finishCase('overlap-start-completion', {
     simultaneousDeckPlayback: true,
     outgoingClockAdvanced: true,
@@ -404,6 +440,64 @@ app.whenReady().then(async () => {
   })
   await reset()
 
+  // Explicit continuation uses the captured old point, not the freshly saved position.
+  await begin(['resume-a','resume-b'],0)
+  await js('window.__crossfadeProbe.player().toggle();window.__crossfadeProbe.player().seek(8);window.JJCrossfadeLifecycle.resume().flush()')
+  const resumeCaptured=await js('window.__crossfadeProbe.player().trackResumeContext()')
+  assert.equal(resumeCaptured.positionMs,20000)
+  await js('window.__crossfadeProbe.player().applyTrackResume(window.__crossfadeProbe.player().trackResumeContext())')
+  const resumedNative=await snapshot();assert.equal(resumedNative.playing,false);assert.ok(resumedNative.audio.some(a=>a.currentSrc.includes('/media/resume-a.wav')&&Math.abs(a.currentTime-20)<0.1&&a.paused))
+  await finishCase('track-resume-native-paused-captured-point',{capturedMs:20000,pausedPreserved:true,actualSeekSeconds:20})
+  const nativeBookmarkContext=await js('window.__crossfadeProbe.player().bookmarkContext()')
+  await js('window.__crossfadeProbe.player().jumpBookmark(window.__crossfadeProbe.player().bookmarkContext(),window.JJCrossfadeLifecycle.bookmarks().records["online:wy:resume-a"][0])')
+  const bookmarkPaused=await snapshot();assert.equal(bookmarkPaused.playing,false);assert.ok(bookmarkPaused.audio.some(a=>a.currentSrc.includes('/media/resume-a.wav')&&Math.abs(a.currentTime-5)<.1))
+  await finishCase('bookmarks-native-paused-jump',{position:5,paused:true,contextKey:nativeBookmarkContext.key})
+  await js(`(async()=>{const store=window.JJCrossfadeLifecycle.bookmarks(),api=window.jj.trackBookmarks,original=api.mutate;api.mutate=async op=>{const records=JSON.parse(JSON.stringify(store.records));records[op.key].find(b=>b.id===op.expected.id).positionMs=op.positionMs;return{revision:store.revision+1,records}};try{const row=store.records['online:wy:resume-a'][0];await store.mutate({kind:'move',key:'online:wy:resume-a',expected:row,positionMs:6000});}finally{window.__restoreBookApi=()=>{api.mutate=original}}})()`)
+  const afterBookmarkEdit=await snapshot();assert.equal(afterBookmarkEdit.playing,false);assert.ok(afterBookmarkEdit.audio.some(a=>a.currentSrc.includes('/media/resume-a.wav')&&Math.abs(a.currentTime-5)<.1))
+  await js(`(async()=>{const store=window.JJCrossfadeLifecycle.bookmarks();await store.mutate({kind:'move',key:'online:wy:resume-a',expected:store.records['online:wy:resume-a'][0],positionMs:5000});window.__restoreBookApi()})()`)
+  await finishCase('bookmarks-native-edit-does-not-seek',{pausedPreserved:true,clock:5})
+  await js('window.__catalogTrack=JSON.parse(JSON.stringify(window.__crossfadeProbe.player().queue[0]));window.__catalogBook=window.JJCrossfadeLifecycle.bookmarks().records["online:wy:resume-a"][0];void 0')
+  await begin(['resume-b'],0)
+  await js('window.__crossfadeProbe.player().playCatalogBookmark(window.__catalogTrack,window.__catalogBook)')
+  const catalogStart=await snapshot();assert.equal(catalogStart.playing,true);assert.ok(catalogStart.audio.some(a=>a.currentSrc.includes('/media/resume-a.wav')&&a.currentTime>=5&&a.currentTime<6))
+  await js('window.__crossfadeProbe.player().toggle();window.__crossfadeProbe.player().playCatalogBookmark(window.__catalogTrack,window.__catalogBook)')
+  assert.equal((await snapshot()).playing,false)
+  await finishCase('bookmarks-native-catalog-start-and-paused-jump',{startAt:5,sameTrackPaused:true})
+  await begin(['resume-b'],0)
+  await js('window.__crossfadeProbe.holdResolution("resume-a");window.__catalogPending=window.__crossfadeProbe.player().playCatalogBookmark(window.__catalogTrack,window.__catalogBook).then(()=>"ok",e=>e.message);void 0')
+  await wait(()=>js('typeof window.__releaseResolution==="function"'),'catalog resolving')
+  await js('window.__crossfadeProbe.player().playQueue([{...window.__catalogTrack,id:"resume-b",name:"new intent"}],0);void 0')
+  await js('window.__releaseResolution();void 0');const superseded=await js('window.__catalogPending');assert.match(superseded,/替代/)
+  await wait(()=>js('window.__crossfadeProbe.player().currentTrack?.id==="resume-b"&&window.__crossfadeProbe.player().playing'),'new catalog intent wins')
+  await finishCase('bookmarks-native-catalog-stale-intent',{latestTrack:'resume-b',lateSeek:false})
+  await begin(['resume-b'],0)
+  const retryCatalog=await js(`(async()=>{const p=window.JJCrossfadeLifecycle.WebAudioEngine.prototype,load=p.load;let attempts=0;p.load=async function(o){if(o.url.includes('/media/resume-a.wav')&&attempts++===0)throw Error('transient load fixture');return load.call(this,o)};try{await window.__crossfadeProbe.player().playCatalogBookmark(window.__catalogTrack,window.__catalogBook);return{playing:window.__crossfadeProbe.player().playing,attempts}}catch(e){return{error:e.message,attempts}}finally{p.load=load}})()`)
+  await begin(['resume-b'],0)
+  await js(`const proto=window.JJCrossfadeLifecycle.WebAudioEngine.prototype,load=proto.load;proto.load=async function(o){if(o.url.includes('/media/resume-a.wav')){await new Promise(done=>window.__catalogLoadRelease=done);proto.load=load}return load.call(this,o)};window.__catalogSeekPending=window.__crossfadeProbe.player().playCatalogBookmark(window.__catalogTrack,window.__catalogBook).then(()=>'ok',e=>e.message);void 0`)
+  await wait(()=>js('typeof window.__catalogLoadRelease==="function"'),'catalog metadata hold')
+  await js('window.__crossfadeProbe.player().seek(0);window.__catalogLoadRelease();void 0');const seekResult=await js('window.__catalogSeekPending'),seekState=await snapshot()
+  console.log('catalog regression evidence',JSON.stringify({retryCatalog,seekResult,seekPlaying:seekState.playing}))
+  assert.ok(retryCatalog.playing&&retryCatalog.attempts>=2,'catalog own retry must play')
+  assert.match(seekResult,/进度|替代/);assert.equal(seekState.playing,false,'new seek cancels old catalog autoplay')
+  await finishCase('bookmarks-native-catalog-retry-and-seek-intent',{retryAttempts:retryCatalog.attempts,seekCancelled:true})
+  await reset()
+  // A separate production engine and coordinator exercise exact same-key deck ownership.
+  await begin(['resume-b'],0);await js('window.__crossfadeProbe.player().stop()')
+  const resumeRollback=await js(`(async()=>{
+    const resume=window.JJCrossfadeLifecycle.resume(),engine=new window.JJCrossfadeLifecycle.WebAudioEngine(),key='online:wy:resume-a'
+    engine.observePlayback(s=>resume.sample(s))
+    resume.register('resume-old',key);await engine.load({url:location.origin+'/media/resume-a.wav',statisticsVisitId:'resume-old'});await engine.play();engine.seek(15)
+    const deadline=performance.now()+3000;while(!engine.isPlaying()&&performance.now()<deadline)await new Promise(r=>setTimeout(r,25))
+    resume.register('resume-new',key);const prepared=await engine.prepareTrack({url:location.origin+'/media/resume-b.wav',statisticsVisitId:'resume-new'});const fade=engine.crossfadeTo(prepared,3000);await fade.started
+    await new Promise(r=>setTimeout(r,300))
+    const incoming=engine.activeDeck.element;Object.defineProperty(incoming,'error',{configurable:true,value:{code:3}});incoming.dispatchEvent(new Event('error'));await new Promise(r=>setTimeout(r,300))
+    engine.samplePlayback();await resume.flush();await resume.flush()
+    const result={positionMs:resume.records[key]?.positionMs,oldClock:engine.activeDeck.element.currentTime,oldVisit:engine.activeDeck.statisticsVisitId}
+    engine.destroy();return result
+  })()`)
+  assert.equal(resumeRollback.oldVisit,'resume-old');assert.ok(resumeRollback.positionMs>=15000&&resumeRollback.positionMs<20000)
+  await finishCase('track-resume-native-same-key-rollback',resumeRollback)
+  await reset()
   // 2. A zero setting is exercised through Player Store; no standby media request is prepared.
   await begin(['off-a', 'off-b'], 0)
   await js('window.__crossfadeProbe.player().seek(9)')
@@ -445,6 +539,10 @@ app.whenReady().then(async () => {
   assert.ok(restoredOutgoing && !restoredOutgoing.paused)
   assert.ok(restoredOutgoing.currentTime > outgoingBeforeFailure, 'outgoing playback position must continue live')
   assert.ok(!restored.audio.some(item => item.src.includes('/media/fail-b.wav')))
+  await js('window.__crossfadeProbe.player().flushPlaybackStatistics();window.JJCrossfadeLifecycle.statistics().flush()')
+  const rollbackStatistics=await js('({rows:window.__statisticsRows,tokens:Object.values(window.__statisticsTokens).filter(v=>v.track.key==="online:wy:fail-a").length})')
+  assert.equal(rollbackStatistics.tokens,1,'rollback retains original visit')
+  assert.ok(rollbackStatistics.rows['online:wy:fail-a'].totalMs>0&&rollbackStatistics.rows['online:wy:fail-b'].totalMs>0)
   await finishCase('injected-decode-failure-rolls-back', {
     injectedMediaErrorCode: 3,
     restoredCurrentIndex: restored.currentIndex,
@@ -717,7 +815,96 @@ app.whenReady().then(async () => {
   await finishCase('queue-dedup-native-overlap-and-delayed-resolution',{incomingClockContinued:true,outgoingReleased:true,historyPreserved:true,lateResolutionInert:true})
   await reset()
 
+  await begin(['a','b','a','skip-c'],0)
+  await js('window.__crossfadeProbe.player().playTrackAt(2)')
+  await wait(async()=>{const s=await snapshot();return s.currentIndex===2&&s.playing&&s.audio.some(a=>!a.paused&&a.currentTime>0.1)?s:null},'sort later duplicate actually playing')
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.queue.forEach((t,i)=>t.name=["Z","B","A","C"][i]);window.__sortCurrent=p.currentTrack;p.seek(2);p.setLoopA();p.seek(5);p.setLoopB();p.setSleepMinutes(1);p.toggle()})()')
+  const beforeSort=await snapshot(),sortClock=beforeSort.audio.find(a=>a.src).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueSort(p.queueSortContext("name","asc"))})()')
+  const afterSort=await snapshot()
+  assert.deepEqual(afterSort.queueIds,['a','b','skip-c','a']);assert.equal(afterSort.currentIndex,0);assert.equal(afterSort.playing,false)
+  assert.equal(await js('window.__crossfadeProbe.player().currentTrack===window.__sortCurrent'),true)
+  assert.equal(afterSort.audio.find(a=>a.src).currentTime,sortClock);assert.deepEqual(afterSort.loop,beforeSort.loop);assert.equal(afterSort.sleepAt,beforeSort.sleepAt)
+  await js('window.__crossfadeProbe.player().toggle()');await sleep(150);assert.equal((await snapshot()).playing,true)
+  await finishCase('queue-sort-later-duplicate-current-native',{finalOrder:afterSort.queueIds,allRowsRetained:true,exactCurrentRowRetained:true,pausedClockRetained:true,loopAndSleepPreserved:true,resumed:true})
+  await reset()
+
+  await begin(['a','b'],0)
+  await js('window.__crossfadeProbe.stageQueue(["b","a","skip-c"],3000)')
+  await wait(async()=>{const s=await snapshot();return s.currentId==='b'&&s.audio.filter(a=>!a.paused&&a.src).length===2?s:null},'sort active native overlap')
+  const overlappingSort=await snapshot(),incomingSortClock=overlappingSort.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueSort(p.queueSortContext("name","asc"))})()');await sleep(100)
+  const finishedSort=await snapshot()
+  assert.deepEqual(finishedSort.queueIds,['a','b','skip-c']);assert.equal(finishedSort.currentIndex,1);assert.equal(finishedSort.audio.filter(a=>!a.paused&&a.src).length,1)
+  assert.ok(finishedSort.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime>=incomingSortClock);assert.deepEqual(finishedSort.historyIds,overlappingSort.historyIds)
+  await js('window.__crossfadeProbe.holdResolution("skip-c");window.__crossfadeProbe.stageQueue(["skip-c"])')
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.applyQueueSort(p.queueSortContext("name","desc"));window.__releaseResolution()})()');await sleep(150)
+  assert.deepEqual((await snapshot()).queueIds,['skip-c','b','a']);assert.equal((await snapshot()).currentId,'b')
+  await finishCase('queue-sort-native-overlap-and-delayed-resolution',{incomingClockContinued:true,outgoingReleased:true,historyPreserved:true,lateResolutionInert:true})
+  await reset()
+
+  await begin(['a','b','a','skip-c'],0)
+  await js('window.__crossfadeProbe.player().playTrackAt(2)')
+  await wait(async()=>{const s=await snapshot();return s.currentIndex===2&&s.playing&&s.audio.some(a=>!a.paused&&a.currentTime>0.1)?s:null},'undo duplicate current playing')
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.queue.forEach((t,i)=>t.name=["Z","B","A","C"][i]);p.seek(3);p.toggle();p.applyQueueSort(p.queueSortContext("name","asc"));window.__undoCurrent=p.currentTrack})()')
+  const undoBefore=await snapshot(),undoNativeClock=undoBefore.audio.find(a=>a.src).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.undoQueueEdit(p.queueUndoContext())})()')
+  const undoAfter=await snapshot();assert.deepEqual(undoAfter.queueIds,['a','b','a','skip-c']);assert.equal(undoAfter.currentIndex,2);assert.equal(undoAfter.playing,false);assert.equal(undoAfter.audio.find(a=>a.src).currentTime,undoNativeClock)
+  assert.equal(await js('window.__crossfadeProbe.player().currentTrack===window.__undoCurrent'),true)
+  await finishCase('queue-undo-native-duplicate-paused-clock',{orderRestored:true,exactCurrentOccurrence:true,pausedClockPreserved:true})
+  await reset()
+  await begin(['a','b'],0);await js('window.__crossfadeProbe.stageQueue(["b","a","skip-c"],3000)')
+  await wait(async()=>{const s=await snapshot();return s.currentId==='b'&&s.audio.filter(a=>!a.paused&&a.src).length===2?s:null},'undo drag overlap')
+  const dragBefore=await snapshot(),dragClock=dragBefore.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.moveInQueue(0,2);p.undoQueueEdit(p.queueUndoContext())})()');await sleep(100)
+  const dragAfter=await snapshot();assert.deepEqual(dragAfter.queueIds,['b','a','skip-c']);assert.equal(dragAfter.audio.filter(a=>!a.paused&&a.src).length,1);assert.ok(dragAfter.audio.find(a=>a.currentSrc.includes('/media/b.wav')&&!a.paused).currentTime>=dragClock)
+  await js('window.__crossfadeProbe.player().moveInQueue(0,2);window.__crossfadeProbe.holdResolution("skip-c");window.__crossfadeProbe.stageQueue(["skip-c"])')
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.undoQueueEdit(p.queueUndoContext());window.__releaseResolution()})()');await sleep(150)
+  assert.deepEqual((await snapshot()).queueIds,['b','a','skip-c']);assert.equal((await snapshot()).currentId,'b')
+  await finishCase('queue-undo-native-drag-overlap-and-delayed-resolution',{outgoingReleased:true,incomingClockContinued:true,pendingCancelled:true,lateResolutionInert:true})
+  await reset()
+
+  await js('window.__lyricOffsetData={};window.__originalLyricEnrich=window.jj.music.enrich;window.jj.music.enrich=async track=>({...track,lyric:"[offset:100]\\n[00:01.00]WordTwo\\n[00:02.00]Next",lxlyric:"[00:01.00]<0,1000>Word<1000,1000>Two\\n[00:02.00]<0,1000>Next"});void 0')
+  await begin(['a','b'],0)
+  await js('(()=>{const p=window.__crossfadeProbe.player();return p.loadLyrics(p.currentTrack)})()')
+  await js('window.__crossfadeProbe.player().toggle()');await js('window.__crossfadeProbe.player().seek(1.5)');await sleep(100)
+  const lyricBefore=await snapshot(),rawLyric=await js('JSON.stringify(window.__crossfadeProbe.player().lyrics)')
+  await js('(()=>{const p=window.__crossfadeProbe.player();return p.applyLyricOffset(p.lyricOffsetContext(),500)})()')
+  const delayedLyric=await snapshot();assert.equal(delayedLyric.playing,false);assert.ok(Math.abs(delayedLyric.lyricTimeMs-(delayedLyric.currentTime*1000-500))<1);assert.deepEqual(delayedLyric.audio,lyricBefore.audio)
+  await js('(()=>{const p=window.__crossfadeProbe.player();return p.applyLyricOffset(p.lyricOffsetContext(),-500)})()')
+  const advancedLyric=await snapshot();assert.equal(advancedLyric.lyricOffsetMs,-500);assert.ok(Math.abs(advancedLyric.lyricTimeMs-(advancedLyric.currentTime*1000+500))<1);assert.equal(await js('JSON.stringify(window.__crossfadeProbe.player().lyrics)'),rawLyric)
+  await js('(()=>{const p=window.__crossfadeProbe.player();p.seek(p.lyricSeekTime(p.lyrics.lines[1].time))})()');await sleep(100)
+  const lyricSeek=await snapshot();assert.ok(lyricSeek.audio.some(a=>a.src&&Math.abs(a.currentTime-1.4)<0.05));assert.equal(lyricSeek.playing,false)
+  await finishCase('lyric-offset-native-clock-and-click',{signedClock:true,pausedMediaUnchanged:true,parsedWordsUnchanged:true,compensatedSeek:true})
+  await reset()
+  await js('window.__lyricOffsetData={"online:wy:a":500,"online:wy:b":-500}')
+  await begin(['a','b'],0);assert.equal((await snapshot()).lyricOffsetMs,500)
+  await js('window.__crossfadeProbe.stageQueue(["b","a"],3000)');await waitForIndex(0,'lyric new queue staged')
+  await wait(async()=>{const s=await snapshot();return s.currentId==='b'&&s.audio.filter(a=>!a.paused&&a.src).length===2?s:null},'lyric identity handoff')
+  assert.equal((await snapshot()).lyricOffsetMs,-500);await js('window.__crossfadeProbe.injectDecodeError("b")');await wait(async()=>{const s=await snapshot();return s.currentId==='a'?s:null},'lyric offset rollback')
+  assert.equal((await snapshot()).lyricOffsetMs,500)
+  await finishCase('lyric-offset-native-handoff-rollback',{incomingUsesOwnOffset:true,rollbackUsesOutgoingOffset:true})
+  await reset();await js('window.jj.music.enrich=window.__originalLyricEnrich;window.__lyricOffsetData={}')
+
   // Stop must cancel a deliberately slow local media request and clear both element sources.
+  // Production meters run against native real clocks; only the persistence API is simulated here.
+  await begin(['stats-long','unused'],0)
+  const statsStart=Date.now()
+  await wait(async()=>{
+    await js('window.__crossfadeProbe.player().flushPlaybackStatistics();window.JJCrossfadeLifecycle.statistics().flush()')
+    return await js('window.__statisticsRows?.["online:wy:stats-long"]?.playCount===1')
+  },'real 30 second playback qualification',40000)
+  const longStats=await js('window.__statisticsRows["online:wy:stats-long"]')
+  const longDays=await js('Object.values(window.__statisticsDaily).reduce((sum,entries)=>sum+(entries["online:wy:stats-long"]?.totalMs??0),0)')
+  assert.equal(longDays,longStats.totalMs,'native cumulative and daily totals must match')
+  assert.ok(Date.now()-statsStart>=29500);assert.ok(longStats.totalMs>=30000);assert.equal(longStats.playCount,1)
+  await finishCase('statistics-real-thirty-seconds',{wallMs:Date.now()-statsStart,totalMs:longStats.totalMs,playCount:1,persistence:'simulated API; production meter/coordinator and native media'})
+  await reset()
+  await begin(['stats-short','unused'],0)
+  await wait(async()=>await js('window.__statisticsRows?.["online:wy:stats-short"]?.playCount===1'),'short full native completion')
+  const shortStats=await js('window.__statisticsRows["online:wy:stats-short"]');assert.ok(shortStats.totalMs>=1750);assert.equal(shortStats.playCount,1)
+  await finishCase('statistics-short-native-completion',{totalMs:shortStats.totalMs,playCount:1})
+  await reset()
   await begin(['stream', 'unused'], 0)
   const liveRequestCount = activeMedia.size
   assert.ok(liveRequestCount > 0, 'the slow synthetic media request must still be active before stop')

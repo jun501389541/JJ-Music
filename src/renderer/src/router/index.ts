@@ -7,6 +7,8 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
+    {path:'/bookmarks',component:()=>import('../views/BookmarksView.vue'),meta:{title:'时间点书签'}},
+    { path: '/statistics', component: () => import('../views/StatisticsView.vue'), meta: { title: '播放统计' } },
     { path: '/', redirect: '/discover' },
     { path: '/missing-files', component: () => import('../views/MissingFilesView.vue'), meta: { title: '缺失文件检查' } },
     { path: '/local-relink-batch', component: () => import('../views/LocalRelinkBatchView.vue'), meta: { title: '批量重新定位' } },

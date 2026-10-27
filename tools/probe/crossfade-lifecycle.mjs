@@ -16,11 +16,11 @@ function run(command, args, options = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, args, { cwd: root, windowsHide: true, stdio: 'inherit', ...options })
     let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; child.kill() }, 90_000)
+    const timer = setTimeout(() => { timedOut = true; child.kill() }, 150_000)
     child.once('error', error => { clearTimeout(timer); reject(error) })
     child.once('close', (code, signal) => {
       clearTimeout(timer)
-      if (timedOut) reject(new Error('Native crossfade probe exceeded 90 seconds'))
+      if (timedOut) reject(new Error('Native crossfade probe exceeded 150 seconds'))
       else code === 0 ? resolveRun() : reject(new Error(`Probe exited ${code ?? signal}`))
     })
   })

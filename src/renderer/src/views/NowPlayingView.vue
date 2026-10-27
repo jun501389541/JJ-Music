@@ -8,6 +8,7 @@ import { useRouter } from 'vue-router'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import { trackActions } from '../utils/track-actions'
 import AppIcon from '../components/AppIcon.vue'
+import {parseLyricOffsetSeconds} from '@shared/lyric-offset'
 import PlayerBar from '../components/PlayerBar.vue'
 import WindowControls from '../components/WindowControls.vue'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
@@ -47,8 +48,28 @@ const showRomanization = computed({ get: () => library.settings.lyricRomanizatio
  * wanted to check. Both are disabled by the absence of that layer in the current
  * lyric, so the two rows behave the same way round.
  */
+function lyricOffsetItem():MenuItem{
+ let context:ReturnType<typeof player.lyricOffsetContext>|undefined
+ try{context=player.lyricOffsetContext()}catch{/* No current writable calibration target. */}
+ const value=player.lyricOffsetMs,caption=value===0?'未调整':`${value<0?'提前':'延后'}${(Math.abs(value)/1000).toFixed(1)}秒`
+ const save=async(ms:number):Promise<void>=>{try{if(!context)throw Error('歌词校准记录不可用');await player.applyLyricOffset(context,ms)}catch(error){toast.error(error instanceof Error?error.message:'歌词校准保存失败')}}
+ const unavailable=!context||player.lyricOffsetBusy
+ return{label:`歌词时间：${player.lyricOffsetReady?caption:'记录不可用'}`,disabled:unavailable,children:[
+  {label:'按歌曲记忆，重启保留',disabled:true},
+  {label:'提前0.1秒',disabled:unavailable||!context?.canAdjust||value<=-30000,action:()=>save(value-100)},
+  {label:'延后0.1秒',disabled:unavailable||!context?.canAdjust||value>=30000,action:()=>save(value+100)},
+  {label:'输入偏移秒数…',disabled:unavailable||!context?.canAdjust,action:async()=>{
+   if(!context||ui.dialog){toast.info('请先完成当前对话框');return}
+   const text=await ui.prompt('歌词时间偏移',(value/1000).toFixed(1),`「${context.name}」· ${context.platform}，按歌曲记忆，重启保留。负数提前、正数延后；范围-30.0到+30.0秒，精度0.1秒，不改变歌曲播放进度。`,12)
+   if(text===null)return
+   try{await save(parseLyricOffsetSeconds(text))}catch(error){toast.error(error instanceof Error?error.message:'偏移输入无效')}
+  }},
+  {label:'重置本曲偏移',disabled:unavailable||value===0,action:()=>save(0)}
+ ]}
+}
 function lyricMenuItems(): MenuItem[] {
   return [
+    lyricOffsetItem(),
     { label: '显示翻译', icon: 'lyrics', disabled: !hasTranslation.value, checked: showTranslation.value, action: () => { showTranslation.value = !showTranslation.value } },
     { label: '显示音译', icon: 'lyrics', disabled: !hasRomanization.value, checked: showRomanization.value, action: () => { showRomanization.value = !showRomanization.value } },
     { label: '导入歌词', icon: 'download', disabled: !canEditLyric.value, action: onImportLyric },
@@ -403,7 +424,7 @@ onMounted(() => {
 /** Clicking a lyric line jumps to that point, as in Salt Player. */
 function seekToLine(index: number): void {
   const line = lines.value[index]
-  if (line) player.seek(line.time / 1000)
+  if (line) player.seek(player.lyricSeekTime(line.time))
 }
 
 /* ---------------------------------------------------------------- *

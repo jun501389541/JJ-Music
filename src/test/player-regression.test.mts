@@ -118,6 +118,115 @@ function setLoopAt(player, outgoing, a, b) {
   outgoing.currentTime = b; pulseAudioProgress(); player.setLoopB()
 }
 
+test('bookmarks context works without resume, captures engine clock, seeks paused and rejects stale row/context',async()=>{
+ const player=setup();window.jj.trackBookmarks={get:async()=>({revision:1,records:{'local:a':[{id:'a9038caf-6af2-46bf-895b-1d8b20c34d72',positionMs:12000,name:'Point',createdAt:1}]}})}
+ const {useTrackBookmarksStore}=await import('./renderer/stores/track-bookmarks.js');const books=useTrackBookmarksStore();await books.initialize();await player.playQueue([local('a'),local('b')],0);const audio=FakeAudio.instances[0];audio.signalReady();await player.toggle();audio.currentTime=8.456
+ const context=player.bookmarkContext();assert.equal(player.captureBookmarkPosition(context),8400);assert.equal(player.trackResumeContext(),undefined)
+ const mark=books.records['local:a'][0];player.jumpBookmark(context,mark);assert.equal(audio.currentTime,12);assert.equal(player.playing,false)
+ assert.throws(()=>player.jumpBookmark(context,{...mark,name:'old'}));await player.playTrackAt(1);assert.throws(()=>player.captureBookmarkPosition(context));player.stop()
+})
+
+test('track resume manually seeks captured pre-play point while paused and rejects stale generation',async()=>{
+ const player=setup();const {useTrackResumeStore}=await import('./renderer/stores/track-resume.js')
+ window.jj.trackResume={get:async()=>({revision:1,records:{'local:a':{key:'local:a',positionMs:20000,durationMs:180000,updatedAt:1}}}),apply:async()=>({revision:2,records:{}})}
+ const resume=useTrackResumeStore();await resume.initialize();await player.playQueue([local('a'),local('b')],0);const audio=FakeAudio.instances[0];audio.signalReady();await player.toggle();assert.equal(player.playing,false)
+ const context=player.trackResumeContext();assert.equal(context.positionMs,20000);player.applyTrackResume(context);assert.equal(audio.currentTime,20);assert.equal(player.playing,false);assert.equal(player.trackResumeContext(),undefined)
+ await player.playTrackAt(0);audio.signalReady();const old=player.trackResumeContext();await player.playTrackAt(1);assert.throws(()=>player.applyTrackResume(old));player.stop();await resume.shutdown()
+})
+
+test('statistics production engine observes both fade decks and seek never adds skipped time',async()=>{
+ setup();const engine=new WebAudioEngine(),events=[],unsubscribe=engine.observePlayback(s=>events.push(s));const [outgoing,incoming]=FakeAudio.instances
+ await engine.load({url:'https://test/a',statisticsVisitId:'a'});outgoing.signalReady();await engine.play();outgoing.currentTime=21;pulseAudioProgress();const ready=engine.prepareTrack({url:'https://test/b',statisticsVisitId:'b'});incoming.signalReady();const operation=engine.crossfadeTo(await ready,3000);await operation.started;outgoing.currentTime=22;incoming.currentTime=1;pulseAudioProgress()
+ const ids=new Set(events.filter(s=>s.flowing).map(s=>s.visitId));assert.equal(ids.size,2)
+ incoming.dispatchEvent(new Event('stalled'));assert.equal(events.at(-1).flowing,false);assert.equal(events.at(-1).event,'waiting')
+ engine.seek(100);assert.ok(events.some(s=>s.event==='seek'));assert.ok(events.some(s=>s.event==='release'))
+ const offset=events.length;engine.stop('b');await engine.load({url:'https://test/retry-b',statisticsVisitId:'b'})
+ assert.equal(events.slice(offset).some(s=>s.visitId==='b'&&s.event==='release'),false,'retry after odd deck handoff must preserve visit')
+ unsubscribe();engine.destroy()
+})
+
+test('lyric offset player calibrates parsed LRC time without media seek or timestamp mutation',async()=>{
+ const {player,outgoing}=await startManualQueue();const {useLyricOffsetStore}=await import('./renderer/stores/lyric-offset.js');window.jj.lyricOffsets={get:async()=>({}),set:async(key,offsetMs)=>({key,offsetMs})};await useLyricOffsetStore().initialize()
+ window.jj.lyric.resolve=async()=>({lyric:'[offset:100]\n[00:01.00]First\n[00:02.00]Second',source:'sidecar',synchronized:true});await player.loadLyrics(player.currentTrack)
+ const raw=JSON.stringify(player.lyrics);outgoing.currentTime=1.2;pulseAudioProgress();player.applyLoopRange(player.loopEditContext(),0,30);player.setSleepMinutes(1);player.moveInQueue(0,2);const undoId=player.queueUndoContext(),deadline=player.sleepAt;await player.toggle();const plays=outgoing.playCalls,clock=outgoing.currentTime
+ await player.applyLyricOffset(player.lyricOffsetContext(),500);assert.equal(player.lyricTimeMs,700);assert.equal(player.activeLyricIndex,-1);assert.equal(player.lyricSeekTime(900),1.4)
+ await player.applyLyricOffset(player.lyricOffsetContext(),-500);assert.equal(player.lyricTimeMs,1700);assert.equal(player.activeLyricIndex,0);assert.equal(player.lyricOffsetMs,-500);assert.equal(JSON.stringify(player.lyrics),raw);assert.equal(outgoing.currentTime,clock);assert.equal(outgoing.playCalls,plays);assert.equal(player.playing,false)
+ assert.equal(player.queueUndoContext(),undoId);assert.equal(player.sleepAt,deadline);assert.equal(player.abLoop.enabled,true)
+ const old=player.lyricOffsetContext();await player.playTrackAt(player.currentIndex);assert.throws(()=>player.applyLyricOffset(old,100),/变更|失效/)
+})
+test('lyric offset accepted in-flight save updates captured identity after current changes',async()=>{
+ const player=setup();const {useLyricOffsetStore}=await import('./renderer/stores/lyric-offset.js');const gate=deferred();window.jj.lyricOffsets={get:async()=>({'local:b':-200}),set:async(key,offsetMs)=>{await gate.promise;return{key,offsetMs}}};await useLyricOffsetStore().initialize()
+ window.jj.lyric.resolve=async()=>({lyric:'[00:01.00]Fixture',source:'sidecar',synchronized:true});await player.playQueue([local('a'),local('b')],0);FakeAudio.instances[0].signalReady();await flush();await player.loadLyrics(player.currentTrack)
+ const pending=player.applyLyricOffset(player.lyricOffsetContext(),500);await player.playTrackAt(1);gate.resolve();await pending
+ assert.equal(player.currentTrack.id,'b');assert.equal(player.lyricOffsetMs,-200);assert.equal(useLyricOffsetStore().offsets['local:a'],500)
+})
+
+test('queue undo restores later duplicate current row with live metadata paused clock loop sleep',async()=>{
+ const player=setup();await player.playQueue([{...local('a'),name:'Z'},local('b'),{...local('a'),name:'A'}],2);const audio=FakeAudio.instances[0];audio.signalReady();audio.currentTime=20;pulseAudioProgress();await flush();player.applyLoopRange(player.loopEditContext(),10,30);player.setSleepMinutes(1);await player.toggle();assert.equal(player.playing,false);const deadline=player.sleepAt,plays=audio.playCalls
+ player.applyQueueSort(player.queueSortContext('name','asc'));assert.equal(player.queueUndoAvailable,true);const id=player.queueUndoContext()
+ player.queue[0]={...player.queue[0],name:'latest name',picUrl:'https://test/latest'};player.undoQueueEdit(id)
+ assert.deepEqual(player.queue.map(v=>v.name),['Z','b','latest name']);assert.equal(player.currentIndex,2);assert.equal(player.currentTrack.picUrl,'https://test/latest');assert.equal(player.playing,false);assert.equal(audio.currentTime,20);assert.equal(audio.playCalls,plays);assert.equal(player.sleepAt,deadline);assert.equal(player.abLoop.enabled,true);assert.equal(player.queueUndoAvailable,false);assert.throws(()=>player.undoQueueEdit(id))
+})
+test('queue undo latest real edit replaces record but no-op and refused edits preserve it',async()=>{
+ const {player}=await startManualQueue();player.moveInQueue(0,2);const id=player.queueUndoContext();player.moveInQueue(2,2);assert.equal(player.queueUndoContext(),id);player.insertNext([player.currentTrack]);assert.equal(player.queueUndoContext(),id)
+ assert.throws(()=>player.applyQueueSort({...player.queueSortContext('name','asc'),values:[]}));assert.equal(player.queueUndoContext(),id)
+ player.applyQueueEdit(player.queueEditContext(['local:manual-b']),'to-end');const newer=player.queueUndoContext();assert.notEqual(newer,id);assert.throws(()=>player.undoQueueEdit(id));player.undoQueueEdit(newer);assert.deepEqual(player.queue.map(t=>t.id),['manual-b','manual-c','manual-a']);assert.equal(player.queueUndoAvailable,false)
+})
+test('queue undo invalidates same-key reload stop structure and maintenance immediately',async()=>{
+ const {player,outgoing}=await startManualQueue();player.moveInQueue(0,2);const id=player.queueUndoContext();await player.playTrackAt(2);assert.equal(player.queueUndoAvailable,false);assert.throws(()=>player.undoQueueEdit(id));outgoing.signalReady();player.moveInQueue(2,0);player.stop();assert.equal(player.queueUndoAvailable,false)
+ player.moveInQueue(0,2);await player.addToQueue([local('d')]);assert.equal(player.queueUndoAvailable,false);player.moveInQueue(0,2);player.beginLocalRelink({old:local('unrelated'),next:local('elsewhere')});assert.equal(player.queueUndoAvailable,false);player.finishLocalRelink();assert.equal(player.queueUndoAvailable,false)
+})
+test('queue undo preserves progress seek rate mode and cancels pending preparation without late revival',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();player.moveInQueue(0,2);const id=player.queueUndoContext();player.setRate(1.5);player.seek(25);player.setPlayMode('random');await player.next();await flush();assert.ok(player.manualSwitchTarget)
+ player.undoQueueEdit(id);incoming.signalReady();await flush();assert.deepEqual(player.queue.map(t=>t.id),['manual-a','manual-b','manual-c']);assert.equal(player.currentIndex,0);assert.equal(player.manualSwitchTarget,null);assert.equal(outgoing.currentTime,25);assert.equal(player.rate,1.5);assert.equal(player.playMode,'random')
+})
+test('queue undo drag finishes active handoff and new record cannot be rolled back by old failure',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();player.moveInQueue(0,2);await player.playUserQueue(['z','b','a'].map(local));incoming.signalReady();await flush();assert.equal(player.queueUndoAvailable,false)
+ player.moveInQueue(0,2);assert.equal(outgoing.src,'');assert.equal(player.queueUndoAvailable,true);player.undoQueueEdit(player.queueUndoContext());incoming.fail(3);await flush();assert.deepEqual(player.queue.map(t=>t.id),['z','b','a'])
+})
+test('queue undo no-current drag and sort restores without playback and unique batch moves are reversible',async()=>{
+ const player=setup();await player.addToQueue(['c','b','a'].map(local));player.applyQueueSort(player.queueSortContext('name','asc'));player.undoQueueEdit(player.queueUndoContext());assert.deepEqual(player.queue.map(t=>t.id),['c','b','a']);assert.equal(player.currentIndex,-1);assert.equal(player.playing,false)
+ await player.playQueue(['a','b','c','d'].map(local),1);FakeAudio.instances[0].signalReady();player.applyQueueEdit(player.queueEditContext(['local:a','local:d']),'after-current');player.undoQueueEdit(player.queueUndoContext());assert.deepEqual(player.queue.map(t=>t.id),['a','b','c','d']);assert.equal(player.currentIndex,1)
+})
+
+test('queue sort keeps exact later current row clock paused loop sleep and final session',async()=>{
+ const player=setup(),writes=[];window.jj.settings={update:async patch=>{writes.push(structuredClone(patch));return patch}}
+ await player.playQueue([{...local('a'),name:'Z'},local('b'),{...local('a'),name:'A'},local('c')],2)
+ const audio=FakeAudio.instances[0];audio.signalReady();audio.currentTime=20;pulseAudioProgress();await flush();player.applyLoopRange(player.loopEditContext(),10,30);player.setSleepMinutes(1);player.toggle()
+ const ref=player.currentTrack,deadline=player.sleepAt,loop=structuredClone(player.abLoop),loads=audio.loadCalls,plays=audio.playCalls,context=player.queueSortContext('name','asc')
+ assert.ok(Object.isFrozen(context)&&Object.isFrozen(context.keys)&&Object.isFrozen(context.values));assert.equal(context.changed,true)
+ assert.equal(player.applyQueueSort(context),true);await flush()
+ assert.deepEqual(player.queue.map(v=>v.name),['A','b','c','Z']);assert.equal(player.currentIndex,0);assert.equal(player.currentTrack,ref);assert.equal(audio.currentTime,20);assert.equal(player.playing,false);assert.equal(audio.loadCalls,loads);assert.equal(audio.playCalls,plays);assert.equal(player.sleepAt,deadline);assert.deepEqual(player.abLoop,loop)
+ const next=player.queueSortContext('name','asc');assert.equal(next.revision,context.revision+1);assert.equal(next.generation,context.generation);assert.equal(next.changed,false);assert.equal(writes.filter(v=>v.lastSession).at(-1).lastSession.index,0);assert.throws(()=>player.applyQueueSort(context),/变更|失效/)
+})
+test('queue sort rejects selected raw metadata changes but retains other live metadata',async()=>{
+ const {player}=await startManualQueue(),context=player.queueSortContext('name','desc');player.queue[1].name='changed'
+ assert.throws(()=>player.applyQueueSort(context),/资料|变更|失效/);assert.equal(player.queue[0].id,'manual-a')
+ const valid=player.queueSortContext('name','desc');player.queue[1].singer='live singer';player.queue[1].picUrl='https://test/live';assert.equal(player.applyQueueSort(valid),true);assert.equal(player.queue.find(t=>t.id==='manual-b').singer,'live singer')
+ const reload=player.queueSortContext('singer','asc');await player.playTrackAt(player.currentIndex);assert.throws(()=>player.applyQueueSort(reload),/变更|失效/)
+})
+test('queue sort no-op preserves pending intent and rejects malformed and maintenance contexts before effects',async()=>{
+ const {player,incoming}=await startManualQueue();player.next();await flush();const target=player.manualSwitchTarget.id,context=player.queueSortContext('name','asc')
+ assert.equal(player.applyQueueSort(context),false);assert.equal(player.manualSwitchTarget.id,target);assert.equal(player.queueSortContext('name','asc').revision,context.revision)
+ for(const invalid of [null,{...context,keys:[]},{...context,values:null},{...context,field:'id'},{...context,direction:'reverse'},{...context,changed:true}])assert.throws(()=>player.applyQueueSort(invalid))
+ player.beginLocalRelink({old:local('unrelated'),next:local('elsewhere')});assert.throws(()=>player.applyQueueSort(context),/维护|定位/);player.finishLocalRelink()
+ assert.equal(player.manualSwitchTarget.id,target);player.applyQueueSort(player.queueSortContext('name','desc'));incoming.signalReady();await flush();assert.equal(player.manualSwitchTarget,null);assert.equal(player.currentTrack.id,'manual-a');assert.equal(player.currentIndex,2)
+})
+test('queue sort finalizes handed-off queue and late decoder failure cannot roll back sorted order',async()=>{
+ const {player,outgoing,incoming}=await startManualQueue();await player.playUserQueue(['z','b','a'].map(local));incoming.signalReady();await flush();const history=JSON.parse(JSON.stringify(player.queueHistory))
+ player.applyQueueSort(player.queueSortContext('name','asc'));assert.deepEqual(player.queue.map(t=>t.id),['a','b','z']);assert.equal(player.currentIndex,2);assert.equal(outgoing.src,'');incoming.fail(3);await flush();assert.deepEqual(player.queue.map(t=>t.id),['a','b','z']);assert.deepEqual(player.queueHistory,history)
+})
+test('queue sort loading current continues its load and no-current never starts playback',async()=>{
+ const player=setup();await player.playQueue(['z','b','a'].map(local),0);const audio=FakeAudio.instances[0],loads=audio.loadCalls
+ player.applyQueueSort(player.queueSortContext('name','asc'));assert.equal(audio.loadCalls,loads);audio.signalReady();await flush();assert.equal(player.currentIndex,2);assert.equal(player.playing,true)
+ player.stop();player.currentIndex=-1;const plays=audio.playCalls;player.applyQueueSort(player.queueSortContext('name','desc'));assert.equal(player.currentIndex,-1);assert.equal(audio.playCalls,plays);assert.equal(player.playing,false)
+})
+test('queue sort preserves unused random draw order and repeated actual history instead of reshuffling',async()=>{
+ const originalRandom=Math.random;Math.random=()=>0
+ async function walk(sorted){const player=setup();player.setPlayMode('random');await player.playQueue(['z','b','a','c'].map(local),0);FakeAudio.instances[0].signalReady();await player.next();const visits=[player.currentTrack.id];if(sorted)player.applyQueueSort(player.queueSortContext('name','asc'));for(let i=0;i<2;i++){await player.next();visits.push(player.currentTrack.id)}for(let i=0;i<2;i++){await player.previous();visits.push(player.currentTrack.id)}player.stop();return visits}
+ try{const baseline=await walk(false);assert.deepEqual(await walk(true),baseline)}finally{Math.random=originalRandom}
+})
+
 test('queue dedup preserves exact current object clock loop sleep and paused state and refreshes session once',async()=>{
  const player=setup(),first=local('a'),current={...local('a'),name:'current-row'},writes=[]
  window.jj.settings={update:async patch=>{writes.push(structuredClone(patch));return patch}}
@@ -972,11 +1081,14 @@ test('manual crossfade source change cancels late ready target', async () => {
   assert.equal(player.currentTrack.id, 'manual-a')
 })
 
-test('manual crossfade target removal cancels pending while reordering keeps full identity', async () => {
+test('manual crossfade dragging cancels pending and later explicit selection keeps full identity', async () => {
   const { player, incoming } = await startManualQueue()
   await player.playQueueEntry(2); await flush()
   player.moveInQueue(2, 1)
   incoming.signalReady(); await flush(); await flush()
+  assert.equal(player.currentTrack.id, 'manual-a')
+  assert.equal(player.manualSwitchTarget, null)
+  await player.playQueueEntry(1); await flush(); incoming.signalReady(); await flush()
   assert.equal(player.currentTrack.id, 'manual-c')
   await player.playQueueEntry(2); await flush()
   player.removeFromQueue('manual-b')

@@ -30,11 +30,15 @@ import {
 import { GainTransition } from './gain-transition'
 import { MediaPlaybackError, mediaFailure } from '@shared/playback-reliability'
 import { CrossfadeController } from './crossfade-controller'
+import type {PlaybackSample,PlaybackSampleEvent} from '@shared/playback-statistics'
 
 /** How often the position loop samples the element. See `startProgressLoop`. */
 const PROGRESS_INTERVAL_MS = 200
 
 interface MediaDeck {
+  statisticsVisitId?:string
+  statisticsFlow?:boolean
+  statisticsWaiting?:boolean
   element: HTMLAudioElement
   source: MediaElementAudioSourceNode | null
   trackGain: GainNode | null
@@ -66,6 +70,7 @@ interface CrossfadeState {
   started: boolean
   paused: boolean
   finishOnStart: boolean
+  naturalFinishOnStart?:boolean
   resolveStarted: () => void
   rejectStarted: (error: Error) => void
   resolveCompleted: () => void
@@ -127,6 +132,16 @@ export class WebAudioEngine implements AudioEngine {
   private crossfade: CrossfadeState | null = null
   private deckListeners = new Map<MediaDeck, Array<[string, EventListener]>>()
   private playbackRate = 1
+  private statisticsObservers=new Set<(sample:PlaybackSample)=>void>()
+  observePlayback(handler:(sample:PlaybackSample)=>void):()=>void{this.statisticsObservers.add(handler);return()=>this.statisticsObservers.delete(handler)}
+  private statistics(deck:MediaDeck,event:PlaybackSampleEvent):void{
+    if(!deck.statisticsVisitId)return
+    const a=deck.element
+    const wallAt=Date.now()
+    const sample:PlaybackSample={visitId:deck.statisticsVisitId,at:performance.now(),wallAt,timezoneOffsetMinutes:new Date(wallAt).getTimezoneOffset(),time:Number.isFinite(a.currentTime)?a.currentTime:0,duration:a.duration,rate:a.playbackRate,flowing:!!deck.statisticsFlow&&!deck.statisticsWaiting&&!a.paused&&!a.ended,event}
+    for(const listener of this.statisticsObservers){try{listener(sample)}catch{/* Statistics cannot interrupt playback. */}}
+  }
+  samplePlayback():void{for(const deck of this.decks)this.statistics(deck,'sample')}
   private preservesPitch = true
 
   constructor() {
@@ -285,6 +300,7 @@ export class WebAudioEngine implements AudioEngine {
       }
     })
     listen('canplay', () => {
+      deck.statisticsWaiting=false;this.statistics(deck,'reset')
       const pending = this.preparing
       if (pending?.deck === deck) {
         pending.hasCanPlay = true
@@ -294,6 +310,7 @@ export class WebAudioEngine implements AudioEngine {
     })
     listen('playing', () => {
       if (this.destroyed || !deck.element.getAttribute('src') || deck.element.paused) return
+      deck.statisticsFlow=true;deck.statisticsWaiting=false;this.statistics(deck,'playing')
       const state = this.crossfade
       if (state?.incoming === deck) {
         if (!state.started) this.beginCrossfade(state)
@@ -309,15 +326,22 @@ export class WebAudioEngine implements AudioEngine {
       this.startProgressLoop()
     })
     listen('pause', () => {
+      this.statistics(deck,'pause');deck.statisticsFlow=false
       if (this.destroyed || deck !== this.activeDeck) return
       this.emit('paused')
       this.stopProgressLoop()
     })
     listen('waiting', () => {
+      deck.statisticsWaiting=true;this.statistics(deck,'waiting')
       if (!this.destroyed && deck === this.activeDeck) this.emit('waiting', true)
+    })
+    listen('stalled', () => {
+      deck.statisticsWaiting=true
+      this.statistics(deck,'waiting')
     })
     listen('ended', () => {
       if (this.destroyed) return
+      if(deck.element.ended){this.statistics(deck,'ended');deck.statisticsVisitId=undefined;deck.statisticsFlow=false}
       const state = this.crossfade
       if (state?.outgoing === deck) {
         if (state.started) this.finishCrossfade(state)
@@ -333,6 +357,7 @@ export class WebAudioEngine implements AudioEngine {
       const code = deck.element.error?.code
       // A src reset produces a spurious error event with no error detail.
       if (!code) return
+      this.statistics(deck,'error');deck.statisticsFlow=false
       const failure = new MediaPlaybackError(mediaFailure(code), describeMediaError(code))
       const pending = this.preparing
       if (pending?.deck === deck) {
@@ -364,6 +389,7 @@ export class WebAudioEngine implements AudioEngine {
     this.ensureGraph()
     const deck = this.standbyDeck
     this.releaseDeck(deck)
+    deck.statisticsVisitId=options.statisticsVisitId
     deck.element.preload = 'auto'
     this.setDeckGain(deck, 0)
     this.applyDeckSettings(deck)
@@ -413,7 +439,10 @@ export class WebAudioEngine implements AudioEngine {
     pending.reject(error)
   }
 
-  private releaseDeck(deck: MediaDeck): void {
+  private releaseDeck(deck: MediaDeck,reason:PlaybackSampleEvent='release'): void {
+    this.statistics(deck,reason)
+    if(reason!=='reload')deck.statisticsVisitId=undefined
+    deck.statisticsFlow=false;deck.statisticsWaiting=false
     deck.element.pause()
     deck.element.removeAttribute('src')
     deck.element.load()
@@ -533,18 +562,18 @@ export class WebAudioEngine implements AudioEngine {
     // the audible handoff before its completion can clear their reservation.
     let announcingStart = true
     state.controller.start(state.durationMs, () => {
-      if (announcingStart) state.finishOnStart = true
-      else this.finishCrossfade(state)
+      if (announcingStart) {state.finishOnStart = true;state.naturalFinishOnStart=true}
+      else this.finishCrossfade(state,true)
     })
     this.emit('ready', this.getDuration())
     this.emit('playing')
     this.startProgressLoop()
     state.resolveStarted()
     announcingStart = false
-    if (state.finishOnStart) this.finishCrossfade(state)
+    if (state.finishOnStart) this.finishCrossfade(state,!!state.naturalFinishOnStart)
   }
 
-  private finishCrossfade(state: CrossfadeState): void {
+  private finishCrossfade(state: CrossfadeState,natural=false): void {
     if (this.crossfade !== state) return
     if (!state.started) {
       state.finishOnStart = true
@@ -555,7 +584,7 @@ export class WebAudioEngine implements AudioEngine {
     this.activeDeck = state.incoming
     this.standbyDeck = state.outgoing
     this.setDeckGain(state.incoming, 1)
-    this.releaseDeck(state.outgoing)
+    this.releaseDeck(state.outgoing,natural?'natural-fade':'release')
     state.resolveCompleted()
   }
 
@@ -586,6 +615,7 @@ export class WebAudioEngine implements AudioEngine {
     this.standbyDeck = state.incoming
     this.setDeckGain(state.outgoing, 1)
     this.releaseDeck(state.incoming)
+    this.statistics(state.outgoing,'restored')
     this.suppressEnded = false
     if (!this.destroyed && !state.outgoing.element.paused && !state.outgoing.element.ended) {
       this.emit('ready', this.getDuration())
@@ -605,6 +635,9 @@ export class WebAudioEngine implements AudioEngine {
     }
     if (this.prepared) this.discardPreparedTrack(this.prepared.token)
     this.releaseDeck(this.standbyDeck)
+    if(this.activeDeck.statisticsVisitId)this.statistics(this.activeDeck,this.activeDeck.statisticsVisitId===options.statisticsVisitId?'reload':'release')
+    this.activeDeck.statisticsVisitId=options.statisticsVisitId
+    this.activeDeck.statisticsFlow=false;this.activeDeck.statisticsWaiting=false
     this.setDeckGain(this.activeDeck, 1)
 
     const generation = ++this.loadGeneration
@@ -719,7 +752,7 @@ export class WebAudioEngine implements AudioEngine {
     if (!enabled) this.transition?.finish()
   }
 
-  stop(): void {
+  stop(preserveStatisticsVisitId?:string): void {
     this.transportGeneration++
     this.transition?.reset(0)
     this.loadGeneration += 1
@@ -727,9 +760,12 @@ export class WebAudioEngine implements AudioEngine {
     if (this.preparing) this.failPreparation(this.preparing, new DOMException('播放已停止', 'AbortError'))
     if (this.crossfade) this.cancelCrossfade(this.crossfade)
     if (this.prepared) this.discardPreparedTrack(this.prepared.token)
-    for (const deck of this.decks) this.releaseDeck(deck)
+    for (const deck of this.decks) this.releaseDeck(deck,deck.statisticsVisitId&&deck.statisticsVisitId===preserveStatisticsVisitId?'reload':'release')
+    const preserved=this.decks.some(deck=>deck.statisticsVisitId===preserveStatisticsVisitId)&&preserveStatisticsVisitId
+    for(const deck of this.decks)deck.statisticsVisitId=undefined
     this.activeDeck = this.decks[0]
     this.standbyDeck = this.decks[1]
+    this.activeDeck.statisticsVisitId=preserved||undefined
     this.activeDeck.element.preload = 'auto'
     this.suppressEnded = true
     this.stopProgressLoop()
@@ -737,6 +773,7 @@ export class WebAudioEngine implements AudioEngine {
 
   seek(time: number): void {
     if (!Number.isFinite(time)) return
+    this.statistics(this.activeDeck,'seek')
     if (this.crossfade) {
       if (this.crossfade.started) this.finishCrossfade(this.crossfade)
       else this.cancelCrossfade(this.crossfade)
@@ -751,6 +788,7 @@ export class WebAudioEngine implements AudioEngine {
       /* ignore seeks before metadata */
     }
     this.emit('progress', this.getCurrentTime(), this.getDuration())
+    this.statistics(this.activeDeck,'reset')
   }
 
   /* ------------------------------------------------------------ *
@@ -791,8 +829,10 @@ export class WebAudioEngine implements AudioEngine {
   }
 
   setRate(rate: number): void {
+    this.samplePlayback()
     this.playbackRate = Math.min(4, Math.max(0.25, rate))
     for (const deck of this.decks) deck.element.playbackRate = this.playbackRate
+    for(const deck of this.decks)this.statistics(deck,'reset')
 
     const crossfade = this.crossfade
     if (!crossfade?.started) return
@@ -954,11 +994,13 @@ export class WebAudioEngine implements AudioEngine {
   private startProgressLoop(): void {
     if (this.progressTimer !== null) return
     this.progressTimer = window.setInterval(() => {
+      this.samplePlayback()
       this.emit('progress', this.getCurrentTime(), this.getDuration())
     }, PROGRESS_INTERVAL_MS)
   }
 
   private stopProgressLoop(): void {
+    if(!this.destroyed&&this.statisticsObservers.size&&this.decks.some(d=>d.statisticsFlow&&!d.statisticsWaiting&&!d.element.paused&&!d.element.ended))return
     if (this.progressTimer === null) return
     clearInterval(this.progressTimer)
     this.progressTimer = null

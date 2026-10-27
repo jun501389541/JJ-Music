@@ -9,6 +9,7 @@ import { useToastStore } from '../stores/toast'
 import { useUiStore } from '../stores/ui'
 import { SETTINGS_PAGES, type SettingItem } from '../utils/settings-pages'
 import AppIcon from '../components/AppIcon.vue'
+import PlaybackDataTools from '../components/PlaybackDataTools.vue'
 import type { UpdateStatus } from '@shared/update-types'
 const route = useRoute(), router = useRouter(), library = useLibraryStore(), player = usePlayerStore(), toast = useToastStore(), ui = useUiStore()
 const jj = window.jj
@@ -254,6 +255,7 @@ async function chooseOutputDevice(deviceId: string): Promise<void> {
   </div>
 
   <div v-if="section === 'appearance/lyrics'" class="lyric-preview" :style="{ fontSize: library.settings.lyricFontSize + 'px', textAlign: library.settings.lyricAlign }"><span>让每一个音符</span><strong>都在此刻，与你相遇</strong><small v-if="library.settings.lyricTranslation">Let the music stay with you.</small></div>
+  <PlaybackDataTools v-if="section === 'data' && !search" />
   <div v-if="section === 'data'" class="data-actions"><button class="btn" @click="jj.library.reveal('@data')">打开数据目录</button><button class="btn" @click="reset">恢复外观与播放设置</button></div>
   <!--
     Output device picker.

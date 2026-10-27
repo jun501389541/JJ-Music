@@ -32,6 +32,7 @@ import { useLibraryStore } from '../stores/library'
 import { useToastStore } from '../stores/toast'
 import {QUEUE_PLAYLIST_MAX_BYTES,QUEUE_PLAYLIST_MAX_TRACKS} from '@shared/queue-playlist'
 import type {QueueEditAction,QueueEditContext} from '@shared/queue-edit'
+import type {QueueSortField,QueueSortDirection} from '@shared/queue-sort'
 import { useUiStore, type MenuItem } from '../stores/ui'
 import AppIcon from './AppIcon.vue'
 import EqualizerPanel from './EqualizerPanel.vue'
@@ -42,6 +43,35 @@ const ui = useUiStore()
 const player = usePlayerStore()
 const library = useLibraryStore(), toast = useToastStore()
 const savingQueue=ref(false)
+const undoingQueue=ref(false)
+function undoQueue():void{
+ if(!onLivePage.value||undoingQueue.value)return
+ undoingQueue.value=true
+ try{player.undoQueueEdit(player.queueUndoContext());toast.success('已撤销上次整理')}
+ catch(error){toast.error(error instanceof Error?error.message:'上次整理已失效')}
+ finally{undoingQueue.value=false}
+}
+const sortingQueue=ref(false)
+async function sortQueue(field:QueueSortField,direction:QueueSortDirection,label:string):Promise<void>{
+ if(!onLivePage.value||sortingQueue.value)return
+ if(ui.dialog){toast.info('请先完成当前对话框');return}
+ sortingQueue.value=true
+ try{
+  const context=player.queueSortContext(field,direction)
+  if(!context.changed){toast.info('当前队列已是所选顺序');return}
+  if(!await ui.confirm('队列排序',`按${label}整理完整当前队列，共 ${context.keys.length} 首。包含筛选隐藏的条目；所有条目保留。当前歌曲继续播放，位置随排序变化；随机模式仍按随机规则播放。`))return
+  if(player.applyQueueSort(context))toast.success(`已按${label}整理 ${context.keys.length} 首`)
+  else toast.info('当前队列已是所选顺序')
+ }catch(error){toast.error(error instanceof Error?error.message:'队列排序失败')}
+ finally{sortingQueue.value=false}
+}
+function openQueueSortMenu(event:MouseEvent):void{
+ if(!onLivePage.value||sortingQueue.value||player.queue.length<2)return
+ ui.openMenu(event,(['name','singer'] as const).flatMap(field=>(['asc','desc'] as const).map(direction=>{
+  const label=`${field==='name'?'歌名':'歌手'}${direction==='asc'?'升序':'降序'}`
+  return{label,disabled:sortingQueue.value,action:()=>sortQueue(field,direction,label)}
+ })))
+}
 const deduplicatingQueue=ref(false)
 const duplicateCount=computed(()=>player.queue.length-new Set(player.queue.map(playlistEntryKey)).size)
 async function deduplicateQueue():Promise<void>{
@@ -252,6 +282,8 @@ function playThisList(): void {
           </div>
           <small class="np-panel__page-name">{{ shown.label }}</small>
           <div class="np-panel__actions">
+            <button v-if="onLivePage" class="btn" type="button" :disabled="!player.queueUndoAvailable || undoingQueue || ui.localRelinkBusy" :title="player.queueUndoAvailable?`撤销${player.queueUndoLabel}`:'没有可撤销的队列整理'" @click="undoQueue">撤销整理</button>
+            <button v-if="onLivePage" class="btn" type="button" :disabled="player.queue.length<2 || sortingQueue || ui.localRelinkBusy" :title="ui.localRelinkBusy?'本地文件重新定位维护中':player.queue.length<2?'队列至少需要两首歌曲':'排序完整当前队列，搜索筛选不影响范围'" @click="openQueueSortMenu">队列排序</button>
             <button v-if="onLivePage" class="btn" type="button" :disabled="!duplicateCount || deduplicatingQueue" :title="duplicateCount?'整理完整当前队列，搜索筛选不影响范围':'当前队列没有重复歌曲'" @click="deduplicateQueue">队列去重</button>
             <button class="btn" type="button" :title="onLivePage?'保存打开窗口时的完整当前队列，搜索筛选不影响范围':'保存打开窗口时的完整历史队列，搜索筛选不影响范围'" :disabled="!shown.tracks.length || savingQueue" @click="saveQueue">保存为新歌单</button>
             <button v-if="!onLivePage" class="btn btn--primary" type="button" @click="playThisList">播放这份列表</button>
@@ -319,7 +351,7 @@ function playThisList(): void {
 .np-panel__pager{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
 .np-panel__pager .flip{transform:scaleX(-1)}
 .np-panel__page-name{color:var(--text-tertiary);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:36%}
-.np-panel__actions{display:flex;gap:8px;margin-left:auto}
+.np-panel__actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap;max-width:100%}
 /* Descendant selectors, not just the class: `.tracklist` sets its own height in
    TrackList's scoped style, and two single-class rules resolve by injection
    order, which is not something a layout should depend on. */

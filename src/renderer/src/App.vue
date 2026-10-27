@@ -16,6 +16,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ContextMenu from './components/ContextMenu.vue'
 import DialogHost from './components/DialogHost.vue'
 import LoopRangeDialog from './components/LoopRangeDialog.vue'
+import TrackBookmarksDialog from './components/TrackBookmarksDialog.vue'
 import { useUiStore } from './stores/ui'
 import { useToastStore } from './stores/toast'
 import TitleBar from './components/TitleBar.vue'
@@ -27,6 +28,10 @@ import NowPlayingView from './views/NowPlayingView.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useLibraryStore } from './stores/library'
 import { usePlayerStore } from './stores/player'
+import {useLyricOffsetStore} from './stores/lyric-offset'
+import {usePlaybackStatisticsStore} from './stores/playback-statistics'
+import {useTrackResumeStore} from './stores/track-resume'
+import {useTrackBookmarksStore} from './stores/track-bookmarks'
 import type { UpdateStatus } from '@shared/update-types'
 import { startScrollMemory } from './composables/use-scroll-memory'
 import { startMediaSession } from './composables/use-media-session'
@@ -249,7 +254,7 @@ const desktopLyricPayload = computed<DesktopLyricPayload | null>(() => {
     ? (lines[index + 1] ? lines[index + 1].time - current.time : lastWord ? lastWord.offset + lastWord.duration : 5000)
     : 0
   const elapsedMs = current
-    ? Math.min(Math.max(player.currentTime * 1000 - current.time, 0), spanMs)
+    ? Math.min(Math.max(player.lyricTimeMs - current.time, 0), spanMs)
     : 0
   return {
     line,
@@ -458,7 +463,7 @@ onMounted(async () => {
   if (library.settings.accent !== 'auto') {
     applyAccent(library.settings.accent)
   }
-  await library.init()
+  await Promise.all([library.init(),useLyricOffsetStore().initialize(),usePlaybackStatisticsStore().initialize(),useTrackResumeStore().initialize(),useTrackBookmarksStore().initialize()])
   applyTheme(library.settings.theme)
   player.setVolume(library.settings.volume)
   player.setPlayMode(library.settings.playMode)
@@ -543,6 +548,9 @@ onMounted(async () => {
  * shutdown paths and is more likely to be skipped.
  */
 function onPageHide(): void {
+  player.flushPlaybackStatistics()
+  void usePlaybackStatisticsStore().shutdown()
+  void useTrackResumeStore().shutdown()
   player.flushSession()
 }
 
@@ -567,7 +575,7 @@ if (import.meta.env['VITE_E2E'] === '1') {
 /** Global shortcuts, mirroring the conveniences of a desktop player. */
 function onKeydown(event: KeyboardEvent): void {
   if (ui.localRelinkBusy) { event.preventDefault(); return }
-  if (ui.menu || ui.dialog || ui.loopRangeEdit || ui.trackInfo || ui.matchTrack) return
+  if (ui.menu || ui.dialog || ui.loopRangeEdit || ui.bookmarkManager || ui.trackInfo || ui.matchTrack) return
   // A focused control already handled this key (for example a slider arrow).
   if (event.defaultPrevented) return
   if (event.key === 'F11') { event.preventDefault(); void window.jj.window.fullscreen(); return }
@@ -680,6 +688,7 @@ const contentKey = computed(() => route.path)
     <ContextMenu />
     <DialogHost />
     <LoopRangeDialog v-if="ui.loopRangeEdit" :context="ui.loopRangeEdit" @close="ui.loopRangeEdit=null" />
+    <TrackBookmarksDialog v-if="ui.bookmarkManager" :key="ui.bookmarkManager.visitId+':'+ui.bookmarkManager.generation" :context="ui.bookmarkManager" @close="ui.bookmarkManager=null" />
     <PlaybackPanel />
     <!--
       Mounts once here rather than inside the playback page: the cover has to

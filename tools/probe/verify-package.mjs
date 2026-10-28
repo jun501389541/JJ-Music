@@ -15,16 +15,17 @@
  * It does not authenticate provenance; verify release digests/signatures separately.
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-let requestedAsar, artifactVersion
+let requestedAsar, artifactVersion, requireNativeLauncher = false
 function invalidArguments(message) {
   console.error(message)
-  console.error('Usage: verify-package.mjs [app.asar] OR <app.asar> --artifact-version=X.Y.Z')
+  console.error('Usage: verify-package.mjs [app.asar] [--require-native-launcher] OR <app.asar> --artifact-version=X.Y.Z [--require-native-launcher]')
   process.exit(2)
 }
 for (const arg of process.argv.slice(2)) {
@@ -34,6 +35,9 @@ for (const arg of process.argv.slice(2)) {
     if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(artifactVersion)) {
       invalidArguments('Artifact version must be a stable X.Y.Z version')
     }
+  } else if (arg === '--require-native-launcher') {
+    if (requireNativeLauncher) invalidArguments('Duplicate native launcher requirement')
+    requireNativeLauncher = true
   } else if (arg.startsWith('-') || requestedAsar !== undefined) {
     invalidArguments('Unknown option or multiple archive paths')
   } else requestedAsar = arg
@@ -188,6 +192,29 @@ try {
     const found = existsSync(join(unpacked, rel))
     if (!found) unpackedMissing += 1
     console.log(`  ${found ? 'OK  ' : 'MISS'}  ${rel}`)
+  }
+  // Older artifacts predate the native launcher; only a bundle that uses it
+  // promises these resources. New bundles must never borrow a repo helper.
+  if(requireNativeLauncher&&!main.includes('source-launcher.exe')) {
+    unpackedMissing++
+    console.log('  MISS  required native integration marker')
+  }
+  if(requireNativeLauncher||main.includes('source-launcher.exe')) {
+    try {
+      const resource=join(dirname(asarPath),'native')
+      const binary=readFileSync(join(resource,'source-launcher.exe'))
+      const manifest=JSON.parse(readFileSync(join(resource,'manifest.json'),'utf8').replace(/^\uFEFF/,''))
+      const pe=binary.readUInt32LE(0x3c)
+      const valid=binary.toString('ascii',0,2)==='MZ'&&binary.toString('ascii',pe,pe+4)==='PE\0\0'&&
+        binary.readUInt16LE(pe+4)===0x8664&&binary.readUInt16LE(pe+24)===0x20b&&binary.readUInt16LE(pe+24+68)===2&&
+        manifest.schema===1&&manifest.protocol===1&&manifest.arch==='x64'&&
+        typeof manifest.sha256==='string'&&createHash('sha256').update(binary).digest('hex')===manifest.sha256.toLowerCase()
+      if(!valid)throw new Error('native helper architecture/protocol/digest mismatch')
+      console.log('  OK    native/source-launcher.exe (x64 GUI, protocol 1, SHA-256 match)')
+    } catch {
+      unpackedMissing++
+      console.log('  MISS  native launcher resources (missing or architecture/protocol/digest mismatch)')
+    }
   }
 
   console.log(

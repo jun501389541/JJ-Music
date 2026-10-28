@@ -482,7 +482,12 @@ async function createServices(): Promise<Services> {
   // Sources run in a forked child process, so they can be killed without
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
-  const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'), 'auto', { health: capabilityHealth })
+  const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'), 'auto', {
+    health: capabilityHealth,
+    launcherPath: app.isPackaged
+      ? join(process.resourcesPath, 'native', 'source-launcher.exe')
+      : join(app.getAppPath(), 'build', 'native', 'x64', 'source-launcher.exe')
+  })
   const onlinePlatforms = new OnlinePlatformRegistry({
     sourcesByScript: () => sourceEngine.getSourcesByScript(),
     isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled)

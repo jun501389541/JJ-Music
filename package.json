@@ -8,9 +8,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node tools/build-source-launcher.mjs && electron-vite dev",
     "start": "electron-vite preview",
-    "build": "electron-vite build",
+    "build": "node tools/build-source-launcher.mjs && electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",

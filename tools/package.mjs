@@ -26,6 +26,9 @@
  *     # reuse an unpacked runtime matching the configured Electron version
  */
 import { spawnSync } from 'node:child_process'
+import { buildSourceLauncher } from './build-source-launcher.mjs'
+
+buildSourceLauncher()
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

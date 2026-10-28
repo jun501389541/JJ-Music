@@ -77,8 +77,11 @@ test('quarantine finishing after a safe same-id replacement leaves the new revis
     f.store.import(script('2'), 'fixture')
     pending = f.engine.quarantine(f.meta.id, 'old validation result')
     await entered.promise
-    f.store.import(script('3'), 'fixture'); await f.engine.reload(f.meta.id)
-    release.resolve(); await pending
+    f.store.import(script('3'), 'fixture')
+    const replacement = f.engine.reload(f.meta.id)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(f.states.length, 1, 'replacement must wait for the old quarantine teardown')
+    release.resolve(); await Promise.all([pending, replacement])
     assert.equal(f.store.get(f.meta.id).meta.enabled, true)
     assert.equal(f.store.isQuarantined(f.meta.id), false)
     assert.ok(f.engine.providerRevision(f.meta.id))

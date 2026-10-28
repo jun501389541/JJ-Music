@@ -11,6 +11,9 @@ import { build } from 'esbuild'
 import { mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildSourceLauncher } from './build-source-launcher.mjs'
+
+buildSourceLauncher()
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = join(repoRoot, 'out', 'test')
@@ -83,6 +86,7 @@ await build({
     join(repoRoot, 'src', 'main', 'sources', 'shutdown-guard.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'source-validator.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'restricted-launch.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'launcher-status.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'legacy-music-info.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'jj-source-protocol.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'source-runtime-host.ts'),

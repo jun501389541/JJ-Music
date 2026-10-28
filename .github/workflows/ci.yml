@@ -19,9 +19,9 @@ permissions:
 
 jobs:
   verify:
-    name: Typecheck, build, headless tests
+    name: Typecheck, build, headless and native tests
     # Windows, not ubuntu: this is a Windows-only app and several suites assume
-    # Windows paths, GBK decoding and the `runas` launcher. A Linux green would
+    # Windows paths, GBK decoding and the native restricted launcher. A Linux green would
     # not describe the artifact that ships.
     runs-on: windows-latest
     timeout-minutes: 30
@@ -50,6 +50,26 @@ jobs:
 
       - name: Verify
         run: npm run verify
+
+      # npm verify builds the production helper. These dedicated fixtures and
+      # probes also exercise real Win32 Job ownership and suspended creation.
+      # Keep each command in its own step so a later success cannot hide failure.
+      - name: Build native verification fixtures
+        shell: pwsh
+        run: ./tools/test-source-launcher-argv.ps1
+
+      - name: Build the creation-race test helper
+        shell: pwsh
+        run: ./tools/build-source-launcher.ps1 -TestBarrier
+
+      - name: Native startup, process cleanup and creation race
+        run: node tools/probe/windowless-source-launch.mjs --startup-race
+
+      - name: Nested Job startup, stop and restricted creation
+        run: node tools/probe/windowless-nested-job.mjs
+
+      - name: Native path support and safe rejection boundaries
+        run: node tools/probe/windowless-paths.mjs
 
       # `npm run test:e2e` is deliberately absent: it drives a real window, a
       # real audio device and the developer's own music folder, so it cannot be

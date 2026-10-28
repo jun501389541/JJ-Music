@@ -1,85 +1,22 @@
-/**
- * Restricted-token launcher for 音源 processes (Windows).
- *
- * ## Why this exists
- *
- * A source script was observed shutting the user's machine down. Windows'
- * event log proved it: `shutdown.exe` was invoked with the app's own token,
- * which holds `SeShutdownPrivilege`. Verified on this machine:
- *
- *   normal token    → SeShutdownPrivilege present
- *   trustlevel token→ privilege absent, shutdown calls fail
- *
- * `runas /trustlevel:0x20000` creates a secondary token with that privilege
- * stripped. Nothing else the sources legitimately need is affected: writing to
- * temp/APPDATA, outbound network and spawning children all still work (verified
- * with tools/capability-probe.mjs and tools/privilege-probe.mjs).
- *
- * ## The IPC problem, and why file handoff
- *
- * `runas` launches the child *detached*: the parent cannot hold its stdio or an
- * IPC channel the way `fork()` does. Rather than rebuild a pipe bridge, the
- * protocol is carried over files in the per-script scratch directory:
- *
- *   parent → child : request files  req-<id>.json
- *   child → parent : response files res-<id>.json
- *
- * The child watches its scratch directory (fs.watch is cheap and per-directory)
- * and the parent polls for response files. Both directions are append-only new
- * files, so no locking is needed; a response file is written under a temporary
- * name and renamed, so the reader never sees a half-written JSON.
- *
- * ## Tradeoffs
- *
- * - Slightly higher per-request latency (a few ms of fs churn) — irrelevant
- *   against the 20 s request ceiling.
- * - The parent discovers process death by polling the child's heartbeat file
- *   rather than an `exit` event.
- * - `runas` is Windows-only; other platforms keep the plain `fork()` path.
- */
-
-import { spawn, spawnSync } from 'node:child_process'
+/** Native Windows restricted-token helper; file IPC remains unchanged. */
+import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
 export interface RestrictedLaunch {
-  /**
-   * The detached child (the `runas` wrapper itself). Its pid is *not* the
-   * source process's pid; liveness is tracked via the heartbeat file.
-   */
+  /** A long-lived GUI helper owning the source's private kill-on-close Job. */
   wrapper: ReturnType<typeof spawn>
+  launchId: string
+  stop: () => Promise<void>
 }
 
-/**
- * True when the restricted-token launch path should be used.
- *
- * Windows uses the restricted-token path after repairing its boot and request
- * file contracts. This strips SeShutdownPrivilege but still allows ordinary
- * access to the user's files and network; it is not a general-purpose sandbox.
- */
 export function supportsRestrictedLaunch(platform: string = process.platform): boolean {
   return platform === 'win32'
 }
 
-/**
- * Launch `node <script.js> <init.json> <scratchDir>` under a restricted token.
- *
- * Quoting: `runas` re-parses its command string, and nested quotes around the
- * Node/host/script paths do not survive that re-parse (verified: the child
- * receives a truncated argv and exits before running anything). The reliable
- * form is a generated script wrapper — the complex quoting lives inside the
- * file, where the interpreter's own parser handles it, and `runas` only sees
- * one quoted path with no nesting.
- *
- * The wrapper uses a short `.cmd` bootstrap followed by a hidden VBScript host.
- * `windowsHide` also hides the runas process; a visible long-lived console is
- * never needed for the source process.
- *
- * `nodeExec` is the Electron binary in `ELECTRON_RUN_AS_NODE` mode, matching
- * what `fork()` would use internally. The scratch directory must already
- * exist; it carries the script, the init payload and the file-based protocol.
- */
 export function launchRestricted(options: {
+  launcherPath: string
   nodeExec: string
   hostPath: string
   scriptPath: string
@@ -87,54 +24,53 @@ export function launchRestricted(options: {
   scratchDir: string
   memoryLimitMb: number
 }): RestrictedLaunch {
-  const { nodeExec, hostPath, scriptPath, initPath, scratchDir, memoryLimitMb } = options
+  if (!isAbsolute(options.launcherPath) || !existsSync(options.launcherPath)) {
+    throw new Error('音源后台启动失败（启动器缺失），请重新安装完整应用')
+  }
+  const launchId = randomUUID()
+  const wrapper = spawn(options.launcherPath, [
+    '--node', options.nodeExec, '--host', options.hostPath,
+    '--script', options.scriptPath, '--init', options.initPath,
+    '--scratch', options.scratchDir, '--memory-mb', String(options.memoryLimitMb),
+    '--owner-pid', String(process.pid), '--launch-id', launchId
+  ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  // stdin carries only a stop byte to the helper, never source requests.
+  wrapper.stdin?.on('error', () => undefined)
+  let stopping: Promise<void> | undefined
+  const stop = (): Promise<void> => {
+    if (stopping) return stopping
+    stopping = stopLauncher(wrapper)
+    return stopping
+  }
+  return { wrapper, launchId, stop }
+}
 
-  // ------------------------------------------------------------------
-  // Launcher chain: runas → launch.cmd → cscript launch.vbs → node (hidden).
-  //
-  // Why two wrappers:
-  //   - runas cannot take a nested-quoted command (verified: truncated argv),
-  //     so the complex quoting must live in a file — a `.cmd` is the only
-  //     script type runas accepts reliably.
-  //   - but cmd.exe is a console program: runas allocates it a *visible*
-  //     console window, and since the source process is long-lived the user
-  //     got one black window parked on screen per enabled source.
-  //   - a `.vbs` run directly under runas fails silently (verified), so the
-  //     VBS is launched BY a bootstrap .cmd: cscript starts the VBS, the VBS
-  //     (WScript.Shell.Run, window mode 0) starts the Node process hidden,
-  //     and the bootstrap cmd exits — its console lives for well under a
-  //     second and then disappears.
-  // ------------------------------------------------------------------
-  const vbsFile = join(scratchDir, 'launch.vbs')
-  const cmdFile = join(scratchDir, 'launch.cmd')
-  // ## ELECTRON_RUN_AS_NODE=1 is load-bearing
-  //
-  // Inside the packaged app, `process.execPath` is the Electron binary itself,
-  // not Node. Launched bare, that binary starts a *second app instance* (which
-  // exits immediately against the single-instance lock, or worse opens a
-  // second window) instead of running the host script. Setting this variable
-  // makes the Electron binary behave as plain Node — exactly what `fork()`
-  // does internally. In dev, where execPath is real Node, the variable is
-  // harmless.
-  //
-  // WScript.Shell.Run window mode 0 = the started process gets no window.
-  // VBS strings double quotes by doubling them, hence the "" escapes below.
-  const nodeArgs = `--max-old-space-size=${memoryLimitMb} "${hostPath}" "${scriptPath}" "${initPath}" "${scratchDir}"`
-  const vbs = [
-    'Set sh = CreateObject("WScript.Shell")',
-    'sh.Environment("PROCESS")("ELECTRON_RUN_AS_NODE") = "1"',
-    `sh.Run """${nodeExec}"" ${nodeArgs.replace(/"/g, '""')}", 0, False`
-  ].join('\r\n')
-  writeFileSync(vbsFile, vbs, 'utf8')
-  writeFileSync(cmdFile, `@echo off\r\ncscript //nologo "${vbsFile}"\r\n`, 'utf8')
-
-  const wrapper = spawn('runas', ['/trustlevel:0x20000', `"${cmdFile}"`], {
-    stdio: 'ignore',
-    windowsHide: true,
-    windowsVerbatimArguments: true
-  })
-
-  return { wrapper }
+export function stopLauncher(wrapper: ReturnType<typeof spawn>): Promise<void> {
+    return new Promise<void>((resolveStop, rejectStop) => {
+      const unconfirmed = (): Error => new Error('音源进程树回收未确认，临时目录已保留')
+      if (!wrapper.pid) { resolveStop(); return }
+      if (wrapper.exitCode !== null || wrapper.signalCode !== null) {
+        if (wrapper.exitCode === 0 && wrapper.signalCode === null) resolveStop()
+        else rejectStop(unconfirmed())
+        return
+      }
+      const finished = (code: number | null, signal: string | null): void => {
+        clearTimeout(timer); clearTimeout(deadline); wrapper.removeListener('exit', finished)
+        if (code === 0 && signal === null) resolveStop()
+        else rejectStop(unconfirmed())
+      }
+      const timer = setTimeout(() => {
+        // Closing the helper's last Job handle is the forced-stop fallback.
+        try { wrapper.kill() } catch { finished(null, 'kill-error') }
+      }, 12000)
+      const deadline = setTimeout(() => {
+        clearTimeout(timer)
+        wrapper.removeListener('exit', finished)
+        rejectStop(unconfirmed())
+      }, 15000)
+      wrapper.once('exit', finished)
+      try { wrapper.stdin?.end('S') } catch { wrapper.kill() }
+    })
 }
 
 /** A request the parent writes for the child to execute. */
@@ -188,7 +124,7 @@ export function readResponse(scratchDir: string, id: number): FileResponse | und
  * This replaces the `exit` event that `fork()` provides for free.
  */
 export interface Heartbeat {
-  /** The child's real pid (the parent's kill() cannot reach it across runas). */
+  /** Diagnostic only; never use an untrusted heartbeat PID to kill a process. */
   pid?: number
   at: number
 }
@@ -202,23 +138,6 @@ export function readHeartbeat(scratchDir: string): Heartbeat | undefined {
   } catch {
     // Mid-write read; treated as "no data" and retried by the caller's next poll.
     return undefined
-  }
-}
-
-/**
- * Kill the detached child process tree.
- *
- * `runas` severs the parent-child relationship, so `wrapper.kill()` reaches
- * only the wrapper. The child's real pid arrives via its heartbeat file, and
- * `taskkill /T /F` is the supported way to end a detached process and anything
- * it spawned. Returns true when the OS confirmed a kill.
- */
-export function killChildTree(pid: number): boolean {
-  try {
-    const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' })
-    return result.status === 0
-  } catch {
-    return false
   }
 }
 

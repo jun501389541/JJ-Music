@@ -14,6 +14,8 @@ CI补充：[原生合成回归已接入Windows verify](native-ci.md)。远端首
 
 ## 本轮整体检查
 
+2026-10-29安装验收补充：[隔离NSIS验收](installer-ci.md)在一次性GitHub runner通过候选当前用户全新安装、保留合成资料卸载和0.4.2同路径升级，报告15项阶段证据；实际安装目录的native资源及三份合成资料库存已核对。该补充取代下文实际NSIS完全未验的历史状态，不扩大为全用户迁移、安装后运行或在线更新结论。
+
 `npm run verify` 退出码 0：Node/Web 类型检查、生产构建、**128/128 离线套件**和 **5/5 项目门禁**通过。日志 `.cache/windowless-final-verify.log`。
 
 隔离 E2E 使用本次自建的 `.cache/windowless-ui-rrXf61/appdata/jj-music`，仅向子进程传入 APPDATA，不读取开发者真实资料。夹具含一条自有 enabled 合成源，注册 kw 并明确拒绝媒体请求；没有第三方脚本、真实曲库或媒体播放。现有 E2E 工具在此资料的副本中运行，**16 passed, 0 failed**。日志 `.cache/windowless-final-e2e-with-source.log`，本地重放夹具 `.cache/windowless-final-e2e.mjs`。该脚本是忽略的验收产物，不是产品入口。
@@ -35,7 +37,7 @@ CI补充：[原生合成回归已接入Windows verify](native-ci.md)。远端首
 | WT07 乱序 | 生产打包状态/ready/取消与代次回归 | 无额外全平台声明 |
 | WT08 有界协议 | 状态行/总量限制、非法状态和断管回归 | 任意外部故障组合 |
 | WT09 通信 | 合成 marker、质量、受控 URL、512MiB、[实际原生更新/回退及失败恢复](native-source-update.md) | 真实音源与真实播放 |
-| WT10 发行形态 | [便携升级](portable-upgrade.md)、[已有源迁移](existing-source-migration.md)，NSIS 静态载荷 | 实际安装/卸载/安装版跨版本升级、在线更新 |
+| WT10 发行形态 | [便携升级](portable-upgrade.md)、[已有源迁移](existing-source-migration.md)、[当前用户NSIS全新安装/保留资料卸载/0.4.2同路径升级](installer-ci.md) | 其他账户/全用户迁移、安装后播放器运行、在线更新 |
 | WT11 已有 Job | [嵌套 Job](nested-job.md) 兼容场景、进程数量限制拒绝、关闭前零进程 | 任意 Job 限制组合、其他句柄/API 故障 |
 | WT12 真实音源 | 未执行；用户本轮明确暂不运行 | 将来明确授权脚本后的启停、更新、播放与人工观察 |
 

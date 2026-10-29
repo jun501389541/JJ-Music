@@ -44,7 +44,7 @@ Files: `tools/package.mjs`, `electron-builder.yml`, CI、包验证和开发记�
 - [x] 验证最终目录包及仓库外独立目录的空白资料合成音源启动、受控地址解析和本地请求；未通过项 0。
 - [x] 构建实际 NSIS 和便携 ZIP，摘要均匹配；ZIP 实际解压后仓库外合成验收通过，NSIS 静态载荷强制 native 检查通过。
 - [x] 为候选全新安装和同路径升级接入强制 native 安装目录检查；保留 CI-only guard。
-- [ ] 在一次性 CI/专门隔离环境实际执行 NSIS 安装、保留数据卸载和旧版升级矩阵；本机不运行 CI-only 安装器。
+- [x] 一次性GitHub runner实际执行候选当前用户NSIS安装、保留合成数据卸载、0.4.2同路径升级；CI40799371336报告passed。其他账户/全用户迁移仍未验，本机不运行安装器。
 - [x] 增加窗口 CREATE/SHOW/foreground 观察、非激活正控制和两类负控制；未知归属不许通过。当前会话串行合成观察通过，证据见 WL4。
 - [x] 审查修复后完整生产 bundle 离线 runner 126/126；前轮 verify 和 5/5 门禁证据见 WL2。
 - [ ] 原窗口归属、两类默认终端矩阵、人工无闪窗及真实音源验收，单列待验。
@@ -153,3 +153,10 @@ Files: `tools/package.mjs`, `electron-builder.yml`, CI、包验证和开发记�
 - [x] 产品提交后GraphFlow增量索引已完成；远端CI路径修复后连接曾再次关闭，恢复后已补做增量索引。
 - [x] 用户授权提交推送后，功能分支远端CI40796119916对9dd5db0两个job均通过；首次运行暴露的临时目录别名问题已修复，本地128/128及5/5也通过。
 - 记录见 `docs/development/2026-10-28-windowless-source-launcher/native-ci.md`。
+
+### Task 18: 隔离 NSIS 安装验收
+
+- [x] 普通CI增加默认关闭的手动布尔选项，仅显式手动启用时运行既有CI-only脚本，失败也保留已生成报告。
+- [x] YAML、只读权限、手动条件、本机拒绝及独立只读复核通过，不改变安装脚本或发布流程。
+- [x] CI40799371336对63c4482两个job均success；读取artifact12865174189核对15项阶段证据、版本、native资源和合成资料库存。
+- 详情见 `docs/development/2026-10-28-windowless-source-launcher/installer-ci.md`；不扩大为真实音源、播放器启动、在线更新及全用户迁移结论。

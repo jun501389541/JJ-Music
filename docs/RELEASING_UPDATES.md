@@ -1,6 +1,6 @@
 # Signed Windows update releases
 
-The application currently ships no update public key and keeps installation disabled in default builds. U0's isolated Windows data-safety matrix passed for candidate Setup SHA-256 `4E35B04C18EECA5B74BB1DB03A5B8FCD6623E8EA5B8DF2B0852BF339702790FF`; U4's two-version update and release acceptance remains open. The tag workflow has a separate `JJ_UPDATE_U0_APPROVED=true` gate in the protected `signed-release` GitHub Environment. The workflow only creates a **draft** Release. Publishing it remains a deliberate release-review step after every asset is checked.
+Default local builds embed no update public key and keep installation disabled. Official signed releases use the existing `signed-release` GitHub Environment and its separate `JJ_UPDATE_U0_APPROVED=true` gate. The published [0.6.0 acceptance record](development/2026-10-26-v0.6.0-release.md) includes the official 0.4.2 to 0.6.0 application update check; this historical result does not replace verification of the next release's exact artifacts. The tag workflow only creates a **draft** Release. Publishing it remains a deliberate release-review step after every asset is checked.
 
 The U1–U3 code was implemented ahead of U0 by request. The verified U0 candidate creates the `nsis-install.marker`, migrates verified per-user profiles before uninstall, and rejects ambiguous per-machine profiles before elevation or uninstall. The latter require account-specific backup and recovery as described below. Setting the Environment variable alone does not make the updater available. The default local build embeds an empty public key and a closed U0 switch.
 
@@ -8,7 +8,7 @@ The U1–U3 code was implemented ahead of U0 by request. The verified U0 candida
 
 Choose a custodian for one Ed25519 private key. Generate it offline, back it up securely, and set the entire PEM as the protected Environment secret `JJ_UPDATE_SIGNING_KEY_PEM`. Put the matching SPKI PEM in protected Environment variable `JJ_UPDATE_PUBLIC_KEY_PEM`. Never commit the private key. The protected Environment should require a reviewer and allow only version tags. The same public key must be embedded into the application build; a build with no key reports updates unavailable.
 
-Before enabling this Environment, review the verified U0 matrix in [online-update-u0-verification.md](research/online-update-u0-verification.md) against the exact Setup artifact to be released. It covers per-user, per-machine, custom writable and relocated profiles, including library, settings, playlists and sources. The current local build keeps `JJ_UPDATE_U0_APPROVED` unset; enabling the protected Environment and completing U4 remain separate release decisions.
+Before enabling or changing this Environment, review the verified U0 matrix in [online-update-u0-verification.md](research/online-update-u0-verification.md). It covers per-user, per-machine, custom writable and relocated profiles, including library, settings, playlists and sources. Each release must validate its exact Setup artifact; the workflow also runs synthetic installer acceptance on a disposable Windows runner. Default local builds keep `JJ_UPDATE_U0_APPROVED` unset. Application update acceptance remains a separate check with explicit old and target versions.
 
 ## Draft workflow
 

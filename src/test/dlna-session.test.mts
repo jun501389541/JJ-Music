@@ -30,6 +30,38 @@ test('DLNA disconnects after three poll failures',async()=>{
   await f.manager.pollNow();await f.manager.pollNow();assert.notEqual(f.manager.snapshot().state,'disconnected')
   await f.manager.pollNow();assert.equal(f.manager.snapshot().state,'disconnected');assert.equal(f.revoked(),1)
 })
+
+test('Revoked playback still requires Stop confirmation after poll failures',async()=>{
+ const f=fixture();await f.manager.load({kind:'local',trackId:'track'},{autoplay:true});f.bytes();await f.manager.pollNow()
+ f.transport.inspect=async()=>{throw Error('offline')}
+ for(let i=0;i<3;i++)await f.manager.pollNow()
+ await assert.rejects(f.manager.disconnect(),/offline/)
+})
+
+test('Source invalidation retains ownership until a confirmed Stop',async()=>{
+ const f=fixture();const resource={kind:'online',resourceId:'issued'};await f.manager.load(resource,{autoplay:true})
+ f.manager.invalidateResource(resource,f.manager.snapshot().generation)
+ f.transport.stop=async()=>{f.set({state:'STOPPED'})}
+ let inspected=0;const inspect=f.transport.inspect;f.transport.inspect=async()=>{inspected++;return inspect()}
+ await f.manager.disconnect();assert.equal(inspected,2)
+})
+
+test('Failed replacement must still stop the previous remote URI',async()=>{
+ const f=fixture();await f.manager.load({kind:'local',trackId:'first'},{autoplay:true})
+ f.manager.options.leases.create=async()=>{throw Error('media unavailable')}
+ await assert.rejects(f.manager.load({kind:'local',trackId:'second'}),/media unavailable/)
+ await assert.rejects(f.manager.disconnect(),/not confirmed/);assert.equal(f.stops(),1)
+})
+
+test('SetURI failure keeps both possible owned URIs until Stop is confirmed',async()=>{
+ for(const deviceApplied of [false,true]){
+  const f=fixture();await f.manager.load({kind:'local',trackId:'first'},{autoplay:true})
+  f.manager.options.leases.create=async()=>({id:'new',url:'http://new/audio',audioBytesTransferred:()=>0,revoke(){}})
+  f.transport.setUri=async()=>{if(deviceApplied)f.set({uri:'http://new/audio'});throw Error('SetURI timeout')}
+  await assert.rejects(f.manager.load({kind:'local',trackId:'second'}),/SetURI timeout/)
+  await assert.rejects(f.manager.disconnect(),/not confirmed/);assert.equal(f.stops(),1)
+ }
+})
 test('DLNA load never autoplays a restored paused queue',async()=>{
   const f=fixture();let plays=0;f.transport.play=async()=>{plays++}
   await f.manager.load({kind:'local',trackId:'track'},{autoplay:false})

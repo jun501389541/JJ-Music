@@ -87,6 +87,10 @@ test('service retains only issued progressive MP3 references and source invalida
  interfaces:()=>({Ethernet:[{address:'192.168.1.2',netmask:'255.255.255.0',family:'IPv4',internal:false,mac:'00',cidr:null}]}),discover:async()=>[{address:'192.168.1.4',location:'http://192.168.1.4/device',usn:'uuid:test',maxAge:120}],loadDevice:async()=>({id:'uuid:test',name:'Speaker',services:{AVTransport:{type:av,controlUrl:'http://192.168.1.4/control',scpdUrl:'http://192.168.1.4/scpd',actions:new Set(['SetAVTransportURI'])}}}),request:()=>async(_url,options)=>{setUri++;return{status:200,body:Buffer.from(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:SetAVTransportURIResponse xmlns:u="${av}"/></s:Body></s:Envelope>`)}},media:()=>({start:async()=>{},url:l=>`http://192.168.1.2:1/dlna/media/${l.token}/audio`,close:async()=>{}})}})
  try{await service.discover(service.listInterfaces()[0].id);let state=await service.connect('uuid:test');await assert.rejects(service.load(state.sessionId,{kind:'online',resourceId:'issued'},state.generation),/progressive MP3/);assert.equal(setUri,0);assert.equal(released,1)
  type='audio/mpeg';state=events.at(-1);const loaded=await service.load(state.sessionId,{kind:'online',resourceId:'issued'},state.generation);assert.equal(loaded.state,'paused');assert.deepEqual(loaded.resource,{kind:'online',resourceId:'issued'});invalidated();assert.equal(events.at(-1).state,'error');assert.equal(events.at(-1).reason,'source-invalidated');assert.equal(released,2)
+ await assert.rejects(service.disconnect(loaded.sessionId),/stop-unconfirmed/)
+ await assert.rejects(service.connect('uuid:test'),/stop-unconfirmed/)
+ await service.disconnect(loaded.sessionId,true)
+ await service.connect('uuid:test')
  }finally{await service.close()}
 })
 

@@ -1,7 +1,7 @@
 /** Native Windows restricted-token helper; file IPC remains unchanged. */
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { existsSync, openSync, closeSync, fstatSync, readSync, writeFileSync, renameSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 
 export interface RestrictedLaunch {
@@ -89,6 +89,30 @@ export interface FileResponse {
   error?: string
 }
 
+export class SourceFileLimitError extends Error {
+  constructor() { super('音源通信文件过大，已停止该音源') }
+}
+
+/** Bound allocation and bytes read on one open handle, including a growing file. */
+export function readSourceFile(path: string, maxBytes: number): string {
+  const fd = openSync(path, 'r')
+  try {
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.size > maxBytes) throw new SourceFileLimitError()
+    const chunks: Buffer[] = []
+    let total = 0
+    while (true) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total))
+      const count = readSync(fd, chunk, 0, chunk.length, null)
+      if (!count) break
+      total += count
+      if (total > maxBytes) throw new SourceFileLimitError()
+      chunks.push(chunk.subarray(0, count))
+    }
+    return Buffer.concat(chunks, total).toString('utf8')
+  } finally { closeSync(fd) }
+}
+
 /** Write a request file atomically (temp name + rename). */
 export function writeRequest(scratchDir: string, request: FileRequest): void {
   const final = join(scratchDir, `req-${request.id}.json`)
@@ -110,8 +134,9 @@ export function readResponse(scratchDir: string, id: number): FileResponse | und
   const path = join(scratchDir, `res-${id}.json`)
   if (!existsSync(path)) return undefined
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as FileResponse
-  } catch {
+    return JSON.parse(readSourceFile(path, 8 * 1024 * 1024 + 64 * 1024)) as FileResponse
+  } catch (error) {
+    if (error instanceof SourceFileLimitError) throw error
     return undefined
   }
 }
@@ -132,10 +157,11 @@ export interface Heartbeat {
 /** Last heartbeat payload, or undefined when none has been written. */
 export function readHeartbeat(scratchDir: string): Heartbeat | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(scratchDir, 'heartbeat.json'), 'utf8')) as Heartbeat
+    const parsed = JSON.parse(readSourceFile(join(scratchDir, 'heartbeat.json'), 4096)) as Heartbeat
     if (typeof parsed?.at !== 'number') return undefined
     return parsed
-  } catch {
+  } catch (error) {
+    if (error instanceof SourceFileLimitError) throw error
     // Mid-write read; treated as "no data" and retried by the caller's next poll.
     return undefined
   }
@@ -151,10 +177,11 @@ export function readConsoleLog(scratchDir: string, fromOffset: number): { text: 
   const path = join(scratchDir, 'console.log')
   if (!existsSync(path)) return { text: '', nextOffset: fromOffset }
   try {
-    const content = readFileSync(path, 'utf8')
+    const content = readSourceFile(path, 1024 * 1024)
     const text = content.length > fromOffset ? content.slice(fromOffset) : ''
     return { text, nextOffset: content.length }
-  } catch {
+  } catch (error) {
+    if (error instanceof SourceFileLimitError) throw error
     return { text: '', nextOffset: fromOffset }
   }
 }
@@ -165,8 +192,9 @@ export function readReady(
   const path = join(scratchDir, 'ready.json')
   if (!existsSync(path)) return undefined
   try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch {
+    return JSON.parse(readSourceFile(path, 1024 * 1024))
+  } catch (error) {
+    if (error instanceof SourceFileLimitError) throw error
     return undefined
   }
 }

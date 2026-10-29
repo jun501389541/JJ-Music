@@ -30,6 +30,9 @@ export interface DlnaSessionOptions {
 export class DlnaSessionManager {
   private device?: DlnaDevice
   private lease?: DlnaSessionLease
+  // Revoking a URL cannot silence audio already buffered by the renderer.
+  // Track attempted SetURI ownership until Stop or takeover is confirmed.
+  private ownedUris = new Set<string>()
   private value: DlnaSessionSnapshot
   private controller = new AbortController()
   private queues = new Map<string, Promise<unknown>>()
@@ -86,8 +89,10 @@ export class DlnaSessionManager {
       this.lease=lease
       await this.serial(device,async()=>{
         if(!this.current(generation,signal))return
+        this.ownedUris.add(lease.url)
         await this.options.transport.setUri(device,lease.url,lease.metadata??'',signal)
         if(!this.current(generation,signal))return
+        this.ownedUris.clear();this.ownedUris.add(lease.url)
         if(options.autoplay===true){this.playRequested=true;await this.options.transport.play(device,signal)}
       })
       if(this.current(generation,signal)){if(options.autoplay!==true){this.value.state='paused';this.emit()}this.schedule()}
@@ -106,7 +111,7 @@ export class DlnaSessionManager {
       const observation=await this.serial(device,()=>this.current(generation,signal)?this.options.transport.inspect(device,signal):Promise.reject(new Error('stale')))
       if(!this.current(generation,signal)||version!==this.commandVersion)return
       this.failures=0
-      if(observation.uri&&observation.uri!==lease.url){this.cancel();this.value.state='disconnected';this.value.reason='taken-over';this.emit();return}
+      if(observation.uri&&observation.uri!==lease.url){this.ownedUris.clear();this.cancel();this.value.state='disconnected';this.value.reason='taken-over';this.emit();return}
       if(observation.uri!==lease.url)return
       if(Number.isFinite(observation.volume)&&observation.volume!>=0&&observation.volume!<=1)this.value.volume=observation.volume
       const position=Number.isFinite(observation.position)?Math.max(0,observation.position):0
@@ -121,6 +126,7 @@ export class DlnaSessionManager {
         const natural=this.confirmed&&!this.ended&&this.value.duration>0&&position>=this.value.duration-1&&this.options.naturalEnd?.(device,observation)===true
         this.value.state='idle';if(natural){this.ended=true;this.emit('ended')}else this.emit()
         this.lease?.revoke();this.lease=undefined
+        this.ownedUris.clear()
       }
     } catch {
       if(this.current(generation,signal)&&version===this.commandVersion&&++this.failures>=3){this.cancel();this.value.state='disconnected';this.value.reason='poll-failed';this.emit()}
@@ -129,7 +135,7 @@ export class DlnaSessionManager {
   private async command(action:(device:DlnaDevice,signal:AbortSignal)=>Promise<void>, state?:'loading'|'paused'):Promise<void> {
     const device=this.device;if(!device||!this.lease)throw new Error('No active DLNA media')
     const generation=this.value.generation,signal=this.controller.signal;this.commandVersion++
-    await this.serial(device,async()=>{if(!this.current(generation,signal))return;const o=await this.options.transport.inspect(device,signal);if(!this.current(generation,signal))return;if(o.uri!==this.lease?.url){this.cancel();this.value.state='disconnected';this.value.reason='taken-over';this.emit();return}await action(device,signal);if(this.current(generation,signal)&&state){this.value.state=state;this.emit()}})
+    await this.serial(device,async()=>{if(!this.current(generation,signal))return;const o=await this.options.transport.inspect(device,signal);if(!this.current(generation,signal))return;if(o.uri!==this.lease?.url){if(o.uri)this.ownedUris.clear();this.cancel();this.value.state='disconnected';this.value.reason='taken-over';this.emit();return}await action(device,signal);if(this.current(generation,signal)&&state){this.value.state=state;this.emit()}})
   }
   play():Promise<void>{return this.command(async(d,s)=>{this.playRequested=true;await this.options.transport.play(d,s)},'loading')}
   pause():Promise<void>{if(!this.device?.capabilities.pause)return Promise.reject(new Error('Pause unsupported'));return this.command((d,s)=>this.options.transport.pause(d,s),'paused')}
@@ -146,23 +152,23 @@ export class DlnaSessionManager {
     })
   }
   async stop():Promise<void> {
-    const device=this.device, lease=this.lease;this.cancel()
-    if(!device||!lease){if(this.value.state==='loading'){this.value.state='idle';this.value.reason=undefined;this.emit()}return}
+    const device=this.device;this.cancel()
+    if(!device||!this.ownedUris.size){if(this.value.state==='loading'){this.value.state='idle';this.value.reason=undefined;this.emit()}return}
     this.value.state='stopping';this.emit();const generation=this.value.generation,signal=this.controller.signal
     try {await this.serial(device,async()=>{
       if(!this.current(generation,signal))return
       const observation=await this.options.transport.inspect(device,signal)
       if(!this.current(generation,signal))return
       if(!observation.uri)throw new Error('Cannot confirm DLNA media ownership before Stop')
-      if(observation.uri===lease.url){
+      if(this.ownedUris.has(observation.uri)){
         await this.options.transport.stop(device,signal)
         if(!this.current(generation,signal))return
         const stopped=await this.options.transport.inspect(device,signal)
         if(this.current(generation,signal)&&!['STOPPED','NO_MEDIA_PRESENT'].includes(stopped.state))throw new Error('DLNA Stop was not confirmed by the device')
       }
     })
-      if(this.current(generation,signal)){this.value.state='idle';this.emit()}
+      if(this.current(generation,signal)){this.ownedUris.clear();this.value.state='idle';this.emit()}
     }catch(error){if(this.current(generation,signal)){this.value.state='error';this.value.reason='stop-unconfirmed';this.emit()}throw error}
   }
-  async disconnect():Promise<void>{try{await this.stop()}finally{this.cancel();this.device=undefined;this.value.deviceId=undefined;this.value.resource=undefined;this.value.state='idle';this.emit()}}
+  async disconnect():Promise<void>{try{await this.stop()}finally{this.cancel();this.ownedUris.clear();this.device=undefined;this.value.deviceId=undefined;this.value.resource=undefined;this.value.state='idle';this.emit()}}
 }

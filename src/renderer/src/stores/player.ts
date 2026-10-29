@@ -1381,15 +1381,23 @@ export const usePlayerStore = defineStore('player', () => {
     const wasPlaying=playing.value
     try {
       cancelCrossfadeReservation();resolutionAbort?.abort();playGeneration++;toggleGeneration++
+      const switchGeneration=playGeneration, switchToggle=toggleGeneration, switchQueueRevision=queueRevision
       if(engine.value&&engine.value.capabilities.id!=='dlna')await engine.value.pause()
       playing.value=false
       if(remoteOutput.value)await window.jj.dlna.disconnect(remoteOutput.value.session.sessionId,allowUnconfirmed)
       const session=device?await window.jj.dlna.connect(device.id):null
+      // Connection is asynchronous: Stop, queue edits, or a newer playback
+      // action must never inherit the autoplay intent captured above.
+      const autoplay=!!device&&wasPlaying&&playGeneration===switchGeneration&&toggleGeneration===switchToggle&&queueRevision===switchQueueRevision
+      // A newer local play may itself still be resolving. Invalidate it before
+      // replacing its engine, so it cannot revive audio after this handoff.
+      cancelCrossfadeReservation();resolutionAbort?.abort();playGeneration++;toggleGeneration++
       engine.value?.destroy();engine.value=null
+      playing.value=false
       remoteOutput.value=device&&session?{device,session}:null
       remoteVolume.value=session?.volume
       loadedTrackId=null;loadedTrackKey=null
-      if(currentIndex.value>=0)await playTrackAt(currentIndex.value,{autoplay:!!device&&wasPlaying,transition:false})
+      if(currentIndex.value>=0)await playTrackAt(currentIndex.value,{autoplay,transition:false})
     } catch(cause) {
       playing.value=false;loading.value=false
       error.value=cause instanceof Error?cause.message:'输出切换失败'

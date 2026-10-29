@@ -33,7 +33,7 @@
 
 import { fork } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { LauncherStatusDecoder, LAUNCHER_OUTPUT_BYTES } from './launcher-status'
@@ -49,7 +49,9 @@ import {
   readResponse,
   readReady,
   readHeartbeat,
-  readConsoleLog
+  readConsoleLog,
+  readSourceFile,
+  SourceFileLimitError
 } from './restricted-launch'
 
 /* ------------------------------------------------------------------ *
@@ -582,10 +584,14 @@ export class SourceRuntimeHost {
       this.pushLog(state, text)
     }
 
-    const watchdog = setInterval(() => this.checkHeartbeat(state, stopPoll), 1000)
+    const watchdog = setInterval(() => {
+      try { this.checkHeartbeat(state, stopPoll) }
+      catch (error) { fail(error instanceof Error ? error : new Error('音源通信失败')) }
+    }, 1000)
 
     const poll = setInterval(() => {
       if (state.dead || state.wrapper?.exitCode !== null || state.wrapper?.signalCode !== null) return
+      try {
       // Console output first, so an init error arrives with its context.
       drainLog()
 
@@ -594,10 +600,11 @@ export class SourceRuntimeHost {
         try {
           if (existsSync(alertPath)) {
             updateAlertRead = true
-            const alert = JSON.parse(readFileSync(alertPath, 'utf8')) as { data?: unknown }
+            const alert = JSON.parse(readSourceFile(alertPath, 64 * 1024)) as { data?: unknown }
             this.callbacks.onUpdateAlert?.(state, alert.data)
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof SourceFileLimitError) throw error
           // A partial/invalid notification is ignored; it cannot block startup.
           updateAlertRead = true
         }
@@ -649,6 +656,7 @@ export class SourceRuntimeHost {
         }
         pending.resolve(response.data)
       }
+      } catch (error) { fail(error instanceof Error ? error : new Error('音源通信失败')) }
     }, POLL_MS)
 
     function stopPoll(): void {

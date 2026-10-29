@@ -144,6 +144,55 @@ function setupPlaylistStorage({ fail = false } = {}) {
 }
 afterEach(() => { store?.stop(); store?.$dispose() })
 
+function deferredOutputSwitch(player) {
+  const connecting = deferred()
+  const commands = []
+  const session = { sessionId: 'switch-session', generation: 1, sequence: 0, state: 'connecting', position: 0, duration: 0 }
+  let sequence = 0
+  window.jj.dlna = {
+    connect: () => connecting.promise,
+    disconnect: async () => {},
+    onState: () => () => {},
+    load: async (_session, resource, generation) => ({ ...session, resource, generation: generation + 1, sequence: ++sequence, state: 'paused' }),
+    command: async (_session, action, _value, generation) => {
+      commands.push(action)
+      return { ...session, generation, sequence: ++sequence, state: 'loading' }
+    }
+  }
+  const switched = player.selectDlnaOutput({ id: 'speaker', capabilities: { seek: true } })
+  return { commands, switched, connected: () => connecting.resolve(session) }
+}
+
+for (const intent of ['stop', 'queue edit', 'new playback']) {
+  test(`a deferred output switch stays paused after newer ${intent}`, async () => {
+    const player = setup()
+    player.setTransitionsEnabled(false)
+    await player.playQueue([local('outgoing')])
+    const switching = deferredOutputSwitch(player)
+    await flush()
+    if (intent === 'stop') player.stop()
+    if (intent === 'queue edit') await player.addToQueue([local('added')])
+    if (intent === 'new playback') await player.playTrack(local('new-selection'))
+    switching.connected()
+    await switching.switched
+    assert.equal(switching.commands.includes('play'), false, 'an old output-switch intent must not start remote audio')
+    assert.equal(player.playing, false)
+    assert.ok(FakeAudio.instances.every(audio => audio.paused), 'local decks must remain silent at handoff')
+    if (intent === 'new playback') assert.equal(player.currentTrack.id, 'new-selection')
+  })
+}
+
+test('a deferred output switch preserves autoplay when no newer intent exists', async () => {
+  const player = setup()
+  player.setTransitionsEnabled(false)
+  await player.playQueue([local('outgoing')])
+  const switching = deferredOutputSwitch(player)
+  await flush()
+  switching.connected()
+  await switching.switched
+  assert.equal(switching.commands.includes('play'), true)
+})
+
 test('local relink preserves current resume position through finish and close without autoplay', async () => {
   const player = setup(), library = useLibraryStore(), writes = []
   library.ready = true

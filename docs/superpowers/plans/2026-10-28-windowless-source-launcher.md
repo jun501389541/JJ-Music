@@ -165,5 +165,5 @@ Files: `tools/package.mjs`, `electron-builder.yml`, CI、包验证和开发记�
 
 - [x] 复用TestBarrier，在已知暂停宿主存在后关闭stdout读取端，检查helper退出1、无信号/原始诊断及宿主回收。
 - [x] 七组相关原生检查通过；保留读取端的负控制按预期超时失败，测试finally回收不制造通过。
-- [x] 独立只读复核、语法及差异检查通过。既有CI startup-race命令自动包含本检查，远端新检查尚未运行。
+- [x] 独立只读复核、语法及差异检查通过。CI40800838196对6d18707两个job均success，日志确认新增断管检查通过，默认安装步骤skipped。
 - 证据与边界见 `docs/development/2026-10-28-windowless-source-launcher/native-status-pipe.md`；未改产品代码，不关闭全部API失败矩阵。

@@ -160,3 +160,10 @@ Files: `tools/package.mjs`, `electron-builder.yml`, CI、包验证和开发记�
 - [x] YAML、只读权限、手动条件、本机拒绝及独立只读复核通过，不改变安装脚本或发布流程。
 - [x] CI40799371336对63c4482两个job均success；读取artifact12865174189核对15项阶段证据、版本、native资源和合成资料库存。
 - 详情见 `docs/development/2026-10-28-windowless-source-launcher/installer-ci.md`；不扩大为真实音源、播放器启动、在线更新及全用户迁移结论。
+
+### Task 19: 原生状态管道断开
+
+- [x] 复用TestBarrier，在已知暂停宿主存在后关闭stdout读取端，检查helper退出1、无信号/原始诊断及宿主回收。
+- [x] 七组相关原生检查通过；保留读取端的负控制按预期超时失败，测试finally回收不制造通过。
+- [x] 独立只读复核、语法及差异检查通过。既有CI startup-race命令自动包含本检查，远端新检查尚未运行。
+- 证据与边界见 `docs/development/2026-10-28-windowless-source-launcher/native-status-pipe.md`；未改产品代码，不关闭全部API失败矩阵。

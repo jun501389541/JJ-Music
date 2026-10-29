@@ -35,8 +35,8 @@ assert.equal(JSON.parse(readFileSync(join(root,'console.json'),'utf8')).consoleA
 assert.deepEqual(consoleOutput.trim().split('\n').map(line=>JSON.parse(line).type),['spawned','childExit'])
 console.log('PASS x64 GUI subsystem and console-host GetConsoleWindow()==NULL')
 const dead = pid => { try { process.kill(pid, 0); return false } catch { return true } }
-async function until(fn, label) {
-  const end = Date.now()+8000
+async function until(fn, label, timeoutMs = 8000) {
+  const end = Date.now()+timeoutMs
   while(Date.now()<end) { if(fn()) return; await delay(25) }
   throw Error('timeout: '+label)
 }
@@ -130,6 +130,39 @@ if(process.argv.includes('--startup-race')) {
     await until(()=>dead(suspended),'helper death before resume must reap suspended host')
     console.log('PASS helper death at pre-resume barrier reaps suspended host')
   } finally {race.kill();if(suspended&&!dead(suspended))process.kill(suspended)}
+
+  // The existing barrier exposes the exact suspended child before any status
+  // write. Break the real pipe, then let the helper resume and handle EPIPE.
+  // Keeping the read end is a negative control: the host stays alive, so this
+  // check must time out rather than mistake a fixture setup failure for success.
+  const pipeMarker=join(root,'broken-status.pid')
+  const broken=spawn(raceHelper,args,{stdio:['ignore','pipe','pipe'],windowsHide:true,
+    env:{...process.env,JJ_LAUNCHER_TEST_BARRIER:pipeMarker}})
+  let pipePid, pipeExit=false, pipeCode, pipeSignal, pipeError=''
+  broken.once('exit',(code,signal)=>{pipeCode=code;pipeSignal=signal;pipeExit=true})
+  broken.on('error',error=>{pipeError=error.message})
+  broken.stderr.on('data',data=>{pipeError+=data})
+  try {
+    await until(()=>existsSync(pipeMarker)&&readFileSync(pipeMarker,'utf8').length>0,'status-pipe pre-resume barrier')
+    pipePid=Number(readFileSync(pipeMarker,'utf8'))
+    assert.ok(Number.isSafeInteger(pipePid)&&pipePid>0)
+    assert.equal(dead(pipePid),false,'a real suspended host must exist before breaking the pipe')
+    if(process.argv.includes('--keep-status-pipe')) broken.stdout.resume()
+    else broken.stdout.destroy()
+    // TestBarrier deliberately holds creation for 15 seconds.
+    await until(()=>pipeExit,'broken status pipe must fail the helper',22000)
+    assert.equal(pipeCode,1,pipeError)
+    assert.equal(pipeSignal,null,'termination by signal cannot prove handled status failure')
+    assert.equal(pipeError,'','native failure must not leak raw diagnostics')
+    await until(()=>dead(pipePid),'broken status pipe must reap its known host')
+    console.log('PASS broken native status pipe fails helper and reaps the known host')
+  } finally {
+    broken.kill()
+    broken.stdout.destroy();broken.stderr.destroy()
+    if(pipePid&&!dead(pipePid)) {
+      await until(()=>dead(pipePid),'status-pipe fixture cleanup')
+    }
+  }
 }
 
 // Optional baseline executes the existing bundled production launcher, not a copy.

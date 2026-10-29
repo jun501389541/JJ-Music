@@ -35,7 +35,7 @@ CI补充：[原生合成回归已接入Windows verify](native-ci.md)。远端首
 | WT05 生命周期 | [WL2](WL2.md) 取消、超时、停用及 scratch 回收回归 | 真实脚本生命周期 |
 | WT06 进程回收 | helper/owner/host 退出、暂停创建竞争、嵌套 Job | 其他系统策略组合 |
 | WT07 乱序 | 生产打包状态/ready/取消与代次回归 | 无额外全平台声明 |
-| WT08 有界协议 | 状态行/总量限制、非法状态和断管回归 | 任意外部故障组合 |
+| WT08 有界协议 | 状态行/总量限制、非法状态回归及[真实原生状态断管/已知宿主回收](native-status-pipe.md) | 任意外部故障组合 |
 | WT09 通信 | 合成 marker、质量、受控 URL、512MiB、[实际原生更新/回退及失败恢复](native-source-update.md) | 真实音源与真实播放 |
 | WT10 发行形态 | [便携升级](portable-upgrade.md)、[已有源迁移](existing-source-migration.md)、[当前用户NSIS全新安装/保留资料卸载/0.4.2同路径升级](installer-ci.md) | 其他账户/全用户迁移、安装后播放器运行、在线更新 |
 | WT11 已有 Job | [嵌套 Job](nested-job.md) 兼容场景、进程数量限制拒绝、关闭前零进程 | 任意 Job 限制组合、其他句柄/API 故障 |

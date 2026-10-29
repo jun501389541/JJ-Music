@@ -14,7 +14,8 @@ test('existing-source migration requires explicit native candidate mode before a
 })
 
 test('required-native upgrade rejects incomplete candidate before starting either application',{skip:process.platform!=='win32'},async()=>{
-  const root=await mkdtemp(join(tmpdir(),'jj-portable-guard-')),input=join(root,'input'),zip=join(root,'fixture.zip')
+  const tempRoot=await realpath(tmpdir())
+  const root=await mkdtemp(join(tempRoot,'jj-portable-guard-')),input=join(root,'input'),zip=join(root,'fixture.zip')
   let owned
   try{
     await mkdir(input)
@@ -34,7 +35,7 @@ test('required-native upgrade rejects incomplete candidate before starting eithe
     assert.ok(!report.checks.some(value=>value.startsWith('old:')),'neither application may be launched before required resources pass')
     assert.equal(report.failedOwnedProcessCleanupConfirmed,true,'failed fixtures must confirm only their own executables are gone')
   }finally{
-    if(owned){assert.equal(dirname(resolve(owned)).toLowerCase(),resolve(tmpdir()).toLowerCase());assert.ok(basename(owned).startsWith('jj-or8-delivery-'));assert.equal((await realpath(owned)).toLowerCase(),resolve(owned).toLowerCase());await rm(owned,{recursive:true,force:true})}
-    assert.equal(dirname(root).toLowerCase(),resolve(tmpdir()).toLowerCase());assert.ok(basename(root).startsWith('jj-portable-guard-'));await rm(root,{recursive:true,force:true})
+    if(owned){assert.equal(dirname(resolve(owned)).toLowerCase(),tempRoot.toLowerCase());assert.ok(basename(owned).startsWith('jj-or8-delivery-'));assert.equal((await realpath(owned)).toLowerCase(),resolve(owned).toLowerCase());await rm(owned,{recursive:true,force:true})}
+    assert.equal(dirname(root).toLowerCase(),tempRoot.toLowerCase());assert.ok(basename(root).startsWith('jj-portable-guard-'));await rm(root,{recursive:true,force:true})
   }
 })

@@ -12,9 +12,10 @@ const cleanup = async () => (await import(pathToFileURL(resolve('tools/probe/own
 test('portable cleanup refuses roots outside its direct temporary namespace', { skip: process.platform !== 'win32' }, async () => {
   const stop = await cleanup()
   await assert.rejects(stop(tmpdir()))
-  const root = await mkdtemp(join(tmpdir(), 'jj-cleanup-unrelated-'))
+  const tempRoot = await realpath(tmpdir())
+  const root = await mkdtemp(join(tempRoot, 'jj-cleanup-unrelated-'))
   try { await assert.rejects(stop(root)) } finally {
-    assert.equal(dirname(resolve(root)).toLowerCase(), resolve(tmpdir()).toLowerCase())
+    assert.equal(dirname(resolve(root)).toLowerCase(), tempRoot.toLowerCase())
     assert.ok(basename(root).startsWith('jj-cleanup-unrelated-'))
     assert.equal((await realpath(root)).toLowerCase(), resolve(root).toLowerCase())
     await rm(root, { recursive: true, force: true })
@@ -23,7 +24,10 @@ test('portable cleanup refuses roots outside its direct temporary namespace', { 
 
 test('portable cleanup stops detached owned executables and preserves same-name outsider', { skip: process.platform !== 'win32', timeout: 45000 }, async () => {
   const stop = await cleanup()
-  const root = await mkdtemp(join(tmpdir(), 'jj-or8-delivery-'))
+  // Windows runners may expose TEMP through an 8.3 alias. Create canonical
+  // roots so cleanup can keep rejecting redirected/junction roots unchanged.
+  const tempRoot = await realpath(tmpdir())
+  const root = await mkdtemp(join(tempRoot, 'jj-or8-delivery-'))
   const children = []
   try {
     for (const folder of ['old-app', 'next-app', 'unrelated-app']) {
@@ -68,7 +72,7 @@ test('portable cleanup stops detached owned executables and preserves same-name 
         }
       }
     }
-    assert.equal(dirname(resolve(root)).toLowerCase(), resolve(tmpdir()).toLowerCase())
+    assert.equal(dirname(resolve(root)).toLowerCase(), tempRoot.toLowerCase())
     assert.ok(basename(root).startsWith('jj-or8-delivery-'))
     assert.equal((await realpath(root)).toLowerCase(), resolve(root).toLowerCase())
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })

@@ -177,7 +177,7 @@ async function sourceAvailable(evaluate, label) {
 try {
   // Reject partial downloads before extraction or launching any application.
   report.archives = { old: await verifiedArchive(oldZip), next: await verifiedArchive(newZip ?? oldZip) }
-  owned = await mkdtemp(join(tmpdir(), 'jj-or8-delivery-'))
+  owned = await mkdtemp(join(await realpath(tmpdir()), 'jj-or8-delivery-'))
   report.ownedRoot = owned
   const oldApp = join(owned, 'old-app'), nextApp = join(owned, 'next-app')
   extract(oldZip, oldApp); extract(newZip ?? oldZip, nextApp)
@@ -303,7 +303,7 @@ try {
   markerServer?.close()
   if (owned && report.status === 'passed') {
     try {
-      assert.equal(dirname(resolve(owned)).toLowerCase(), resolve(tmpdir()).toLowerCase())
+      assert.equal(dirname(resolve(owned)).toLowerCase(), (await realpath(tmpdir())).toLowerCase())
       assert.ok(basename(owned).startsWith('jj-or8-delivery-'))
       assert.equal((await realpath(owned)).toLowerCase(), resolve(owned).toLowerCase())
       await rm(owned, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })

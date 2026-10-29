@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
 export async function stopOwnedExecutables(root) {
-  assert.equal(dirname(resolve(root)).toLowerCase(), resolve(tmpdir()).toLowerCase())
+  assert.equal(dirname(resolve(root)).toLowerCase(), (await realpath(tmpdir())).toLowerCase())
   assert.ok(basename(root).startsWith('jj-or8-delivery-'))
   assert.equal((await realpath(root)).toLowerCase(), resolve(root).toLowerCase())
   // Old runas hosts are detached from the application tree. Never infer their

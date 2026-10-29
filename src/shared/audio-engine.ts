@@ -46,6 +46,8 @@ export interface AudioEngineEvents {
 export type AudioEngineEventName = keyof AudioEngineEvents
 
 export interface LoadOptions {
+  /** Main-issued business reference used by remote output; never a file URL. */
+  resourceRef?: import('./dlna').DlnaResourceRef
   /**
    * A resolved, directly playable URL. For local files this is a `file://`
    * URL or a custom protocol; for online tracks it is the URL returned by the

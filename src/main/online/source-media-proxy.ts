@@ -32,6 +32,27 @@ export interface SourceMediaIdentity {
   providerVersion: string
 }
 
+export interface SourceMediaRequest {
+  method: string
+  headers?: Headers | Record<string, string | string[] | undefined>
+  signal?: AbortSignal
+}
+
+/** Main-process capability. Never serialize this handle through IPC. */
+export interface RetainedSourceAudio {
+  request(request: SourceMediaRequest): Promise<Response>
+  release(): void
+  onInvalidated(listener: () => void): () => void
+}
+
+interface AudioRetention {
+  token: string
+  item: AudioToken
+  live: boolean
+  listeners: Set<() => void>
+  requests: Set<(revoked: boolean) => void>
+}
+
 export interface SourceMediaProxyOptions {
   fetchResponse?: typeof safeFetchResponse
   fetchBytes?: typeof safeFetchBytes
@@ -54,6 +75,7 @@ export interface SourceMediaProxyOptions {
  */
 export class SourceMediaProxy {
   private readonly tokens = new Map<string, AudioToken>()
+  private readonly retentions = new Set<AudioRetention>()
   private readonly active = new Set<{ identity?: SourceMediaIdentity; revoke: () => void }>()
   private readonly fetchResponse: typeof safeFetchResponse
   private readonly fetchBytes: typeof safeFetchBytes
@@ -81,19 +103,63 @@ export class SourceMediaProxy {
     const url = assertPublicHttpUrl(raw).toString()
     this.pruneTokens()
     while (this.tokens.size >= TOKEN_LIMIT) {
-      const oldest = this.tokens.keys().next().value
+      const oldest = [...this.tokens.keys()].find(token => !this.isPinned(token))
       if (!oldest) break
       this.tokens.delete(oldest)
     }
 
     let token = this.makeToken()
     while (this.tokens.has(token)) token = this.makeToken()
-    this.tokens.set(token, { url, expiresAt: this.now() + TOKEN_TTL_MS, identity })
+    this.tokens.set(token, { url, expiresAt: this.now() + TOKEN_TTL_MS, identity: identity ? { ...identity } : undefined })
     return `jjstream://audio/${token}`
+  }
+
+  retainAudio(url: string, expectedIdentity: SourceMediaIdentity): RetainedSourceAudio {
+    const token = this.readToken(url)
+    const item = token ? this.tokens.get(token) : undefined
+    if (!token || !item || item.expiresAt <= this.now()) throw new Error('Audio token expired or not issued')
+    const actual = item.identity
+    if (!actual || actual.sourceId !== expectedIdentity.sourceId || actual.providerId !== expectedIdentity.providerId ||
+      actual.providerVersion !== expectedIdentity.providerVersion || actual.providerGeneration !== expectedIdentity.providerGeneration) {
+      throw new Error('Audio provider identity mismatch')
+    }
+    let current = false
+    try { current = this.isProviderCurrent(actual) } catch { /* fail closed */ }
+    if (!current) throw new Error('Audio provider unavailable')
+    if (this.retentions.size >= 4) throw new Error('Audio retention limit reached')
+    const retained: AudioRetention = { token, item, live: true, listeners: new Set(), requests: new Set() }
+    this.retentions.add(retained)
+    return {
+      request: request => this.serve({ ...request, url }, retained),
+      release: () => this.closeRetention(retained, false),
+      onInvalidated: listener => {
+        if (!retained.live) { listener(); return () => undefined }
+        retained.listeners.add(listener)
+        return () => { retained.listeners.delete(listener) }
+      }
+    }
+  }
+
+  private isPinned(token: string): boolean {
+    return [...this.retentions].some(retained => retained.live && retained.token === token)
+  }
+
+  private closeRetention(retained: AudioRetention, revoked: boolean): void {
+    if (!retained.live) return
+    retained.live = false
+    this.retentions.delete(retained)
+    for (const abort of [...retained.requests]) abort(revoked)
+    retained.requests.clear()
+    const listeners = [...retained.listeners]
+    retained.listeners.clear()
+    if (revoked) for (const listener of listeners) { try { listener() } catch { /* independent listeners */ } }
   }
 
   /** Revoke every outstanding media URL belonging to one stable script identity. */
   revokeProvider(providerId: string): void {
+    for (const retained of [...this.retentions]) {
+      if (retained.item.identity?.providerId === providerId) this.closeRetention(retained, true)
+    }
     for (const [token, item] of this.tokens) {
       if (item.identity?.providerId === providerId) this.tokens.delete(token)
     }
@@ -108,19 +174,23 @@ export class SourceMediaProxy {
     return item.failure?{...item.failure}:undefined
   }
 
-  async handleRequest(request: {
-    url: string
-    method: string
-    headers?: Headers | Record<string, string | string[] | undefined>
-    signal?: AbortSignal
-  }): Promise<Response> {
+  async handleRequest(request: SourceMediaRequest & { url: string }): Promise<Response> {
+    return this.serve(request)
+  }
+
+  private async serve(request: SourceMediaRequest & { url: string }, retained?: AudioRetention): Promise<Response> {
+    if (retained && (!retained.live || !this.retentions.has(retained))) return response('媒体保留句柄已失效', 410)
     const token = this.readToken(request.url)
     const item = token ? this.tokens.get(token) : undefined
-    if (!item || item.expiresAt <= this.now()) return response('媒体地址已过期或不存在', 404)
+    if (!item || (retained && retained.item !== item) || (!retained && item.expiresAt <= this.now())) return response('媒体地址已过期或不存在', 404)
     if (item.identity) {
       try {
-        if (!this.isProviderCurrent(item.identity)) return response('媒体来源已停用或版本已变化', 410)
+        if (!this.isProviderCurrent(item.identity)) {
+          if (retained) this.closeRetention(retained, true)
+          return response('媒体来源已停用或版本已变化', 410)
+        }
       } catch {
+        if (retained) this.closeRetention(retained, true)
         return response('媒体来源已停用或版本已变化', 410)
       }
     }
@@ -146,14 +216,19 @@ export class SourceMediaProxy {
       if (requestController.signal.aborted) return
       stopped=failure;item.failure=failure;requestController.abort(reason)
     }
-    const revoke = (): void => stop({code:'providerUnavailable'},new Error('媒体来源已停用或版本已变化'))
+    const revoke = (): void => {
+      if (retained) this.closeRetention(retained, true)
+      stop({code:'providerUnavailable'},new Error('媒体来源已停用或版本已变化'))
+    }
     const active = {identity:item.identity,revoke}
     this.active.add(active)
     const cancel = (): void => stop({code:'cancelled'},new Error('媒体请求已取消'))
+    const retentionAbort = (revoked: boolean): void => { if (revoked) revoke(); else cancel() }
+    retained?.requests.add(retentionAbort)
     request.signal?.addEventListener('abort',cancel,{once:true})
-    const finish = (): void => { this.active.delete(active);request.signal?.removeEventListener('abort',cancel) }
+    const finish = (): void => { this.active.delete(active);retained?.requests.delete(retentionAbort);request.signal?.removeEventListener('abort',cancel) }
     const current = (): boolean => {
-      try { return !item.identity || this.isProviderCurrent(item.identity) } catch { return false }
+      try { return (!retained || retained.live) && (!item.identity || this.isProviderCurrent(item.identity)) } catch { return false }
     }
     const headerTimeout = setTimeout(() => {
       stop({code:'network'},new DOMException('媒体响应头超时', 'TimeoutError'))
@@ -184,7 +259,7 @@ export class SourceMediaProxy {
       clearTimeout(headerTimeout)
       if(abortHeader)requestController.signal.removeEventListener('abort',abortHeader)
     }
-    const changed=!current(),expired=item.expiresAt<=this.now()
+    const changed=!current(),expired=!retained && item.expiresAt<=this.now()
     if(changed || this.tokens.get(token!)!==item || expired){
       if(changed)revoke()
       else stop({code:expired?'urlExpired':'unknown'},new Error('媒体地址已过期或不存在'))
@@ -244,7 +319,7 @@ export class SourceMediaProxy {
   private pruneTokens(): void {
     const now = this.now()
     for (const [token, item] of this.tokens) {
-      if (item.expiresAt <= now) this.tokens.delete(token)
+      if (item.expiresAt <= now && !this.isPinned(token)) this.tokens.delete(token)
     }
   }
 

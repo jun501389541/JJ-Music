@@ -36,6 +36,28 @@ export function assertIpcArgs(channel: string, args: unknown[]): void {
   const quality = (value: unknown): boolean => LX_QUALITIES.includes(value as (typeof LX_QUALITIES)[number])
 
   switch (channel) {
+    case IPC.dlnaInterfaces:
+      if(args.length!==0)bad()
+      break
+    case IPC.dlnaDiscover:
+    case IPC.dlnaConnect:
+      if(args.length!==1||!str(args[0],256))bad()
+      break
+    case IPC.dlnaDisconnect:
+      if(args.length<1||args.length>2||!str(args[0],256)||(args[1]!==undefined&&typeof args[1]!=='boolean'))bad()
+      break
+    case IPC.dlnaLoad: {
+      const resource=args[1] as {kind?:unknown;trackId?:unknown;resourceId?:unknown}|null
+      const valid=resource&&(resource.kind==='local'?str(resource.trackId,256)&&Object.keys(resource).every(key=>['kind','trackId'].includes(key)):
+        resource.kind==='online'&&str(resource.resourceId,256)&&Object.keys(resource).every(key=>['kind','resourceId'].includes(key)))
+      if(args.length!==3||!str(args[0],256)||!valid||!Number.isSafeInteger(args[2])||(args[2] as number)<0)bad()
+      break
+    }
+    case IPC.dlnaCommand:
+      if(args.length!==4||!str(args[0],256)||!['play','pause','stop','seek','volume'].includes(args[1] as string)||
+        !Number.isSafeInteger(args[3])||(args[3] as number)<0||
+        (args[2]!==undefined&&(typeof args[2]!=='number'||!Number.isFinite(args[2])||(args[2] as number)<0)))bad()
+      break
     case IPC.playlistRemoveMany:
       if(args.length!==1||!Array.isArray(args[0])||!ids(args[0],1000)||!args[0].length||new Set(args[0]).size!==args[0].length||args[0].includes('default')||args[0].includes('favorites'))bad()
       break

@@ -10,6 +10,7 @@ import { trackCoverUrl } from '../utils/track-cover'
 import AppIcon from './AppIcon.vue'
 import SliderBar from './SliderBar.vue'
 import TransportControls from './TransportControls.vue'
+import OutputDevicePicker from './OutputDevicePicker.vue'
 const emit = defineEmits<{ openNowPlaying: [] }>()
 /**
  * `bare` renders the bar for the now-playing view, which is the same control
@@ -86,7 +87,7 @@ const timeLabel = computed(() => {
 })
 </script>
 <template><footer class="playbar" :class="{ 'playbar--bare': bare }">
-  <div class="mini-progress"><SliderBar :value="player.progress" aria-label="播放进度" commit="release" @update:value="player.seekRatio" @preview="onScrub"/></div>
+  <div class="mini-progress"><SliderBar :value="player.progress" :disabled="!!player.remoteOutput&&!player.remoteOutput.device.capabilities.seek" aria-label="播放进度" commit="release" @update:value="player.seekRatio" @preview="onScrub"/></div>
   <!--
     Layout: three columns with the transport cluster in the middle one.
 
@@ -138,6 +139,7 @@ const timeLabel = computed(() => {
     <TransportControls show-favorite show-queue show-desktop-lyric />
   </div>
   <div class="mini-side mini-side--right">
+    <OutputDevicePicker />
     <span class="mini-time tnum" aria-label="播放时长">{{ player.currentTrack ? timeLabel : 'JJ Music' }}</span>
     <!--
       Output spec first, then 更多: the format readout belongs with the other
@@ -153,7 +155,8 @@ const timeLabel = computed(() => {
         behind an icon cost more than the width it saved. The now-playing view
         is where the larger vertical control lives.
       -->
-      <div class="mini-volume" @wheel.prevent="bumpVolume($event)"><button class="icon-btn" :aria-label="player.muted ? '取消静音' : '静音'" @click="player.toggleMute()"><AppIcon :name="player.muted ? 'mute' : 'volume'" :size="18"/></button><div class="volume-slider"><SliderBar variant="subtle" :value="player.muted ? 0 : player.volume" aria-label="音量" @update:value="onVolume"/></div><small>{{ player.muted ? 0 : Math.round(player.volume * 100) }}</small></div>
+      <div v-if="player.remoteOutput" class="mini-volume" title="设备音量与本机独立；本机音效不适用于投放"><template v-if="player.remoteOutput.device.capabilities.volume&&player.remoteVolume!==undefined"><span class="mini-time">设备</span><div class="volume-slider"><SliderBar variant="subtle" :value="player.remoteVolume" aria-label="设备音量" @update:value="player.setRemoteVolume"/></div><small>{{Math.round(player.remoteVolume*100)}}</small></template><span v-else class="mini-time">使用设备遥控器调音量</span></div>
+      <div v-else class="mini-volume" @wheel.prevent="bumpVolume($event)"><button class="icon-btn" :aria-label="player.muted ? '取消静音' : '静音'" @click="player.toggleMute()"><AppIcon :name="player.muted ? 'mute' : 'volume'" :size="18"/></button><div class="volume-slider"><SliderBar variant="subtle" :value="player.muted ? 0 : player.volume" aria-label="音量" @update:value="onVolume"/></div><small>{{ player.muted ? 0 : Math.round(player.volume * 100) }}</small></div>
     </div>
   </div>
 </footer></template>

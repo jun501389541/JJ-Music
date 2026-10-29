@@ -6,6 +6,7 @@
  */
 import { playlistEntryKey } from '@shared/playlist-refresh'
 import { normalizeCrossfadeDurationMs } from '@shared/crossfade'
+import { dlnaFailure } from '@shared/dlna-errors'
 import { useLibraryStore } from './library'
 import { relinkTrack, type LocalRelinkChange } from '@shared/local-file-relink'
 import { useToastStore } from './toast'
@@ -30,6 +31,8 @@ import type {
 import { isLocalTrack, ONLINE_SOURCE_IDS } from '@shared/types'
 import type { ResolvedLyric } from '@shared/library-types'
 import { WebAudioEngine } from '../audio/web-audio-engine'
+import { DlnaEngine } from '../audio/dlna-engine'
+import type { DlnaDevice, DlnaSessionSnapshot } from '@shared/dlna'
 import { activeLineIndex, parseLyrics, type ParsedLyrics } from '../audio/lyrics'
 import { cancellableMusic } from '../utils/cancellable-music'
 import { resolveOnlinePlayback, resolutionCacheKey, ResolutionError, RESOLUTION_BUDGET_MS } from '../utils/online-resolver'
@@ -221,12 +224,17 @@ export const usePlayerStore = defineStore('player', () => {
    * ------------------------------------------------------------ */
 
   let recordedGeneration = -1
+  const remoteOutput = shallowRef<{device:DlnaDevice;session:DlnaSessionSnapshot}|null>(null)
+  const remoteVolume=ref<number|undefined>()
+  let outputSwitching = false
   function ensureEngine(): AudioEngine {
     if (engine.value) return engine.value
 
-    const instance = new WebAudioEngine()
+    const instance: AudioEngine = remoteOutput.value
+      ? new DlnaEngine({session:remoteOutput.value.session,device:remoteOutput.value.device})
+      : new WebAudioEngine()
     instance.on('progress', (time, total) => {
-      if (!isLoadedCurrentTrack()) return
+      if (engine.value !== instance || !isLoadedCurrentTrack()) return
       currentTime.value = time
       duration.value = total
       // Throttled inside `snapshotSession`; the call itself is cheap.
@@ -238,11 +246,12 @@ export const usePlayerStore = defineStore('player', () => {
       maybeReserveCrossfade(time, total)
     })
     instance.on('ready', (total) => {
-      if (!isLoadedCurrentTrack()) return
+      if (engine.value!==instance||!isLoadedCurrentTrack()) return
       duration.value = total
       loading.value = false
     })
     instance.on('playing', () => {
+      if(engine.value!==instance)return
       const confirmedTrack = currentTrack.value
       if (!confirmedTrack || !isLoadedCurrentTrack()) return
       recordAudibleTrack(confirmedTrack, playGeneration)
@@ -254,25 +263,32 @@ export const usePlayerStore = defineStore('player', () => {
       maybeReserveCrossfade(instance.getCurrentTime(), instance.getDuration())
     })
     instance.on('paused', () => {
+      if(engine.value!==instance)return
       playing.value = false
       clearStallTimer()
     })
     instance.on('waiting', (isWaiting) => {
-      if (!isLoadedCurrentTrack()) return
+      if (engine.value!==instance||!isLoadedCurrentTrack()) return
       waiting.value = isWaiting
       if (isWaiting) armStallTimer(playGeneration)
       else clearStallTimer()
     })
     instance.on('ended', () => {
-      if (!isLoadedCurrentTrack()) return
+      if (engine.value!==instance||!isLoadedCurrentTrack()) return
       if (pausePending) { playing.value = false; return }
       void handleEnded()
     })
     instance.on('error', error => {
-      if (isLoadedCurrentTrack()) handlePlaybackError(error)
+      if(engine.value===instance&&instance.capabilities.id==='dlna'){
+        playing.value=false;loading.value=false;waiting.value=false;clearStallTimer()
+        errorMessageForRemote(error)
+        return
+      }
+      if (engine.value===instance&&isLoadedCurrentTrack()) handlePlaybackError(error)
     })
 
-    instance.setVolume(volume.value)
+    instance.on('volumeChange',value=>{if(engine.value===instance&&instance.capabilities.id==='dlna')remoteVolume.value=value})
+    if(instance.capabilities.id!=='dlna')instance.setVolume(volume.value)
     instance.setTransitionsEnabled?.(transitionsEnabled.value)
     instance.setEqualizer(equalizer.value)
     instance.setMuted(muted.value)
@@ -280,6 +296,8 @@ export const usePlayerStore = defineStore('player', () => {
     engine.value = instance
     return instance
   }
+
+  function errorMessageForRemote(cause:unknown):void {error.value=dlnaFailure(cause).message}
 
   /* ------------------------------------------------------------ *
    * URL resolution
@@ -312,10 +330,11 @@ export const usePlayerStore = defineStore('player', () => {
     const key = urlKey(online, preferred)
     const cached = urlCache.get(key)
     if (signal.aborted) throw new ResolutionError('cancelled', '播放解析已取消')
-    if (cached && cached.fetchedAt<=Date.now() && cached.expiresAt > Date.now() && cached.monotonicAt<=performance.now() && cached.monotonicUntil>performance.now() && cached.source.quality === preferred) return cached.source
+    if (cached && (!remoteOutput.value||cached.source.quality==='320k'||cached.source.quality==='128k') && cached.fetchedAt<=Date.now() && cached.expiresAt > Date.now() && cached.monotonicAt<=performance.now() && cached.monotonicUntil>performance.now() && cached.source.quality === preferred) return cached.source
     urlCache.delete(key)
     const epoch = sourceEpoch
     const result = await resolveOnlinePlayback({
+      supportedQualities:remoteOutput.value?['320k','128k']:undefined,
       track: online, preferred, signal, budgetMs,
       platforms: async () => (await window.jj.sources.available()).filter(item => item.actions.includes('musicUrl') && ONLINE_SOURCE_IDS.includes(item.id)).map(item => item.id),
       search: async (source, keyword, requestSignal) => (await cancellableMusic(requestSignal, id => window.jj.music.search(source, keyword, 1, id))).list,
@@ -837,7 +856,7 @@ export const usePlayerStore = defineStore('player', () => {
     loadedTrackKey = null
     const instance = engine.value
     if (!instance) return
-    instance.pause()
+    if(instance.capabilities.id!=='dlna')void Promise.resolve(instance.pause()).catch(()=>{})
     instance.stop()
     playing.value = false
     currentTime.value = 0
@@ -922,6 +941,7 @@ export const usePlayerStore = defineStore('player', () => {
        */
       if (options.startAt && options.startAt > 0) currentTime.value = options.startAt
       await instance.load({
+        resourceRef:isLocalTrack(track)?{kind:'local',trackId:track.id}:remoteOutput.value&&source.url.startsWith('jjstream://audio/')?{kind:'online',resourceId:new URL(source.url).pathname.slice(1)}:undefined,
         url: source.url,
         isLocal: isLocalTrack(track),
         title: track.name,
@@ -952,7 +972,7 @@ export const usePlayerStore = defineStore('player', () => {
       // A URL that never arrived is a failed *source*, not a failed track:
       // hand it to the same failover path the engine uses so the next capable
       // 音源 gets a chance instead of stopping playback outright.
-      const message = err instanceof Error ? err.message : String(err)
+      const message = remoteOutput.value?dlnaFailure(err).message:err instanceof Error ? err.message : String(err)
       if (!isLocalTrack(track)) {
         const terminal = err instanceof ResolutionError && ['cancelled', 'timeout', 'providerMissing', 'matchFailed'].includes(err.reason)
         if (options.retryUrl !== false && !terminal) {
@@ -1253,6 +1273,10 @@ export const usePlayerStore = defineStore('player', () => {
   function seek(time: number): void {
     if (localRelinkBusy) return
     if (!Number.isFinite(time)) return
+    if(remoteOutput.value){
+      if(remoteOutput.value.device.capabilities.seek)engine.value?.seek(Math.max(0,time))
+      return
+    }
     const clamped = Math.max(0, Math.min(time, duration.value || 0))
     invalidateReservationForSeek()
     suppressSeekProgressReservation = true
@@ -1350,6 +1374,28 @@ export const usePlayerStore = defineStore('player', () => {
    */
   const outputDeviceId = ref('')
   const outputDevices = ref<Array<{ deviceId: string; label: string }>>([])
+
+  async function selectDlnaOutput(device:DlnaDevice|null,allowUnconfirmed=false):Promise<void> {
+    if(outputSwitching)throw new Error('正在切换输出设备')
+    outputSwitching=true
+    const wasPlaying=playing.value
+    try {
+      cancelCrossfadeReservation();resolutionAbort?.abort();playGeneration++;toggleGeneration++
+      if(engine.value&&engine.value.capabilities.id!=='dlna')await engine.value.pause()
+      playing.value=false
+      if(remoteOutput.value)await window.jj.dlna.disconnect(remoteOutput.value.session.sessionId,allowUnconfirmed)
+      const session=device?await window.jj.dlna.connect(device.id):null
+      engine.value?.destroy();engine.value=null
+      remoteOutput.value=device&&session?{device,session}:null
+      remoteVolume.value=session?.volume
+      loadedTrackId=null;loadedTrackKey=null
+      if(currentIndex.value>=0)await playTrackAt(currentIndex.value,{autoplay:!!device&&wasPlaying,transition:false})
+    } catch(cause) {
+      playing.value=false;loading.value=false
+      error.value=cause instanceof Error?cause.message:'输出切换失败'
+      throw cause
+    } finally {outputSwitching=false}
+  }
 
   async function refreshOutputDevices(): Promise<void> {
     const instance = ensureEngine()
@@ -1934,6 +1980,10 @@ export const usePlayerStore = defineStore('player', () => {
     equalizerPreset,
     outputDeviceId,
     outputDevices,
+    remoteOutput,
+    remoteVolume,
+    setRemoteVolume:(value:number)=>{if(remoteOutput.value)engine.value?.setVolume(value)},
+    selectDlnaOutput,
     // getters
     currentTrack,
     activeLyricIndex,

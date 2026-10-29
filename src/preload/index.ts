@@ -59,6 +59,19 @@ async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 }
 
 const api = {
+  dlna: {
+    interfaces: () => invoke<Array<{id:string;name:string;address:string}>>(IPC.dlnaInterfaces),
+    discover: (interfaceId:string) => invoke<import('../shared/dlna').DlnaDevice[]>(IPC.dlnaDiscover,interfaceId),
+    connect: (deviceId:string) => invoke<import('../shared/dlna').DlnaSessionSnapshot>(IPC.dlnaConnect,deviceId),
+    load: (sessionId:string,resource:import('../shared/dlna').DlnaResourceRef,generation:number) => invoke<import('../shared/dlna').DlnaSessionSnapshot>(IPC.dlnaLoad,sessionId,resource,generation),
+    command: (sessionId:string,action:'play'|'pause'|'stop'|'seek'|'volume',value:number|undefined,generation:number) => invoke<import('../shared/dlna').DlnaSessionSnapshot>(IPC.dlnaCommand,sessionId,action,value,generation),
+    disconnect: (sessionId:string,allowUnconfirmed=false) => invoke<void>(IPC.dlnaDisconnect,sessionId,allowUnconfirmed),
+    onState: (handler:(event:import('../shared/dlna').DlnaSessionEvent)=>void) => {
+      const listener=(_event:Electron.IpcRendererEvent,event:import('../shared/dlna').DlnaSessionEvent)=>handler(event)
+      ipcRenderer.on(IPC.dlnaState,listener)
+      return ()=>ipcRenderer.removeListener(IPC.dlnaState,listener)
+    }
+  },
   charts: {
     artwork: (source: ChartSource, id: string, requestId?: string) => invoke<string>(IPC.chartsArtwork, source, id, requestId),
     list: (source: ChartSource, requestId?: string, force = false) => invoke<ResourceEnvelope<ChartSummary[]>>(IPC.chartsList, source, requestId, force),

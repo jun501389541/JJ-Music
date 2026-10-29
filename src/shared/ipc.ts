@@ -5,6 +5,13 @@
  * a channel name is a compile error rather than a silently dead handler.
  */
 export const IPC = {
+  dlnaInterfaces: 'dlna:interfaces',
+  dlnaDiscover: 'dlna:discover',
+  dlnaConnect: 'dlna:connect',
+  dlnaLoad: 'dlna:load',
+  dlnaCommand: 'dlna:command',
+  dlnaDisconnect: 'dlna:disconnect',
+  dlnaState: 'dlna:state',
   playlistSearchProviders: 'playlist-search:providers',
   playlistSearch: 'playlist-search:search',
   playlistImportDiscard: 'playlist:import-discard',

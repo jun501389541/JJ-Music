@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      installer_acceptance:
+        description: Run synthetic NSIS acceptance on the disposable Windows runner
+        type: boolean
+        required: false
+        default: false
 
 # A new push makes an in-flight run pointless.
 concurrency:
@@ -138,3 +144,22 @@ jobs:
           extra=$(grep -vc "JJ-Music-${version}-" SHA256SUMS.txt || true)
           echo "SHA256SUMS.txt: ${count} line(s), ${extra} not matching ${version}"
           test "${extra}" = "0" && test "${count}" = "2"
+
+      # Explicit opt-in only: PR/push/default manual CI never installs anything.
+      # The script independently refuses non-disposable hosts and existing data.
+      - name: Real NSIS synthetic install and same-path upgrade
+        if: github.event_name == 'workflow_dispatch' && inputs.installer_acceptance == true
+        id: installer
+        shell: pwsh
+        run: ./tools/probe/or8-ci-installer.ps1
+
+      - name: Retain synthetic NSIS acceptance evidence
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.installer_acceptance == true && steps.installer.outputs.report-dir != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windowless-installer-${{ github.run_id }}
+          path: |
+            ${{ steps.installer.outputs.report-dir }}/report.json
+            ${{ steps.installer.outputs.report-dir }}/*.log
+          if-no-files-found: error
+          retention-days: 14

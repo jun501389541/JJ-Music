@@ -150,6 +150,6 @@ Files: `tools/package.mjs`, `electron-builder.yml`, CI、包验证和开发记�
 - [x] Windows verify接入独立fixture/TestBarrier构建和启动竞争、嵌套Job、路径探针，不吞失败。
 - [x] YAML解析、权限和依赖检查通过，本机等效命令通过。
 - [x] 独立复核无重要问题，差异检查通过。
-- [ ] GraphFlow连接关闭，本轮增量索引待补。
-- [ ] 尚未推送或触发远端CI，远端运行待明确交付授权后验证。
+- [x] 产品提交后GraphFlow增量索引已完成；远端CI路径修复后连接曾再次关闭，恢复后已补做增量索引。
+- [x] 用户授权提交推送后，功能分支远端CI40796119916对9dd5db0两个job均通过；首次运行暴露的临时目录别名问题已修复，本地128/128及5/5也通过。
 - 记录见 `docs/development/2026-10-28-windowless-source-launcher/native-ci.md`。

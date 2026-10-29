@@ -40,6 +40,8 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, w
 import { cp, mkdir, readFile } from 'node:fs/promises'
 import { resolveDataDir, migrationSource, pointerPath, relocationProblem, copyDataForRelocation, NSIS_INSTALL_MARKER, type DataDirChoice } from './data-location'
 import { mediaPath, resolveAllowedPath, serveMedia, type MediaAccess } from './media/media-response'
+import { createDlnaService } from './dlna/service'
+import type { DlnaResourceRef } from '../shared/dlna'
 import { setPlaybackReleaser } from './media/file-release'
 import { ensurePlayableFlac } from './media/flac-repair'
 import { guardedFetch, safeFetchBytes, safeFetchResponse } from './online/url-guard'
@@ -482,7 +484,12 @@ async function createServices(): Promise<Services> {
   // Sources run in a forked child process, so they can be killed without
   // taking the app with them. See `source-engine.ts` for why a worker thread
   // was not enough. The host file must live outside the asar archive.
-  const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'), 'auto', { health: capabilityHealth })
+  const sourceEngine = new SourceEngine(sourceStore, unpackedPath('source-host.js'), 'auto', {
+    health: capabilityHealth,
+    launcherPath: app.isPackaged
+      ? join(process.resourcesPath, 'native', 'source-launcher.exe')
+      : join(app.getAppPath(), 'build', 'native', 'x64', 'source-launcher.exe')
+  })
   const onlinePlatforms = new OnlinePlatformRegistry({
     sourcesByScript: () => sourceEngine.getSourcesByScript(),
     isScriptEnabled: (apiId) => sourceStore.metas().some((meta) => meta.id === apiId && meta.enabled)
@@ -857,9 +864,12 @@ function createWindow(): BrowserWindow {
    * Only the setting is left alone: the strip returns on the next launch.
    */
   window.on('closed', () => {
+    const previousCasting=casting;casting=undefined;void previousCasting?.close().catch(()=>{})
     if (mainWindow === window) mainWindow = null
     desktopLyrics?.close()
   })
+
+  window.webContents.on('render-process-gone',()=>{const previousCasting=casting;casting=undefined;void previousCasting?.close().catch(()=>{})})
 
   return window
 }
@@ -1159,6 +1169,23 @@ function indexedTrack(id: unknown): LocalMusicInfo {
   const track = requireServices().library.get(id)
   if (!track) throw new Error('曲目不在曲库索引中')
   return track
+}
+
+let casting: ReturnType<typeof createDlnaService> | undefined
+const castingOnline = new Map<string,{url:string;identity:import('./online/source-media-proxy').SourceMediaIdentity;title:string;artist?:string;album?:string}>()
+function dlna() {
+  return casting ??= createDlnaService({
+    resolveOnline:async(resourceId:string)=>{
+      const resource=castingOnline.get(resourceId)
+      if(!resource)throw new Error('投放资源已失效，请重新解析')
+      return {...sourceMediaProxy.retainAudio(resource.url,resource.identity),title:resource.title,artist:resource.artist,album:resource.album}
+    },
+    resolveLocal:async(trackId:string)=>{
+      const track=indexedTrack(trackId)
+      return {path:track.path,access:mediaAccess([track.path]),title:track.name,artist:track.singer,album:track.albumName}
+    },
+    onEvent:event=>{if(mainWindow&&!mainWindow.webContents.isDestroyed())mainWindow.webContents.send(IPC.dlnaState,event)}
+  })
 }
 
 /**
@@ -1543,6 +1570,12 @@ function relaxCorsForMedia(): void {
 }
 
 function registerIpc(): void {
+  handle(IPC.dlnaInterfaces,()=>dlna().listInterfaces())
+  handle(IPC.dlnaDiscover,(interfaceId:string)=>dlna().discover(interfaceId))
+  handle(IPC.dlnaConnect,(deviceId:string)=>dlna().connect(deviceId))
+  handle(IPC.dlnaLoad,(sessionId:string,resource:DlnaResourceRef,generation:number)=>dlna().load(sessionId,resource,generation))
+  handle(IPC.dlnaCommand,(sessionId:string,action:'play'|'pause'|'stop'|'seek'|'volume',value:number|undefined,generation:number)=>dlna().command(sessionId,action,value,generation))
+  handle(IPC.dlnaDisconnect,(sessionId:string,allowUnconfirmed=false)=>dlna().disconnect(sessionId,allowUnconfirmed))
   handle(IPC.updateStatus, () => updateService.getState())
   handle(IPC.updateCheck, () => updateService.check())
   handle(IPC.updateDownload, () => updateService.download())
@@ -2318,15 +2351,15 @@ function registerIpc(): void {
       if (!result.providerId || !result.providerVersion) throw new Error('音源没有可验证的身份，无法安全播放')
       const revision=requireServices().sourceEngine.providerRevision(result.providerId)
       if(!revision||revision.providerVersion!==result.providerVersion||revision.generation!==result.providerGeneration)throw new Error('音源运行版本已变化，请重新解析')
+      const identity={sourceId:musicInfo.source,providerId:result.providerId,providerVersion:result.providerVersion,providerGeneration:result.providerGeneration}
+      const issuedUrl=sourceMediaProxy.audioUrl(result.url,identity)
+      const issuedId=new URL(issuedUrl).pathname.slice(1)
+      while(castingOnline.size>=512)castingOnline.delete(castingOnline.keys().next().value!)
+      castingOnline.set(issuedId,{url:issuedUrl,identity,title:musicInfo.name,artist:musicInfo.singer,album:musicInfo.albumName})
       return {
         ...result,
         resolvedAt: Date.now(),
-        url: sourceMediaProxy.audioUrl(result.url, {
-          sourceId: musicInfo.source,
-          providerId: result.providerId,
-          providerVersion: result.providerVersion,
-          providerGeneration:result.providerGeneration
-        })
+        url: issuedUrl
       }
     })
   )
@@ -3182,6 +3215,7 @@ if (!app.requestSingleInstanceLock()) {
     current.playlistBulkRename.clear()
     // The source lifecycle owns child processes, so stop it before quitting.
     void Promise.allSettled([
+      ...(casting?[casting.close()]:[]),
       ...(relinkCommit ? [relinkCommit] : []),
       current.downloads.shutdown(),
       current.catalogReliability.flush(),

@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      installer_acceptance:
+        description: Run synthetic NSIS acceptance on the disposable Windows runner
+        type: boolean
+        required: false
+        default: false
 
 # A new push makes an in-flight run pointless.
 concurrency:
@@ -19,9 +25,9 @@ permissions:
 
 jobs:
   verify:
-    name: Typecheck, build, headless tests
+    name: Typecheck, build, headless and native tests
     # Windows, not ubuntu: this is a Windows-only app and several suites assume
-    # Windows paths, GBK decoding and the `runas` launcher. A Linux green would
+    # Windows paths, GBK decoding and the native restricted launcher. A Linux green would
     # not describe the artifact that ships.
     runs-on: windows-latest
     timeout-minutes: 30
@@ -50,6 +56,26 @@ jobs:
 
       - name: Verify
         run: npm run verify
+
+      # npm verify builds the production helper. These dedicated fixtures and
+      # probes also exercise real Win32 Job ownership and suspended creation.
+      # Keep each command in its own step so a later success cannot hide failure.
+      - name: Build native verification fixtures
+        shell: pwsh
+        run: ./tools/test-source-launcher-argv.ps1
+
+      - name: Build the creation-race test helper
+        shell: pwsh
+        run: ./tools/build-source-launcher.ps1 -TestBarrier
+
+      - name: Native startup, process cleanup and creation race
+        run: node tools/probe/windowless-source-launch.mjs --startup-race
+
+      - name: Nested Job startup, stop and restricted creation
+        run: node tools/probe/windowless-nested-job.mjs
+
+      - name: Native path support and safe rejection boundaries
+        run: node tools/probe/windowless-paths.mjs
 
       # `npm run test:e2e` is deliberately absent: it drives a real window, a
       # real audio device and the developer's own music folder, so it cannot be
@@ -118,3 +144,22 @@ jobs:
           extra=$(grep -vc "JJ-Music-${version}-" SHA256SUMS.txt || true)
           echo "SHA256SUMS.txt: ${count} line(s), ${extra} not matching ${version}"
           test "${extra}" = "0" && test "${count}" = "2"
+
+      # Explicit opt-in only: PR/push/default manual CI never installs anything.
+      # The script independently refuses non-disposable hosts and existing data.
+      - name: Real NSIS synthetic install and same-path upgrade
+        if: github.event_name == 'workflow_dispatch' && inputs.installer_acceptance == true
+        id: installer
+        shell: pwsh
+        run: ./tools/probe/or8-ci-installer.ps1
+
+      - name: Retain synthetic NSIS acceptance evidence
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.installer_acceptance == true && steps.installer.outputs.report-dir != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windowless-installer-${{ github.run_id }}
+          path: |
+            ${{ steps.installer.outputs.report-dir }}/report.json
+            ${{ steps.installer.outputs.report-dir }}/*.log
+          if-no-files-found: error
+          retention-days: 14

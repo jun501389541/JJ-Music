@@ -11,6 +11,9 @@ import { build } from 'esbuild'
 import { mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildSourceLauncher } from './build-source-launcher.mjs'
+
+buildSourceLauncher()
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = join(repoRoot, 'out', 'test')
@@ -40,6 +43,7 @@ const shared = {
     'yaml',
     'electron-updater',
     'undici'
+    ,'saxes'
   ],
   alias: {
     '@shared': join(repoRoot, 'src', 'shared'),
@@ -54,6 +58,16 @@ await build({
     join(repoRoot, 'src', 'main', 'online', 'auxiliary-requests.ts'),
     join(repoRoot, 'src', 'main', 'online', 'cache-budget.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'source-scratch.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'lan-policy.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'lan-http-client.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'session-manager.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'media-lease.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'media-server.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'xml.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'soap.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'discovery.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'device-registry.ts'),
+    join(repoRoot, 'src', 'main', 'dlna', 'service.ts'),
     join(repoRoot, 'src', 'main', 'online', 'capability-health.ts'),
     join(repoRoot, 'src', 'main', 'online', 'online-diagnostics.ts'),
     join(repoRoot, 'src', 'main', 'online', 'diagnostic-check.ts'),
@@ -83,6 +97,7 @@ await build({
     join(repoRoot, 'src', 'main', 'sources', 'shutdown-guard.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'source-validator.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'restricted-launch.ts'),
+    join(repoRoot, 'src', 'main', 'sources', 'launcher-status.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'legacy-music-info.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'jj-source-protocol.ts'),
     join(repoRoot, 'src', 'main', 'sources', 'source-runtime-host.ts'),
@@ -142,6 +157,7 @@ await build({
   ...shared,
   entryPoints: [
         join(repoRoot, 'src', 'shared', 'audio-engine.ts'),
+        join(repoRoot, 'src', 'shared', 'dlna-errors.ts'),
         join(repoRoot, 'src', 'shared', 'crossfade.ts'),
         join(repoRoot, 'src', 'shared', 'types.ts'),
         join(repoRoot, 'src', 'shared', 'playlist-bulk-rename.ts'),
@@ -167,6 +183,7 @@ await build({
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'crossfade-controller.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'lyrics.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'web-audio-engine.ts'),
+    join(repoRoot, 'src', 'renderer', 'src', 'audio', 'dlna-engine.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'audio', 'gain-transition.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'settings-writer.ts'),
     join(repoRoot, 'src', 'renderer', 'src', 'utils', 'format.ts'),

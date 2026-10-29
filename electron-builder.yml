@@ -47,6 +47,11 @@ files:
 # `music-metadata` and `iconv-lite` are pure JavaScript, so no native rebuild
 # step is required and the packaged app stays portable across machines.
 asar: true
+extraResources:
+  - from: build/native/x64/source-launcher.exe
+    to: native/source-launcher.exe
+  - from: build/native/x64/manifest.json
+    to: native/manifest.json
 
 # Keep the forked host script outside the archive so `fork()` can load it, and keep
 # the packages it imports reachable from that on-disk location.

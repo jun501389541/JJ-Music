@@ -19,6 +19,15 @@ function fixture(overrides = {}) {
   }
 }
 
+test('remote compatibility preserves original target while resolving supported tiers only',async()=>{
+ const f=fixture({supportedQualities:['320k','128k']})
+ const resolved=await resolveOnlinePlayback(f.options)
+ assert.equal(resolved.resource.targetQuality,'flac')
+ assert.equal(resolved.quality,'320k')
+ assert.deepEqual(f.calls,['tx:320k'])
+ assert.deepEqual(resolved.resource.original,{id:'tx_one',source:'tx'})
+})
+
 test('recording matching normalizes artist order, full-width text and punctuation', () => {
   assert.equal(matchRecording(song('tx', { name: 'Ｓｏｎｇ（正式版）' }), song('wy', { name: 'Song (正式版)', singer: '歌手乙 / 歌手甲', interval: '03:24' })), true)
 })

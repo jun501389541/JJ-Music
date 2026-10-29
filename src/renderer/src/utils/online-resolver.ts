@@ -22,6 +22,8 @@ interface UrlResult extends PlaybackUrlTimes {
   url: string; quality: Quality; providerId?: string; providerName?: string; providerVersion?: string
 }
 export interface OnlineResolutionOptions {
+  /** Output compatibility filter; preserves target quality and tier ordering. */
+  supportedQualities?: readonly Quality[]
   track: OnlineMusicInfo
   preferred: Quality
   signal: AbortSignal
@@ -90,6 +92,7 @@ export async function resolveOnlinePlayback(options: OnlineResolutionOptions): P
   }
   try {
     for (const quality of TIERS.slice(TIERS.indexOf(preferred))) {
+      if(options.supportedQualities&&!options.supportedQualities.includes(quality))continue
       const primary = await attempt(track, quality)
       if (primary) return primary
       if (track.providerId) continue

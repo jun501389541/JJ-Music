@@ -511,9 +511,12 @@ Reflect.set(pendingEngine, 'host', {
 const pendingLaunch = pendingEngine.reload(pendingMeta.id)
 await startEntered
 pendingStore.setEnabled(pendingMeta.id, false)
-await pendingEngine.stop(pendingMeta.id)
+let pendingStopSettled = false
+const pendingStop = pendingEngine.stop(pendingMeta.id).then(() => { pendingStopSettled = true })
+await new Promise(resolve => setImmediate(resolve))
+check('stop waits for an initializing host to finish cleanup', pendingStopSettled === false)
 finishPendingStart()
-await pendingLaunch
+await Promise.all([pendingLaunch, pendingStop])
 check('disabling a pending source prevents late runtime publication', pendingEngine.getSources().length === 0)
 check('late pending runtime is torn down', pendingTeardowns === 1, String(pendingTeardowns))
 check('pending source remains disabled after start settles', pendingStore.metas()[0]?.enabled === false)
@@ -563,15 +566,12 @@ const cancelledUpdate = applySourceUpdate(
 )
 await candidateStartEntered
 cancelledUpdateStore.setEnabled(cancelledUpdateMeta.id, false)
-await cancelledUpdateEngine.stop(cancelledUpdateMeta.id)
+const cancelledUpdateResult = cancelledUpdate.then(() => '', error => error instanceof Error ? error.message : String(error))
+const stoppingCandidate = cancelledUpdateEngine.stop(cancelledUpdateMeta.id)
 const disabledUpdateFile = readFileSync(cancelledUpdateStore.path, 'utf8')
 finishCandidateStart()
-let cancelledUpdateError = ''
-try {
-  await cancelledUpdate
-} catch (error) {
-  cancelledUpdateError = error instanceof Error ? error.message : String(error)
-}
+await stoppingCandidate
+const cancelledUpdateError = await cancelledUpdateResult
 check('disabling during candidate startup rejects the update', cancelledUpdateError.length > 0, cancelledUpdateError)
 check('cancelled candidate startup preserves the installed script', cancelledUpdateStore.get(cancelledUpdateMeta.id)?.source === installedUpdateScript)
 check('cancelled candidate startup preserves the durable disabled record', readFileSync(cancelledUpdateStore.path, 'utf8') === disabledUpdateFile)

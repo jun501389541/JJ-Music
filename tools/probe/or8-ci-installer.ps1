@@ -129,6 +129,13 @@ function Assert-Installed([string]$Version, [string]$Stage) {
     throw "$Stage NSIS marker contents differ"
   }
   Record $Stage @{ version = $actual; exeSHA256 = (Get-FileHash -LiteralPath $appExe).Hash; marker = $true }
+  if ($Version -ceq $script:candidateVersion) {
+    # Verify the actual installed resources, not the build tree. This covers
+    # helper presence/PE architecture/protocol/digest after fresh and upgrade.
+    & node (Join-Path $workspace 'tools/probe/verify-package.mjs') (Join-Path $installDir 'resources/app.asar') "--artifact-version=$Version" --require-native-launcher
+    if ($LASTEXITCODE -ne 0) { throw "$Stage installed resource verification failed" }
+    Record "$Stage-resources" @{ nativeLauncherVerified = $true; protocol = 1; architecture = 'x64' }
+  }
 }
 function Assert-Profile([string]$Stage) {
   $actual = @(Profile-Inventory $profilePath)

@@ -1,5 +1,7 @@
 # 架构说明
 
+Windows 音源启动已接入 [原生无窗口受限启动器](superpowers/specs/2026-10-28-windowless-source-launcher-design.md)，执行进度见 [WL2 记录](development/2026-10-28-windowless-source-launcher/WL2.md)。窗口归属、默认终端对比和人工无闪窗验收仍未完成。
+
 产品与播放行为的最新开发基线见 [产品与播放开发规则](PRODUCT_RULES.md)（2026-10-07）。本文件记录现有架构；与该基线冲突的旧行为需按后续计划迁移，不代表新规则已经实现。
 
 这份文档记录**为什么**这样实现。功能清单见 `README.md`；LX 音源协议的逐条细节见
@@ -71,7 +73,7 @@ Reason Code: 0x800000ff
 四层防御：
 
 1. **Windows 受限令牌**（`restricted-launch.ts`）
-   音源通过 `runas /trustlevel:0x20000` 启动，子进程没有 `SeShutdownPrivilege`。主子进程用临时文件交换请求和响应；启动、请求及崩溃状态有集成测试。这只限制关机等特权操作，不阻止普通文件或网络访问。
+   Windows 使用 GUI 子系统的 `source-launcher.exe`，计算 SAFER NORMALUSER 令牌并确认 `SeShutdownPrivilege` 不存在。创建宿主时原子纳入私有 kill-on-close Job；主子进程仍以临时文件交换请求和响应，helper 的有界状态管道负责创建和退出通知。ready 与 spawned 都有效才完成初始化。正常停用等待 helper 回收整个 Job；异常退出或强杀不能当成已确认回收，保留 scratch 并报告。这只限制关机等特权操作，不阻止普通文件或网络访问；不回退 runas/CMD/VBS。
 2. **能力剥夺**（`source-host.ts` 的 `lockDownProcess`）
    脚本仍能看到 `process`（很多脚本用它做特性检测），但 `process.exit/abort/kill/binding/dlopen`
    全部替换为抛错的桩；`require` 被包装，`child_process` / `worker_threads` / `cluster` / `vm`

@@ -11,7 +11,7 @@
  *     `JJ_SOURCE_API_VERSION`), which moves search/playlist/leaderboard work
  *     out of the host and into the script.
  *
- * Both need the *same* hostile-input machinery: a detached restricted-token
+ * Both need the *same* hostile-input machinery: a managed restricted-token
  * child, a scratch directory used as a file transport, a heartbeat watchdog, a
  * memory limit, and crash reaping. Writing that twice would produce two
  * subprocess lifecycle implementations that must stay behaviourally identical
@@ -33,9 +33,10 @@
 
 import { fork } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { LauncherStatusDecoder, LAUNCHER_OUTPUT_BYTES } from './launcher-status'
 
 import type { Quality, SourceAction, SourceId, SourceInfo, OnlineMusicInfo } from '@shared/types'
 import { LX_QUALITIES } from '@shared/types'
@@ -49,7 +50,8 @@ import {
   readReady,
   readHeartbeat,
   readConsoleLog,
-  killChildTree
+  readSourceFile,
+  SourceFileLimitError
 } from './restricted-launch'
 
 /* ------------------------------------------------------------------ *
@@ -154,14 +156,14 @@ export interface RuntimeState {
   /**
    * The forked child, or `undefined` under the restricted launcher.
    *
-   * `runas` launches a *detached* process, so there is no handle to send IPC
-   * over, observe `exit` on, or signal — file mode tracks liveness through the
-   * heartbeat file instead. Keeping the field optional makes that asymmetry
-   * visible in the type rather than hiding it behind a cast.
+   * Windows uses a native helper's private Job instead of a fork IPC channel;
+   * its status pipe tracks exits while file IPC carries source requests.
    */
   child?: HostChild
   /** The restricted launcher wrapper, present only in file mode. */
   wrapper?: RestrictedLaunch['wrapper']
+  launch?: RestrictedLaunch
+  settleInit?: (error?: Error) => void
   /** Directory holding this script's temp handoff file; removed on stop. */
   scratchDir: string
   sources: SourceInfo[]
@@ -199,6 +201,19 @@ export interface ExitInfo {
   reason: string
   /** True when the exit looked like a hard kill rather than a clean shutdown. */
   aborted: boolean
+}
+
+/** Machine-readable across independently bundled engine/host test modules. */
+export class SourceCleanupError extends Error {
+  readonly code = 'SOURCE_CLEANUP_UNCONFIRMED'
+  constructor(message: string, options?: ErrorOptions) {
+    super(`${message}；音源进程树回收未确认，临时目录已保留；请重启应用后重试`, options)
+    this.name = 'SourceCleanupError'
+  }
+}
+
+export function isSourceCleanupError(error: unknown): error is SourceCleanupError {
+  return error instanceof Error && (error as Partial<SourceCleanupError>).code === 'SOURCE_CLEANUP_UNCONFIRMED'
 }
 
 /**
@@ -304,7 +319,10 @@ export class SourceRuntimeHost {
     hostPath: string,
     callbacks: HostCallbacks,
     nodeExec: string = process.execPath,
-    transport: 'auto' | 'file' | 'ipc' = 'auto'
+    transport: 'auto' | 'file' | 'ipc' = 'auto',
+    private readonly launcherPath: string = process.resourcesPath
+      ? join(process.resourcesPath, 'native', 'source-launcher.exe')
+      : resolve(dirname(hostPath), '../../build/native/x64/source-launcher.exe')
   ) {
     this.hostPath = hostPath
     this.callbacks = callbacks
@@ -325,6 +343,7 @@ export class SourceRuntimeHost {
    * hold a process and 512 MB until the app exits.
    */
   async start(api: LoadedApi, scriptSource: string, signal?: AbortSignal): Promise<RuntimeState> {
+    const startedAt = Date.now()
     if (signal?.aborted) throw new Error('音源初始化已取消')
     /*
      * Check the host entry point before forking anything.
@@ -362,8 +381,10 @@ export class SourceRuntimeHost {
       fileMode: restricted
     }
 
+    try {
     if (restricted) {
       const launch = launchRestricted({
+        launcherPath: this.launcherPath,
         nodeExec: this.nodeExec,
         hostPath: this.hostPath,
         scriptPath,
@@ -372,6 +393,7 @@ export class SourceRuntimeHost {
         memoryLimitMb: SOURCE_MEMORY_LIMIT_MB
       })
       state.wrapper = launch.wrapper
+      state.launch = launch
     } else {
       /*
        * `[scriptPath, initPath]` — in that order, matching the contract
@@ -410,7 +432,12 @@ export class SourceRuntimeHost {
       })
     }
 
-    state.ready = this.createReadyPromise(state)
+    state.ready = this.createReadyPromise(state, Math.max(0, INIT_TIMEOUT_MS - (Date.now() - startedAt)))
+    } catch (error) {
+      try { await this.teardown(state, error instanceof Error ? error : new Error('音源后台启动失败')) }
+      catch (cleanupError) { throw new SourceCleanupError('音源后台启动失败', { cause: cleanupError }) }
+      throw error
+    }
 
     let cancelFailure: Error | undefined
     let cancelTeardown: Promise<void> | undefined
@@ -438,10 +465,12 @@ export class SourceRuntimeHost {
     } catch (error) {
       signal?.removeEventListener('abort', cancel)
       if (cancelFailure) {
-        await cancelTeardown
+        try { await cancelTeardown }
+        catch (cleanupError) { throw new SourceCleanupError(cancelFailure.message, { cause: cleanupError }) }
         throw cancelFailure
       }
-      await this.teardown(state, error instanceof Error ? error : new Error(String(error)))
+      try { await this.teardown(state, error instanceof Error ? error : new Error(String(error))) }
+      catch (cleanupError) { throw new SourceCleanupError(error instanceof Error ? error.message : '音源后台启动失败', { cause: cleanupError }) }
       throw error
     } finally {
       signal?.removeEventListener('abort', cancel)
@@ -455,7 +484,7 @@ export class SourceRuntimeHost {
    * whichever observes success or failure first wins — hence the idempotent
    * settle wrapper inside each.
    */
-  private createReadyPromise(state: RuntimeState): Promise<void> {
+  private createReadyPromise(state: RuntimeState, timeoutMs: number = INIT_TIMEOUT_MS): Promise<void> {
     let settled = false
     let failure: Error | undefined
 
@@ -466,7 +495,7 @@ export class SourceRuntimeHost {
         const error = new Error(`音源初始化超时（${INIT_TIMEOUT_MS / 1000}s）`)
         failure = error
         reject(error)
-      }, INIT_TIMEOUT_MS)
+      }, timeoutMs)
 
       const settle = (error?: Error): void => {
         if (settled) return
@@ -479,6 +508,7 @@ export class SourceRuntimeHost {
           resolve()
         }
       }
+      state.settleInit = settle
 
       // Stash the failure so `start` can reap with the real reason rather than
       // a generic one; the promise itself already carries it to the caller.
@@ -526,13 +556,17 @@ export class SourceRuntimeHost {
   }
 
   /**
-   * File mode: the child is detached, so everything is observed through the
-   * scratch directory — `ready.json`, `res-<id>.json`, and the heartbeat mtime.
+   * File mode: ready/responses/heartbeat use scratch; native helper status
+   * confirms managed creation and reports exits independently of polling.
    */
   private attachFileLifecycle(state: RuntimeState, settle: (error?: Error) => void): void {
     const dir = state.scratchDir
     let logOffset = 0
     let settled = false
+    let spawned = false
+    let terminal = false
+    let stderrBytes = 0
+    const decoder = new LauncherStatusDecoder(state.launch!.launchId)
     // LX specifies updateAlert at most once per script run, so the file
     // transport has one notification to consume rather than a stream/queue.
     let updateAlertRead = false
@@ -550,9 +584,14 @@ export class SourceRuntimeHost {
       this.pushLog(state, text)
     }
 
-    const watchdog = setInterval(() => this.checkHeartbeat(state, stopPoll), 1000)
+    const watchdog = setInterval(() => {
+      try { this.checkHeartbeat(state, stopPoll) }
+      catch (error) { fail(error instanceof Error ? error : new Error('音源通信失败')) }
+    }, 1000)
 
     const poll = setInterval(() => {
+      if (state.dead || state.wrapper?.exitCode !== null || state.wrapper?.signalCode !== null) return
+      try {
       // Console output first, so an init error arrives with its context.
       drainLog()
 
@@ -561,10 +600,11 @@ export class SourceRuntimeHost {
         try {
           if (existsSync(alertPath)) {
             updateAlertRead = true
-            const alert = JSON.parse(readFileSync(alertPath, 'utf8')) as { data?: unknown }
+            const alert = JSON.parse(readSourceFile(alertPath, 64 * 1024)) as { data?: unknown }
             this.callbacks.onUpdateAlert?.(state, alert.data)
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof SourceFileLimitError) throw error
           // A partial/invalid notification is ignored; it cannot block startup.
           updateAlertRead = true
         }
@@ -579,9 +619,11 @@ export class SourceRuntimeHost {
           stopPoll()
           return
         }
-        state.sources = normaliseSources((ready.sources ?? {}) as Record<string, RawSourceInfo>)
-        this.callbacks.onReady(state)
-        settleOnce()
+        if (spawned) {
+          state.sources = normaliseSources((ready.sources ?? {}) as Record<string, RawSourceInfo>)
+          this.callbacks.onReady(state)
+          settleOnce()
+        }
       }
 
       // A boot error that lands after ready.json already settled the lifecycle
@@ -614,6 +656,7 @@ export class SourceRuntimeHost {
         }
         pending.resolve(response.data)
       }
+      } catch (error) { fail(error instanceof Error ? error : new Error('音源通信失败')) }
     }, POLL_MS)
 
     function stopPoll(): void {
@@ -622,21 +665,52 @@ export class SourceRuntimeHost {
     }
 
     state.stopFileLifecycle = stopPoll
-
-    // The wrapper is the only process handle in file mode; if it cannot even be
-    // spawned there is nothing to poll for.
-    state.wrapper?.on('error', (error: Error) => {
+    const fail = (error: Error, code: number | null = null): void => {
+      if (state.dead) return
       state.dead = true
+      state.crashReason = error.message
       this.failAllPending(state, error)
       settleOnce(error)
       stopPoll()
       this.callbacks.onExit(state, {
-        code: null,
+        code,
         signal: null,
         intentional: false,
         reason: error.message,
         aborted: false
       })
+      void this.teardown(state, error).catch(() => this.pushLog(state, '音源回收未完成，临时目录已保留'))
+    }
+    state.wrapper?.stdout?.on('data', (chunk: Buffer) => {
+      if (state.dead) return
+      try {
+        const messages = decoder.push(chunk)
+        if (stderrBytes + decoder.receivedBytes > LAUNCHER_OUTPUT_BYTES) throw new Error('音源启动器协议失败')
+        // Process the whole batch before a ready poll can observe spawned.
+        for (const message of messages) {
+          if (message.type === 'spawned') spawned = true
+          else if (message.type === 'launchError') {
+            terminal = true
+            fail(new Error(`音源后台启动失败（${message.stage}，Windows ${message.win32Code}）`))
+          } else {
+            terminal = true
+            fail(new Error(`音源进程退出（退出码 ${message.exitCode}）`), message.exitCode)
+          }
+        }
+      } catch { fail(new Error('音源启动器协议失败')) }
+    })
+    state.wrapper?.stderr?.on('data', (chunk: Buffer) => {
+      if (state.dead) return
+      stderrBytes += chunk.length
+      if (stderrBytes + decoder.receivedBytes > LAUNCHER_OUTPUT_BYTES) fail(new Error('音源启动器协议失败'))
+    })
+    state.wrapper?.stdout?.on('end', () => {
+      if (state.dead) return
+      try { decoder.end() } catch { fail(new Error('音源启动器协议失败（状态管道中断）')) }
+    })
+    state.wrapper?.on('error', () => fail(new Error('音源后台启动失败（启动器无法运行）')))
+    state.wrapper?.on('close', () => {
+      if (!terminal && !state.dead) fail(new Error('音源后台启动失败（启动器提前退出）'))
     })
   }
 
@@ -677,6 +751,7 @@ export class SourceRuntimeHost {
       aborted: false
     })
     stopPoll()
+    void this.teardown(state, error).catch(() => this.pushLog(state, '音源回收未完成，临时目录已保留'))
   }
 
   private handleMessage(
@@ -822,15 +897,13 @@ export class SourceRuntimeHost {
 
   private async performTeardown(state: RuntimeState, reason: Error): Promise<void> {
     state.dead = true
+    state.settleInit?.(reason)
     state.stopFileLifecycle?.()
     this.failAllPending(state, reason)
 
-    // In file mode, removing the scratch directory is the shutdown signal: the
-    // child's next heartbeat write fails and it stops beating. The child itself
-    // is killed explicitly via the pid it reports in its heartbeat, because
-    // runas detaches it beyond the reach of wrapper.kill().
-    const hb = readHeartbeat(state.scratchDir)
-    if (hb?.pid) killChildTree(hb.pid)
+    // Stop the trusted helper's Job and wait before deleting transport files.
+    // Heartbeat contents are source-controlled and cannot authorize a kill.
+    if (state.launch) await state.launch.stop()
 
     try {
       rmSync(state.scratchDir, { recursive: true, force: true })
@@ -839,7 +912,7 @@ export class SourceRuntimeHost {
     }
 
     try {
-      state.wrapper?.kill()
+      if (!state.launch) state.wrapper?.kill()
     } catch {
       /* already gone */
     }

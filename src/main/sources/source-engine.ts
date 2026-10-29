@@ -56,7 +56,7 @@ import { assertPublicHttpUrl } from '../online/url-guard'
 import type { LoadedApi, SourceStore } from './source-store'
 import { validateSourceBeforeStart, type ValidationReport } from './source-validator'
 import { describeScript } from './script-header'
-import { SourceRuntimeHost, type ExitInfo, type RuntimeState } from './source-runtime-host'
+import { SourceRuntimeHost, isSourceCleanupError, type ExitInfo, type RuntimeState } from './source-runtime-host'
 import { MAX_LOG_LINES } from './source-runtime-host'
 import { CapabilityHealth } from '../online/capability-health'
 import { normalizeOnlineError, onlineContext, OnlineRequestError } from '../online/reliability-policy'
@@ -125,6 +125,12 @@ interface ScriptRuntime {
   transient?: boolean
 }
 
+interface PendingLaunch {
+  controller: AbortController
+  done: Promise<void>
+  failure?: Error
+}
+
 export interface SourceEngineEvents {
   providerChanged: (event: SourceChangeEvent & {kind:'runtime'}) => void
   /** A script finished init and reported its sources. */
@@ -143,12 +149,14 @@ export class SourceEngine {
   private readonly runtimeGenerations = new WeakMap<RuntimeState,number>()
   private readonly launches = new WeakMap<LoadedApi, { generation: number; transient: boolean }>()
   private readonly pendingStarts = new Map<string, Set<number>>()
+  private readonly pendingLaunches = new Map<string, Map<number, PendingLaunch>>()
   private readonly transientLaunches = new Map<string, Set<number>>()
   private readonly store: SourceStore
   /** Path to the forked host-process entry point. */
   private readonly hostPath: string
   /** Transport override used by protocol regression tests; production stays platform-selected. */
   private readonly transport: 'auto' | 'file' | 'ipc'
+  private readonly launcherPath?: string
   private readonly listeners = new Set<Partial<SourceEngineEvents>>()
   /**
    * Source id -> script ids that can serve it, in priority order.
@@ -161,11 +169,12 @@ export class SourceEngine {
    */
   private sourceProviders = new Map<SourceId, string[]>()
 
-  constructor(store: SourceStore, hostPath: string, transport: 'auto' | 'file' | 'ipc' = 'auto', options: { health?: CapabilityHealth } = {}) {
+  constructor(store: SourceStore, hostPath: string, transport: 'auto' | 'file' | 'ipc' = 'auto', options: { health?: CapabilityHealth; launcherPath?: string } = {}) {
     this.health = options.health ?? new CapabilityHealth()
     this.store = store
     this.hostPath = hostPath
     this.transport = transport
+    this.launcherPath = options.launcherPath
   }
 
   /**
@@ -219,7 +228,8 @@ export class SourceEngine {
       // Derive the transport from the platform, exactly as before: the
       // restricted launcher is what win32 uses and what the file transport
       // exists for.
-      this.transport
+      this.transport,
+      this.launcherPath
     )
     return this.host
   }
@@ -285,7 +295,8 @@ export class SourceEngine {
   async stopAll(): Promise<void> {
     const apiIds = new Set([
       ...this.runtimes.keys(),
-      ...this.pendingStarts.keys()
+      ...this.pendingStarts.keys(),
+      ...this.pendingLaunches.keys()
     ])
     const stops = [...apiIds].map((apiId) => this.stop(apiId))
     await Promise.all(stops)
@@ -296,10 +307,20 @@ export class SourceEngine {
     await this.startAll()
   }
 
-  private async start(api: LoadedApi, scriptOverride?: string, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) return
+  private async start(api: LoadedApi, scriptOverride?: string, externalSignal?: AbortSignal): Promise<void> {
+    if (externalSignal?.aborted) return
     const apiId = api.meta.id
     const generation = this.nextGeneration(apiId)
+    const controller = new AbortController()
+    const signal = controller.signal
+    const abort = (): void => controller.abort()
+    externalSignal?.addEventListener('abort', abort, { once: true })
+    let finish!: () => void
+    const done = new Promise<void>(resolve => { finish = resolve })
+    let pending = this.pendingLaunches.get(apiId)
+    if (!pending) this.pendingLaunches.set(apiId, (pending = new Map()))
+    const pendingLaunch: PendingLaunch = { controller, done }
+    pending.set(generation, pendingLaunch)
     const cancelGeneration = (): void => {
       if (signal?.aborted && this.isCurrentGeneration(apiId, generation)) this.nextGeneration(apiId)
     }
@@ -307,6 +328,9 @@ export class SourceEngine {
     this.trackPendingStart(apiId, generation, true)
     if (transient) this.trackTransientLaunch(apiId, generation, true)
     try {
+      // Generation invalidation prevents stale publication; cancellation also
+      // reaps its initializing process before a replacement may execute.
+      await this.cancelPendingLaunches(apiId, generation)
       // Do not route this through public stop(): this launch owns the new token,
       // while public stop must invalidate starts already in flight.
       await this.stopRuntime(apiId)
@@ -408,8 +432,10 @@ export class SourceEngine {
     try {
       state = await host.start(api, api.source, signal)
     } catch (error) {
+      if (isSourceCleanupError(error)) pendingLaunch.failure = error
       if (!this.isCurrentGeneration(apiId, generation) || !this.isEnabled(apiId) || signal?.aborted) {
         cancelGeneration()
+        if (pendingLaunch.failure) throw error
         if (transient) throw new Error('音源候选版本启动已取消', { cause: error })
         return
       }
@@ -503,8 +529,14 @@ export class SourceEngine {
       throw error
     }
     } finally {
+      externalSignal?.removeEventListener('abort', abort)
+      // A failed cleanup is terminal for this engine instance. Keep the small
+      // record so later stop/reload cannot silently bypass its unconfirmed tree.
+      if (!pendingLaunch.failure) pending.delete(generation)
+      if (!pending.size && this.pendingLaunches.get(apiId) === pending) this.pendingLaunches.delete(apiId)
       this.trackPendingStart(apiId, generation, false)
       if (transient) this.trackTransientLaunch(apiId, generation, false)
+      finish()
     }
   }
 
@@ -531,6 +563,9 @@ export class SourceEngine {
     const apiId = state.api.meta.id
     const runtime = this.runtimes.get(apiId)
     const launch = this.launches.get(state.api)
+    // Before registration host.start() owns the failure. Advancing generation
+    // here would make its catch treat a real boot failure as user cancellation.
+    if (!runtime && launch) return
     const generation=this.runtimeGenerations.get(state) ?? launch?.generation
     if((runtime&&runtime.host!==state)||(generation!==undefined&&!this.isCurrentGeneration(apiId,generation)))return
     if(!info.intentional)this.nextGeneration(apiId)
@@ -545,7 +580,6 @@ export class SourceEngine {
     if (info.intentional) return
 
     this.emit('scriptError', apiId, info.reason)
-    if (!info.aborted && info.code === 0) return
 
     // A source that came up and then died is no longer running, so leaving the
     // stored flag alone made the card read 已启用 forever: `scriptError` has no
@@ -628,8 +662,18 @@ export class SourceEngine {
   }
 
   async stop(apiId: string): Promise<void> {
-    this.nextGeneration(apiId)
-    await this.stopRuntime(apiId)
+    const generation = this.nextGeneration(apiId)
+    await Promise.all([this.cancelPendingLaunches(apiId, generation), this.stopRuntime(apiId)])
+  }
+
+  private async cancelPendingLaunches(apiId: string, beforeGeneration: number): Promise<void> {
+    const older = [...(this.pendingLaunches.get(apiId)?.entries() ?? [])]
+      .filter(([generation]) => generation < beforeGeneration)
+      .map(([, launch]) => launch)
+    for (const launch of older) launch.controller.abort()
+    await Promise.all(older.map(launch => launch.done))
+    const failed = older.find(launch => launch.failure)
+    if (failed) throw failed.failure
   }
 
   async quarantine(apiId: string, reason: string): Promise<void> {
@@ -646,8 +690,15 @@ export class SourceEngine {
   private async stopRuntime(apiId: string): Promise<void> {
     const runtime = this.runtimes.get(apiId)
     if (!runtime) return
-    this.runtimes.delete(apiId)
-    await this.teardown(runtime, new Error('音源已停止'))
+    // Keep ownership visible while teardown is pending. Concurrent starts must
+    // await the same host cleanup, not interpret an absent map entry as stopped.
+    try { await this.teardown(runtime, new Error('音源已停止')) }
+    catch (error) {
+      this.rebuildOwners()
+      this.emit('sourcesChanged', apiId)
+      throw error
+    }
+    if (this.runtimes.get(apiId) === runtime) this.runtimes.delete(apiId)
     this.rebuildOwners()
     this.emit('sourcesChanged', apiId)
   }
@@ -719,7 +770,6 @@ export class SourceEngine {
    */
   private async teardown(runtime: ScriptRuntime, reason: Error): Promise<void> {
     this.health.forgetProvider(runtime.api.meta.stableId ?? runtime.api.meta.id)
-    this.runtimes.delete(runtime.api.meta.id)
     await this.getHost().teardown(runtime.host, reason)
   }
 

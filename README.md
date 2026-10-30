@@ -2,28 +2,28 @@
 
 **面向 Windows 的桌面音乐播放器，支持本地曲库、在线音乐、歌词、音质选择下载和跨平台歌单导入。**
 
-当前版本：**0.7.0** · Windows x64 · Electron / Vue 3 / TypeScript
+当前版本：**0.7.1** · Windows x64 · Electron / Vue 3 / TypeScript
 
 ## 下载
 
 前往 [Releases](https://github.com/jun501389541/JJ-Music/releases) 获取发行版本：
 
-- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.7.0/JJ-Music-0.7.0-Setup-x64.exe)：按向导安装。
-- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.7.0/JJ-Music-0.7.0-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
-- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.7.0/SHA256SUMS.txt)。
+- [Windows 安装版](https://github.com/jun501389541/JJ-Music/releases/download/v0.7.1/JJ-Music-0.7.1-Setup-x64.exe)：按向导安装。
+- [Windows 免安装版 ZIP](https://github.com/jun501389541/JJ-Music/releases/download/v0.7.1/JJ-Music-0.7.1-Portable-x64.zip)：完整解压后运行 JJ Music.exe，保留全部文件。
+- [SHA-256 校验文件](https://github.com/jun501389541/JJ-Music/releases/download/v0.7.1/SHA256SUMS.txt)。
 
 运行发行版无需安装 Node.js。安装版支持在应用内检查更新，确认下载、校验后再确认重启安装；便携版需退出应用后手动更新，并保留原有 `data/`。安装版默认使用 `%APPDATA%/jj-music`，便携版默认使用 exe 旁的 `data/`，详细规则见下方“数据与限制”。
 
-### 0.7.0 更新重点
+### 0.7.1 更新重点
 
-- 新增实验性 DLNA 本地/在线渐进 MP3 投放；选择网卡后显式搜索，按设备能力提供控制。
-- 音源使用 Windows 无控制台原生受限启动器，保留受限令牌、Job 树回收及资源限制。
-- 修复远程停止归属、异步输出切换和音源文件通信上限，并更新依赖安全补丁。
-- 保留已有歌单搜索、批量管理、双通道交叉渐变与备份恢复功能。
+- 修复音源长期累计日志导致停止的问题，增加有界轮换及按代次续读。
+- 修复DLNA旧网卡搜索、接口刷新和输出切换覆盖新面板状态的问题。
+- 改善小窗口和长设备列表布局，支持原生空格、Enter、Tab及Esc操作。
+- 保留实验性DLNA投放、受限音源启动器、歌单管理和双通道交叉渐变功能。
 
 完整变更与验证边界见[更新日志](CHANGELOG.md)。
 
-DLNA默认不搜索，用户需选择网卡后显式搜索；不支持转码、HLS/DASH/DRM或未知编码。切换输出从曲首加载，切回本机保持暂停。当前只有模拟协议与独立成品界面验收，无真实设备兼容或听感结论。审查与发布验证见[0.7.0记录](docs/development/2026-10-29-v0.7.0-release.md)。
+DLNA默认不搜索，用户需选择网卡后显式搜索；不支持转码、HLS/DASH/DRM或未知编码。切换输出从曲首加载，切回本机保持暂停。当前只有模拟协议与独立成品界面验收，无真实设备兼容或听感结论。审查与发布验证见[0.7.1记录](docs/development/2026-10-30-v0.7.1-release.md)。
 0.1.1 至 0.1.5 的 Windows 包在部分电脑上无法启动音源（在线播放随之失效），请使用 0.1.6 及以后版本。
 
 ## 功能

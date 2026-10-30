@@ -8,7 +8,8 @@
  * Usage: node tools/build-test.mjs
  */
 import { build } from 'esbuild'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { parse, compileScript } from '@vue/compiler-sfc'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildSourceLauncher } from './build-source-launcher.mjs'
@@ -206,6 +207,25 @@ await build({
   outbase: join(repoRoot, 'src', 'renderer', 'src'),
   outdir: join(outDir, 'renderer'),
   outExtension: { '.js': '.js' }
+})
+
+// Exercise the real picker setup, with only the player/audio boundary substituted.
+// Vue stays external so the test's effectScope owns and disposes the real watches.
+const pickerPath = join(repoRoot, 'src/renderer/src/components/OutputDevicePicker.vue')
+const picker = parse(readFileSync(pickerPath, 'utf8'), { filename: pickerPath })
+if (picker.errors.length) throw new Error('Cannot parse production DLNA output picker')
+await build({
+  ...shared,
+  stdin: { contents: compileScript(picker.descriptor, { id: 'dlna-picker-test', isProd: true }).content,
+    loader: 'ts', resolveDir: dirname(pickerPath), sourcefile: pickerPath },
+  outfile: join(outDir, 'renderer/components/output-device-picker.js'),
+  external: [...shared.external, 'vue'],
+  plugins: [{ name: 'picker-player-fixture', setup(builder) {
+    builder.onResolve({ filter: /^\.\.\/stores\/player$/ }, () => ({ path: 'player', namespace: 'picker-fixture' }))
+    builder.onLoad({ filter: /.*/, namespace: 'picker-fixture' }, () => ({
+      contents: 'export const usePlayerStore = () => globalThis.__jj_dlna_picker_player', loader: 'js'
+    }))
+  } }]
 })
 
 // The 音源 host runs as a forked child process, so it is built as a standalone

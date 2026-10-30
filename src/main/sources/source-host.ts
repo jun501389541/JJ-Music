@@ -149,6 +149,26 @@ import { join } from 'node:path'
 
 const scratchDir = init.scratchDir
 
+// Keep normal diagnostics below the parent's defensive 1 MiB read cap.
+// Rename a complete generation so polling never observes a truncated header.
+let consoleBytes = 0
+let consoleGeneration = 0
+const writeConsole = (line: string): void => {
+  if (!scratchDir) return
+  const text = line.length > 8192 ? `${line.slice(0, 8191)}\n` : line
+  const bytes = Buffer.byteLength(text, 'utf8')
+  const path = join(scratchDir, 'console.log')
+  if (!consoleBytes || consoleBytes + bytes > 256 * 1024) {
+    const header = `#jj-console:${++consoleGeneration}\n`
+    writeFileSync(`${path}.rotate.tmp`, header + text, 'utf8')
+    renameSync(`${path}.rotate.tmp`, path)
+    consoleBytes = Buffer.byteLength(header, 'utf8') + bytes
+  } else {
+    appendFileSync(path, text, 'utf8')
+    consoleBytes += bytes
+  }
+}
+
 const fileSend = (message: Record<string, unknown>): void => {
   if (!scratchDir) return
   try {
@@ -188,7 +208,7 @@ const fileSend = (message: Record<string, unknown>): void => {
         }
         break
       case 'log': {
-        appendFileSync(join(scratchDir, 'console.log'), `[${message.level ?? 'log'}] ${message.message ?? ''}\n`, 'utf8')
+        writeConsole(`[${message.level ?? 'log'}] ${message.message ?? ''}\n`)
         break
       }
       case 'update-alert': {
@@ -196,7 +216,7 @@ const fileSend = (message: Record<string, unknown>): void => {
         const tmp = `${final}.tmp`
         writeFileSync(tmp, JSON.stringify({ data: message.data }), 'utf8')
         renameSync(tmp, final)
-        appendFileSync(join(scratchDir, 'console.log'), `[update] ${JSON.stringify(message.data)}\n`, 'utf8')
+        writeConsole(`[update] ${JSON.stringify(message.data)}\n`)
         break
       }
       default:

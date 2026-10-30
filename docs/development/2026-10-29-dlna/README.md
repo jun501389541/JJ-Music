@@ -1,11 +1,27 @@
 # DLNA 当前开发与验收状态
 
+当前收尾入口：[维护收尾与待验条件](../2026-10-30-maintenance-closeout.md)，集中列出已完成的模拟开发、最新累计证据及仍需真实条件的验收项。
+
+未发布交互修复：[输出切换轮次](../2026-10-30-dlna-picker-switch-cycle.md)处理切换期间关闭重开后被旧成功关闭的问题，保留后台切换锁及停止风险提示。
+
+未发布键盘补充：[空格与Esc交互](../2026-10-30-dlna-keyboard.md)已完成成品原生Space、Tab、Enter、Esc及焦点验证；累计141/141套件、5/5门禁与最新面板12/12测试通过。此前受额度限制的独立复核已补齐，未发现重要问题；实机验收仍待完成。
+
+当前交付：已通过[PR #5](https://github.com/jun501389541/JJ-Music/pull/5)合并main并公开发布[v0.7.0](https://github.com/jun501389541/JJ-Music/releases/tag/v0.7.0)。最终发布候选139/139套件及5/5门禁通过，精确成品、Windows CI、隔离安装升级、六资产签名和摘要均完成核验，详见[发布记录](../2026-10-29-v0.7.0-release.md)。下文138套件与功能分支状态属于发布前历史，不代表当前尚未发布。
+
 本地与在线渐进MP3投放的生产模块、IPC、远程引擎和输出面板已实现，验证使用模拟设备和独立资料。用户暂时没有真实设备；真实兼容、网络可达、防火墙、多网卡及听感未验证，真实音源仍暂不运行。
 
 入口：播放器“本机输出”→选择网卡→显式搜索→选择设备。启动应用或打开面板不会自动搜索。切换失败不自动让本机发声，停止未确认需用户明确处理风险；返回本机保持暂停。
 
+未发布补充：[选择前提示](../2026-10-29-dlna-output-hints.md)已在开发分支补齐实验性、从曲首加载和实机未验说明；不属于正式0.7.0资产。
+
+未发布布局修复：[面板滚动](../2026-10-29-dlna-panel-layout.md)已用940×620视口和24项纯布局夹具验证长列表及长名称；不是实际设备发现或控制验收。
+
+未发布累计状态：[网卡结果隔离](../2026-10-29-dlna-picker-interface.md)修复旧设备残留与迟到搜索写回，累计141/141套件、5/5门禁、独立复核及新成品面板/布局检查通过；仍未提交或发布。
+
+最新补充：[重开网卡刷新](../2026-10-29-dlna-picker-refresh.md)清理已消失选择并隔离旧打开轮次响应，真实SFC脚本10/10回归、累计141/141套件和5/5门禁通过；成品重开无自动发现，仍无实体设备结论。
+
 当前支持渐进MP3及设备声明可用的暂停、定位、音量。在线目标与解析档位分开，设备兼容时使用320k/128k，不转码。HLS/DASH/DRM、未知编码、完整MediaServer/NAS浏览、AirPlay和多房间均未开放。没有实机自然结束配置时，STOPPED不自动推进队列。
 
-详细证据：[本地阶段](D1-D3.md)、[在线与控制](D4-D6.md)、[网络提示](D6-network-errors.md)。历史阶段记录保留当时状态，不替代当前记录。最新累计 `npm run verify` 退出0：类型检查、生产构建、138/138套件和5/5门禁通过，日志 `.cache/dlna-cumulative-verify.log`。最新成品 `.cache/dlna-errors-final/win-unpacked` 资源校验通过，日志 `.cache/dlna-cumulative-resources.log`；面板证据 `.cache/dlna-ui-smoke/run-CsOyNA`，发现调用0、console错误0。
+详细证据：[本地阶段](D1-D3.md)、[在线与控制](D4-D6.md)、[网络提示](D6-network-errors.md)。历史阶段记录保留当时状态，不替代当前记录。发布前累计`npm run verify`退出0：类型检查、生产构建、138/138套件和5/5门禁通过，日志`.cache/dlna-cumulative-verify.log`。发布前成品`.cache/dlna-errors-final/win-unpacked`资源校验通过，日志`.cache/dlna-cumulative-resources.log`；面板证据`.cache/dlna-ui-smoke/run-CsOyNA`，发现调用0、console错误0。
 
-用户已明确授权提交并推送，本轮代码与文档交付到 `codex/windowless-source-launcher` 功能分支；未合并main、未发布。GraphFlow连接已恢复，增量索引已完成。分项记录中的未提交和连接关闭保留为历史时点。
+发布前代码与文档曾交付到`codex/windowless-source-launcher`，现已合并并发布；分项记录中的未提交、未合并、未发布和连接关闭均保留为历史时点，不替代顶部当前状态。真实设备与听感仍未验证。

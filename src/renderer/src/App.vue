@@ -569,6 +569,8 @@ function onKeydown(event: KeyboardEvent): void {
   // Never hijack typing.
   if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
   if (target?.isContentEditable) return
+  // Space activates the focused native button on keyup.
+  if (target?.tagName === 'BUTTON' && event.code === 'Space') return
 
   const mod = event.ctrlKey || event.metaKey
 

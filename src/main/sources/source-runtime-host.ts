@@ -562,6 +562,7 @@ export class SourceRuntimeHost {
   private attachFileLifecycle(state: RuntimeState, settle: (error?: Error) => void): void {
     const dir = state.scratchDir
     let logOffset = 0
+    let logGeneration: string | undefined
     let settled = false
     let spawned = false
     let terminal = false
@@ -578,8 +579,9 @@ export class SourceRuntimeHost {
     }
 
     const drainLog = (): void => {
-      const { text, nextOffset } = readConsoleLog(dir, logOffset)
+      const { text, nextOffset, generation } = readConsoleLog(dir, logOffset, logGeneration)
       logOffset = nextOffset
+      logGeneration = generation
       if (!text) return
       this.pushLog(state, text)
     }

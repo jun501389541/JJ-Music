@@ -172,14 +172,21 @@ export function readHeartbeat(scratchDir: string): Heartbeat | undefined {
  *
  * Console output goes to `console.log` (rewritten by the host into a file)
  * because stdio is not available across the `runas` boundary.
+ * A generation change resets the character cursor even if the replacement
+ * file is longer than the previous offset. Unmarked older files still work.
  */
-export function readConsoleLog(scratchDir: string, fromOffset: number): { text: string; nextOffset: number } {
+export function readConsoleLog(scratchDir: string, fromOffset: number, previousGeneration?: string): { text: string; nextOffset: number; generation?: string } {
   const path = join(scratchDir, 'console.log')
   if (!existsSync(path)) return { text: '', nextOffset: fromOffset }
   try {
     const content = readSourceFile(path, 1024 * 1024)
-    const text = content.length > fromOffset ? content.slice(fromOffset) : ''
-    return { text, nextOffset: content.length }
+    const header = /^#jj-console:([0-9]{1,16})\n/.exec(content)
+    const generation = header?.[1]
+    const start = generation !== previousGeneration || fromOffset > content.length
+      ? header?.[0].length ?? 0
+      : Math.max(header?.[0].length ?? 0, fromOffset)
+    const text = content.slice(start)
+    return { text, nextOffset: content.length, ...(generation !== undefined ? { generation } : {}) }
   } catch (error) {
     if (error instanceof SourceFileLimitError) throw error
     return { text: '', nextOffset: fromOffset }
